@@ -129,6 +129,15 @@ recorded exception follows the pinned upstream environment; it is not evidence
 that PyIQA, Qwen, or restoration inference ran correctly. See
 [ADR 0005](adr/0005-audited-inference-metadata-overrides.md).
 
+Immediately before each real smoke or integration run, the wrapper reruns the
+same four audits into the attempt's `runtime-environments/` directory. The
+schema-v2 runtime preflight binds those receipt hashes and requires their full
+distribution maps, Python identities, locks, import/entrypoint probes,
+overrides, status, and empty issue lists to equal the bootstrap baselines. A
+fresh receipt must belong to the same attempt and be no older than that
+attempt's recorded start. Historical manifest review verifies the bound hashes
+without applying a wall-clock expiry.
+
 The aggregate receipt starts with `status: running` and becomes `passed` only
 after the complete hook succeeds. An ordinary failure rewrites it with
 `status: failed`, a return code, and the statement that it supports no
@@ -185,18 +194,21 @@ evidence in this order:
    outcome. Both bootstrap receipts must be `passed`. Inspect all four copied
    environment receipts; the 4KAgent receipt must contain only the exact
    audited PyIQA override described above.
-2. `weights-receipt.json`: fixed revisions, known digest checks, per-file
+2. four per-attempt `runtime-environments/*.json` receipts and the
+   schema-v2 `runtime-preflight.json`: exact match to the bootstrap baselines,
+   same-attempt paths, fresh timestamps, and bound hashes.
+3. `weights-receipt.json`: fixed revisions, known digest checks, per-file
    measured hashes, and `recorded_manual` for the no-digest DepictQA delta.
-3. `materialization-receipt.json`: binding to the weight receipt and project
+4. `materialization-receipt.json`: binding to the weight receipt and project
    commit, fixed layouts, no checkout mutation, and no errors.
-4. `execution.json`: fresh output, successful command, complete GPU samples,
+5. `execution.json`: fresh output, successful command, complete GPU samples,
    and extracted non-mock model evidence.
-5. copied ScaleGuard `manifest.json`: real backends, completed 4KAgent event,
+6. copied ScaleGuard `manifest.json`: real backends, completed 4KAgent event,
    at least one real CoZ candidate when required, explicit decisions, final
    output hash, and no hidden failure.
-6. raw stdout/stderr and CoZ protocol logs: no ignored model, device, OOM, or
+7. raw stdout/stderr and CoZ protocol logs: no ignored model, device, OOM, or
    service-lifecycle errors.
-7. diagnostics archive: checksum passes and a human reviewed redaction before
+8. diagnostics archive: checksum passes and a human reviewed redaction before
    transfer.
 
 A failed attempt remains evidence. Keep its directory, diagnose the recorded

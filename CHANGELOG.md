@@ -29,6 +29,10 @@ and intends to use semantic versioning after its first public release.
   handling.
 - AutoDL dual-4090 preflight, bootstrap, weight materialization, smoke,
   integration, diagnostics, and external-gate evidence contracts.
+- Per-attempt runtime re-attestation that binds current distributions,
+  dependency checks, offline imports, and 4KAgent tool-entrypoint probes to
+  schema-v2 preflight evidence, with single-open regular-file snapshots and
+  private atomic no-clobber receipt publication.
 - CPU unit, contract, integration, and evaluation tests plus locked CI.
 - Architecture, installation, reproduction, evaluation, limitation,
   development, security, contribution, citation, notice, and status material.

@@ -71,6 +71,9 @@ receipt 与固定 marker。发布方没有提供该人工文件的 digest，因�
   中的 DepictQA 只作为 4KAgent 传递依赖验证；
 - 同一 attempt 的 `materialization-receipt.json` 为 `passed`，与固定
   marker 内容一致，并证明权重布局未修改两个审计 checkout；
+- smoke 与 integration 各自的 `runtime-environments/` 包含四份 fresh
+  receipt，`runtime-preflight.json` 为 schema v2，并证明当前 distributions、
+  imports 和 4KAgent 工具入口仍与 bootstrap 基线精确一致；
 - smoke 与 integration 的 `execution.json` 为 `passed`，原始日志、输出哈希
   和每卡显存采样同时存在；
 - `collect_diagnostics.sh` 输出压缩包及其 `.sha256`，人工检查压缩包后再回传；

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -98,6 +99,141 @@ controller:
     assert payload["output"] == str(output.resolve())
     assert payload["run_dir"] == str((run_root / "命令行-run").resolve())
     assert output.is_file()
+
+
+def test_cli_requires_recent_runtime_preflight_for_a_real_run(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = tmp_path / "runtime.yaml"
+    config.write_text(
+        f"""
+runtime:
+  run_root: "{tmp_path / "runs"}"
+fourkagent:
+  mode: fake
+coz:
+  mode: fake
+controller:
+  target_factor: 1
+  color_strategy: none
+""",
+        encoding="utf-8",
+    )
+    source = make_image(tmp_path / "input.png")
+    output = tmp_path / "output.png"
+    preflight = tmp_path / "runtime-preflight.json"
+    observed: list[bool] = []
+    config_digest = hashlib.sha256(config.read_bytes()).hexdigest()
+
+    def validate(
+        receipt_path: Path,
+        *,
+        config_path: Path | None,
+        project_root: Path,
+        require_recent: bool = False,
+    ) -> dict[str, object]:
+        assert receipt_path == preflight
+        assert config_path == config
+        assert project_root == PROJECT_ROOT
+        observed.append(require_recent)
+        return {
+            "runtime_evidence_verified": True,
+            "runtime_config_sha256": config_digest,
+        }
+
+    monkeypatch.setenv("SCALEGUARD_PROJECT_ROOT", str(PROJECT_ROOT))
+    monkeypatch.setattr("scaleguard.cli.validate_runtime_preflight", validate)
+
+    exit_code = main(
+        [
+            "run",
+            "--config",
+            str(config),
+            "--input",
+            str(source),
+            "--output",
+            str(output),
+            "--runtime-preflight",
+            str(preflight),
+            "--run-id",
+            "recent-preflight",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.err == ""
+    assert observed == [True]
+
+
+def test_cli_rejects_an_atomic_config_replacement_before_starting_backends(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = tmp_path / "runtime.yaml"
+    config.write_text(
+        f"""
+runtime:
+  run_root: "{tmp_path / "runs"}"
+controller:
+  target_factor: 1
+  color_strategy: none
+""",
+        encoding="utf-8",
+    )
+    validated_digest = hashlib.sha256(config.read_bytes()).hexdigest()
+    replacement = tmp_path / "replacement.yaml"
+    replacement.write_text(
+        f"""
+runtime:
+  run_root: "{tmp_path / "unexpected-runs"}"
+controller:
+  target_factor: 8
+""",
+        encoding="utf-8",
+    )
+    source = make_image(tmp_path / "input.png")
+    output = tmp_path / "output.png"
+    preflight = tmp_path / "runtime-preflight.json"
+
+    def validate(*_args: object, **_kwargs: object) -> dict[str, object]:
+        replacement.replace(config)
+        return {
+            "runtime_evidence_verified": True,
+            "runtime_config_sha256": validated_digest,
+        }
+
+    def reject_backend_start(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("backends must not start for a replaced config")
+
+    monkeypatch.setenv("SCALEGUARD_PROJECT_ROOT", str(PROJECT_ROOT))
+    monkeypatch.setattr("scaleguard.cli.validate_runtime_preflight", validate)
+    monkeypatch.setattr("scaleguard.cli.build_backends", reject_backend_start)
+
+    exit_code = main(
+        [
+            "run",
+            "--config",
+            str(config),
+            "--input",
+            str(source),
+            "--output",
+            str(output),
+            "--runtime-preflight",
+            str(preflight),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert captured.out == ""
+    assert "config snapshot digest disagrees" in captured.err
+    assert not output.exists()
 
 
 def test_cli_refuses_to_overwrite_an_existing_output(

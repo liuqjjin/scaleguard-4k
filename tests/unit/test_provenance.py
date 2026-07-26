@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+import scaleguard.provenance as provenance
 from scaleguard.provenance import (
     BOOTSTRAP_LOCK_PATHS,
     ENVIRONMENT_LOCK_PATHS,
@@ -37,6 +40,7 @@ class RuntimeEvidence:
     source_file: Path
     layout_file: Path
     preflight: Path
+    runtime_environments: dict[str, Path]
     commit: str
 
 
@@ -301,12 +305,26 @@ def runtime_evidence(tmp_path: Path) -> RuntimeEvidence:
     _write_json(materialization, marker_document)
 
     preflight = root / ".runtime" / "receipts" / "runtime-preflight.json"
+    runtime_environment_root = preflight.parent / "runtime-environments"
+    runtime_environments: dict[str, Path] = {}
+    runtime_environment_records: dict[str, dict[str, str]] = {}
+    for name in ENVIRONMENT_LOCK_PATHS:
+        baseline = root / ".runtime" / "receipts" / f"{name}.json"
+        current = runtime_environment_root / f"{name}.json"
+        _write_json(current, _read_json(baseline))
+        runtime_environments[name] = current
+        runtime_environment_records[name] = {
+            "path": str(current.resolve()),
+            "sha256": sha256(current),
+            "status": _read_json(current)["status"],
+        }
     _write_json(
         preflight,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "status": "passed",
             "created_at_utc": _NOW,
+            "stage_started_at_utc": _NOW,
             "project_commit": commit,
             "config": {
                 "path": str(config.resolve()),
@@ -317,6 +335,7 @@ def runtime_evidence(tmp_path: Path) -> RuntimeEvidence:
                 "path": str(bootstrap.resolve()),
                 "sha256": sha256(bootstrap),
             },
+            "runtime_environments": runtime_environment_records,
             "materialization": {
                 "path": str(materialization.resolve()),
                 "sha256": sha256(materialization),
@@ -343,6 +362,7 @@ def runtime_evidence(tmp_path: Path) -> RuntimeEvidence:
         source_file=source_file,
         layout_file=layout_file,
         preflight=preflight,
+        runtime_environments=runtime_environments,
         commit=commit,
     )
 
@@ -367,6 +387,33 @@ def _refresh_preflight_record(
 
 def _refresh_bootstrap(evidence: RuntimeEvidence) -> None:
     _refresh_preflight_record(evidence, "bootstrap", evidence.bootstrap)
+
+
+def _refresh_runtime_environment(
+    evidence: RuntimeEvidence,
+    name: str,
+) -> None:
+    path = evidence.runtime_environments[name]
+    document = _read_json(path)
+    preflight = _read_json(evidence.preflight)
+    preflight["runtime_environments"][name] = {
+        "path": str(path.resolve()),
+        "sha256": sha256(path),
+        "status": document.get("status"),
+    }
+    _write_json(evidence.preflight, preflight)
+
+
+def _freeze_now(
+    monkeypatch: pytest.MonkeyPatch,
+    value: datetime,
+) -> None:
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:
+            return value if tz is not None else value.replace(tzinfo=None)
+
+    monkeypatch.setattr("scaleguard.provenance.datetime", FrozenDateTime)
 
 
 def _rebind_weight_chain(evidence: RuntimeEvidence) -> None:
@@ -401,6 +448,9 @@ def test_runtime_preflight_accepts_a_complete_current_evidence_chain(
         "runtime_preflight_receipt": str(runtime_evidence.preflight.resolve()),
         "runtime_preflight_sha256": sha256(runtime_evidence.preflight),
         "bootstrap_receipt_sha256": sha256(runtime_evidence.bootstrap),
+        "runtime_environment_receipt_sha256": {
+            name: sha256(path) for name, path in runtime_evidence.runtime_environments.items()
+        },
         "materialization_receipt_sha256": sha256(runtime_evidence.materialization),
         "materialization_marker_sha256": sha256(runtime_evidence.marker),
         "source_weights_receipt_sha256": sha256(runtime_evidence.weights_receipt),
@@ -408,7 +458,101 @@ def test_runtime_preflight_accepts_a_complete_current_evidence_chain(
         "project_commit": runtime_evidence.commit,
         "project_root": str(runtime_evidence.root.resolve()),
         "runtime_config_path": str(runtime_evidence.config.resolve()),
+        "runtime_config_sha256": sha256(runtime_evidence.config),
+        "runtime_stage_started_at": "2026-07-27T00:00:00+00:00",
     }
+
+
+def test_runtime_preflight_opens_each_json_receipt_once(
+    runtime_evidence: RuntimeEvidence,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt_paths = {
+        runtime_evidence.preflight.resolve(),
+        runtime_evidence.bootstrap.resolve(),
+        runtime_evidence.materialization.resolve(),
+        runtime_evidence.marker.resolve(),
+        runtime_evidence.weights_receipt.resolve(),
+        (runtime_evidence.root / "weights-lock.json").resolve(),
+        (runtime_evidence.root / "environments" / "uv.version").resolve(),
+        *(
+            runtime_evidence.root / ".runtime" / "receipts" / f"{name}.json"
+            for name in ENVIRONMENT_LOCK_PATHS
+        ),
+        *(path.resolve() for path in runtime_evidence.runtime_environments.values()),
+    }
+    open_counts = dict.fromkeys(receipt_paths, 0)
+    real_open = os.open
+
+    def count_receipt_open(path: os.PathLike[str] | str, flags: int) -> int:
+        resolved = Path(path).resolve()
+        if resolved in open_counts:
+            open_counts[resolved] += 1
+        return real_open(path, flags)
+
+    monkeypatch.setattr("scaleguard.provenance.os.open", count_receipt_open)
+
+    assert _validate(runtime_evidence)["runtime_evidence_verified"] is True
+    assert open_counts
+    assert set(open_counts.values()) == {1}
+
+
+def test_runtime_preflight_carries_one_atomic_receipt_snapshot_to_its_result(
+    runtime_evidence: RuntimeEvidence,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_digest = sha256(runtime_evidence.preflight)
+    real_snapshot = provenance._load_snapshot
+    replaced = False
+
+    def replace_after_snapshot(path: Path, label: str) -> tuple[dict[str, Any], str]:
+        nonlocal replaced
+        document, digest = real_snapshot(path, label)
+        if path == runtime_evidence.preflight.resolve() and not replaced:
+            replacement = dict(document)
+            replacement["status"] = "failed"
+            replacement_path = path.with_name(".runtime-preflight.replacement.json")
+            _write_json(replacement_path, replacement)
+            replacement_path.replace(path)
+            replaced = True
+        return document, digest
+
+    monkeypatch.setattr(provenance, "_load_snapshot", replace_after_snapshot)
+
+    result = _validate(runtime_evidence)
+
+    assert replaced is True
+    assert result["runtime_evidence_verified"] is True
+    assert result["runtime_preflight_sha256"] == original_digest
+    assert sha256(runtime_evidence.preflight) != original_digest
+    assert _read_json(runtime_evidence.preflight)["status"] == "failed"
+
+
+def test_runtime_preflight_rejects_atomic_replacement_during_a_receipt_snapshot(
+    runtime_evidence: RuntimeEvidence,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = runtime_evidence.runtime_environments["coz"].resolve()
+    replacement = runtime_evidence.preflight.parent / "coz-atomic-replacement.json"
+    replacement_document = _read_json(target)
+    replacement_document["issues"] = [{"issue": "atomic replacement"}]
+    _write_json(replacement, replacement_document)
+    real_open = os.open
+    replaced = False
+
+    def replace_after_open(path: os.PathLike[str] | str, flags: int) -> int:
+        nonlocal replaced
+        descriptor = real_open(path, flags)
+        if Path(path) == target and not replaced:
+            replacement.replace(target)
+            replaced = True
+        return descriptor
+
+    monkeypatch.setattr("scaleguard.provenance.os.open", replace_after_open)
+
+    with pytest.raises(RuntimePreflightError, match="changed while it was being read"):
+        _validate(runtime_evidence)
+    assert replaced is True
 
 
 def test_runtime_preflight_rejects_duplicate_receipt_keys(
@@ -422,6 +566,201 @@ def test_runtime_preflight_rejects_duplicate_receipt_keys(
 
     with pytest.raises(RuntimePreflightError, match="duplicate JSON object key 'status'"):
         _validate(runtime_evidence)
+
+
+def test_runtime_preflight_requires_exactly_four_fresh_environment_receipts(
+    runtime_evidence: RuntimeEvidence,
+) -> None:
+    preflight = _read_json(runtime_evidence.preflight)
+    preflight["runtime_environments"].pop("coz")
+    _write_json(runtime_evidence.preflight, preflight)
+
+    with pytest.raises(RuntimePreflightError, match="unexpected runtime environment set"):
+        _validate(runtime_evidence)
+
+
+def test_runtime_preflight_rejects_a_fresh_receipt_outside_the_attempt_directory(
+    runtime_evidence: RuntimeEvidence,
+) -> None:
+    outside = runtime_evidence.preflight.parent / "coz-current.json"
+    _write_json(outside, _read_json(runtime_evidence.runtime_environments["coz"]))
+    preflight = _read_json(runtime_evidence.preflight)
+    preflight["runtime_environments"]["coz"].update(
+        {
+            "path": str(outside.resolve()),
+            "sha256": sha256(outside),
+        }
+    )
+    _write_json(runtime_evidence.preflight, preflight)
+
+    with pytest.raises(RuntimePreflightError, match="references an unexpected receipt"):
+        _validate(runtime_evidence)
+
+
+def test_runtime_preflight_rejects_a_symlinked_fresh_environment_receipt(
+    runtime_evidence: RuntimeEvidence,
+) -> None:
+    fresh = runtime_evidence.runtime_environments["coz"]
+    fresh.unlink()
+    fresh.symlink_to(runtime_evidence.root / ".runtime" / "receipts" / "coz.json")
+
+    with pytest.raises(RuntimePreflightError, match="must not be a symbolic link"):
+        _validate(runtime_evidence)
+
+
+@pytest.mark.parametrize("kind", ["directory", "fifo"])
+def test_runtime_preflight_rejects_non_regular_fresh_environment_receipts(
+    runtime_evidence: RuntimeEvidence,
+    kind: str,
+) -> None:
+    fresh = runtime_evidence.runtime_environments["coz"]
+    fresh.unlink()
+    if kind == "directory":
+        fresh.mkdir()
+    else:
+        os.mkfifo(fresh)
+
+    with pytest.raises(RuntimePreflightError, match="is not a regular file"):
+        _validate(runtime_evidence)
+
+
+def test_runtime_preflight_wraps_evidence_open_errors(
+    runtime_evidence: RuntimeEvidence,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_open = os.open
+
+    def fail_preflight_open(path: os.PathLike[str] | str, flags: int) -> int:
+        if Path(path) == runtime_evidence.preflight:
+            raise PermissionError("blocked by fixture")
+        return real_open(path, flags)
+
+    monkeypatch.setattr("scaleguard.provenance.os.open", fail_preflight_open)
+
+    with pytest.raises(RuntimePreflightError, match="cannot open runtime preflight receipt"):
+        _validate(runtime_evidence)
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("status", "has an invalid status"),
+        ("python", "python differs from the bootstrap baseline"),
+        ("locks", "locks differs from the bootstrap baseline"),
+        ("expected_packages", "expected_packages differs from the bootstrap baseline"),
+        ("packages", "packages differs from the bootstrap baseline"),
+        ("runtime_imports", "package audit is inconsistent"),
+        ("audited_overrides", "package audit is inconsistent"),
+        ("issues", "receipt content mismatch"),
+        ("unexpected", "receipt content mismatch"),
+    ],
+)
+def test_runtime_preflight_rejects_fresh_environment_identity_drift(
+    runtime_evidence: RuntimeEvidence,
+    case: str,
+    message: str,
+) -> None:
+    name = "scaleguard"
+    path = runtime_evidence.runtime_environments[name]
+    document = _read_json(path)
+    if case == "status":
+        document["status"] = "failed"
+    elif case == "python":
+        document["python"]["platform"] = "Linux-6.9.0-x86_64"
+    elif case == "locks":
+        document["locks"][0]["pinned_packages"] = 2
+    elif case == "expected_packages":
+        document["expected_packages"]["extra-package"] = "9.0"
+        document["packages"]["extra-package"] = "9.0"
+    elif case == "packages":
+        document["packages"]["extra-package"] = "9.0"
+    elif case == "runtime_imports":
+        document["runtime_imports"].append({"module": "forged", "symbols": []})
+    elif case == "audited_overrides":
+        document["audited_overrides"] = [{"package": "forged"}]
+    elif case == "issues":
+        document["issues"] = [{"issue": "forged"}]
+    elif case == "unexpected":
+        document["unexpected"] = "forged"
+    else:  # pragma: no cover - the parameter table is exhaustive
+        raise AssertionError(case)
+    _write_json(path, document)
+    _refresh_runtime_environment(runtime_evidence, name)
+
+    with pytest.raises(RuntimePreflightError, match=message):
+        _validate(runtime_evidence)
+
+
+def test_runtime_preflight_rejects_extra_attempt_environment_files(
+    runtime_evidence: RuntimeEvidence,
+) -> None:
+    extra = runtime_evidence.preflight.parent / "runtime-environments" / "stale.json"
+    _write_json(extra, {"status": "stale"})
+
+    with pytest.raises(RuntimePreflightError, match="unexpected file set"):
+        _validate(runtime_evidence)
+
+
+def test_runtime_preflight_binds_fresh_receipts_to_the_stage_window(
+    runtime_evidence: RuntimeEvidence,
+) -> None:
+    path = runtime_evidence.runtime_environments["coz"]
+    document = _read_json(path)
+    document["created_at_utc"] = "2026-07-26T23:59:59Z"
+    _write_json(path, document)
+    _refresh_runtime_environment(runtime_evidence, "coz")
+
+    with pytest.raises(RuntimePreflightError, match="not created during this preflight stage"):
+        _validate(runtime_evidence)
+
+
+def test_runtime_preflight_rejects_a_stage_start_after_receipt_creation(
+    runtime_evidence: RuntimeEvidence,
+) -> None:
+    preflight = _read_json(runtime_evidence.preflight)
+    preflight["stage_started_at_utc"] = "2026-07-27T00:00:01Z"
+    _write_json(runtime_evidence.preflight, preflight)
+
+    with pytest.raises(RuntimePreflightError, match="predates its stage start"):
+        _validate(runtime_evidence)
+
+
+@pytest.mark.parametrize(
+    ("clock_offset", "accepted"),
+    [
+        (timedelta(minutes=10), True),
+        (timedelta(minutes=16), False),
+        (-timedelta(minutes=2), False),
+    ],
+)
+def test_runtime_preflight_only_applies_age_limits_to_real_run_validation(
+    runtime_evidence: RuntimeEvidence,
+    monkeypatch: pytest.MonkeyPatch,
+    clock_offset: timedelta,
+    accepted: bool,
+) -> None:
+    receipt_time = datetime(2026, 7, 27, tzinfo=timezone.utc)
+    _freeze_now(monkeypatch, receipt_time + clock_offset)
+
+    assert _validate(runtime_evidence)["runtime_evidence_verified"] is True
+    if accepted:
+        assert (
+            validate_runtime_preflight(
+                runtime_evidence.preflight,
+                config_path=runtime_evidence.config,
+                project_root=runtime_evidence.root,
+                require_recent=True,
+            )["runtime_evidence_verified"]
+            is True
+        )
+    else:
+        with pytest.raises(RuntimePreflightError, match="not recent enough"):
+            validate_runtime_preflight(
+                runtime_evidence.preflight,
+                config_path=runtime_evidence.config,
+                project_root=runtime_evidence.root,
+                require_recent=True,
+            )
 
 
 def test_materialization_source_resolution_supports_search_and_override(

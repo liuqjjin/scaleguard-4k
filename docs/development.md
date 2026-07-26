@@ -220,6 +220,12 @@ After a lock change, run the environment-audit unit tests and exercise
 successful receipt validates installation identity only; it does not promote
 the project evidence level or prove GPU model behavior.
 
+The real-run wrapper must also rerun all four audits with isolated interpreters
+and bind the fresh receipts into schema-v2 runtime preflight evidence. Do not
+replace this check with a historical bootstrap hash or a partial `pip freeze`;
+the complete distribution map and declared import/entrypoint probes are the
+runtime contract.
+
 Run `bash scripts/security/audit_runtime_locks.sh` before review. The two exact
 unfixed advisories and their isolation boundaries are documented in
 [ADR 0007](adr/0007-isolate-unpatched-legacy-dependencies.md); do not add a

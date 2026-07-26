@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -24,10 +25,37 @@ audit_dependencies: Any = _AUDIT.audit_dependencies
 pinned_requirements: Any = _AUDIT.pinned_requirements
 exact_pin: Any = _AUDIT.exact_pin
 audit_4kagent_entrypoints: Any = _AUDIT.audit_4kagent_entrypoints
+write_atomic: Any = _AUDIT.write_atomic
 
 
 def _package(name: str, version: str, *requirements: str) -> InstalledPackage:
     return InstalledPackage(name=name, version=version, requirements=requirements)
+
+
+def test_environment_receipt_writer_uses_a_private_exclusive_temporary_file(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "must-not-change.txt"
+    target.write_text("sentinel\n", encoding="utf-8")
+    fixed_temporary = tmp_path / ".environment.json.tmp"
+    fixed_temporary.symlink_to(target)
+    output = tmp_path / "environment.json"
+
+    write_atomic(output, {"schema_version": 1, "status": "passed"})
+
+    assert target.read_text(encoding="utf-8") == "sentinel\n"
+    assert fixed_temporary.is_symlink()
+    assert json.loads(output.read_text(encoding="utf-8")) == {
+        "schema_version": 1,
+        "status": "passed",
+    }
+    assert output.stat().st_mode & 0o777 == 0o600
+
+    linked_output = tmp_path / "linked.json"
+    linked_output.symlink_to(target)
+    with pytest.raises(RuntimeError, match="output is unsafe"):
+        write_atomic(linked_output, {"status": "forged"})
+    assert target.read_text(encoding="utf-8") == "sentinel\n"
 
 
 def test_dependency_audit_accepts_satisfied_and_inactive_requirements() -> None:

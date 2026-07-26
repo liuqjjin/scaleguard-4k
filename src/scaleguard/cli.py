@@ -11,7 +11,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from scaleguard import __version__
-from scaleguard.config import PipelineConfig, load_config, validate_config
+from scaleguard.config import PipelineConfig, load_config, parse_config, validate_config
 from scaleguard.controller.trusted_scale import TrustedScaleController
 from scaleguard.doctor import run_doctor
 from scaleguard.errors import ScaleGuardError
@@ -28,7 +28,7 @@ from scaleguard.evaluation.metrics import (
 from scaleguard.evaluation.summary import EXPERIMENT_GROUPS, summarize_paired_manifests
 from scaleguard.factory import build_backends
 from scaleguard.manifest import validate_run_manifest
-from scaleguard.provenance import validate_runtime_preflight
+from scaleguard.provenance import load_regular_file_snapshot, validate_runtime_preflight
 from scaleguard.upstream import verify_upstreams
 
 
@@ -406,7 +406,6 @@ def _run_command(args: argparse.Namespace, project_root: Path) -> int:
         raise ScaleGuardError(
             f"output already exists: {args.output}; pass --overwrite to replace it"
         )
-    config = _override_target(load_config(args.config), args.target_factor)
     if args.runtime_preflight is not None and args.target_factor is not None:
         raise ScaleGuardError(
             "--target-factor cannot be combined with --runtime-preflight; "
@@ -414,13 +413,24 @@ def _run_command(args: argparse.Namespace, project_root: Path) -> int:
         )
     provenance: dict[str, object] = {"scaleguard_version": __version__}
     if args.runtime_preflight is not None:
-        provenance.update(
-            validate_runtime_preflight(
-                args.runtime_preflight,
-                config_path=args.config,
-                project_root=project_root,
-            )
+        validated = validate_runtime_preflight(
+            args.runtime_preflight,
+            config_path=args.config,
+            project_root=project_root,
+            require_recent=True,
         )
+        config_payload, config_digest = load_regular_file_snapshot(
+            args.config,
+            "runtime config",
+        )
+        if config_digest != validated.get("runtime_config_sha256"):
+            raise ScaleGuardError(
+                "runtime config snapshot digest disagrees with the validated preflight"
+            )
+        config = parse_config(config_payload, source=args.config)
+        provenance.update(validated)
+    else:
+        config = _override_target(load_config(args.config), args.target_factor)
     restoration, scale = build_backends(config, project_root=project_root)
     controller = TrustedScaleController(
         config,

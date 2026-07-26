@@ -202,10 +202,16 @@ if ! sg_run_logged_with_presence_marker \
 then
     sg_die "ScaleGuard doctor failed; inspect ${sg_log}"
 fi
+sg_runtime_environments="${SG_RUN_DIR}/runtime-environments"
+sg_reaudit_runtime_environments \
+    "${sg_log}" \
+    "${sg_runtime_environments}"
 "${SG_REPO_ROOT}/.venv/bin/python" \
     "${sg_here}/_write_preflight_receipt.py" \
     --config "${sg_config}" \
     --materialization "${SG_RUN_DIR}/materialization-verification.json" \
+    --runtime-environments "${sg_runtime_environments}" \
+    --stage-started-at "${sg_start_time}" \
     --output "${SG_RUN_DIR}/runtime-preflight.json"
 
 nvidia-smi > "${SG_RUN_DIR}/nvidia-smi-before.txt" 2>&1

@@ -42,6 +42,7 @@
       "evidence_path": null,
       "runtime_preflight_path": null,
       "runtime_preflight_sha256": null,
+      "runtime_environment_receipts": {},
       "run_id": null,
       "output_sha256": null,
       "peak_memory_used_mib_by_gpu": {}
@@ -51,6 +52,7 @@
       "evidence_path": null,
       "runtime_preflight_path": null,
       "runtime_preflight_sha256": null,
+      "runtime_environment_receipts": {},
       "run_id": null,
       "output_sha256": null,
       "peak_memory_used_mib_by_gpu": {}

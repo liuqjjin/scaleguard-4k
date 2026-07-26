@@ -75,6 +75,12 @@ execution, or a false evidence/identity claim.
 
 - Run only checkouts verified against `upstream-lock.yaml`.
 - Run only weights bound to `weights-lock.json` and a reviewed receipt.
+- Keep the per-attempt runtime environment re-audit enabled. It reruns with
+  isolated interpreters and no account credentials, then binds complete
+  distribution and import-probe identity into schema-v2 preflight evidence.
+  Receipt readers bind strict JSON and hashes to one regular-file snapshot.
+  Receipt writers use private exclusive temporary files and publish a
+  validated inode without clobbering a concurrently created target.
 - Remember that a valid hash proves identity, not safety.
 - Upstream Python/model loading is not sandboxed; use an isolated account or
   disposable host with least privilege and no unrelated secrets.

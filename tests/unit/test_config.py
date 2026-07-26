@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from scaleguard.config import load_config
+from scaleguard.config import load_config, parse_config
 from scaleguard.errors import ConfigurationError
 
 
@@ -21,6 +21,22 @@ def test_empty_config_uses_valid_cpu_safe_defaults(tmp_path: Path) -> None:
     assert config.coz.mixed_precision == "fp32"
     assert config.controller.target_factor == 4
     assert config.is_mock is True
+
+
+def test_parse_config_accepts_the_same_strict_bytes_snapshot(tmp_path: Path) -> None:
+    source = tmp_path / "snapshot.yaml"
+    document = b"controller:\n  target_factor: 8\n"
+
+    config = parse_config(document, source=source)
+
+    assert config.controller.target_factor == 8
+
+
+def test_parse_config_reports_snapshot_source_for_invalid_yaml(tmp_path: Path) -> None:
+    source = tmp_path / "snapshot.yaml"
+
+    with pytest.raises(ConfigurationError, match=rf"invalid YAML in {source}"):
+        parse_config(b"controller: [\n", source=source)
 
 
 @pytest.mark.parametrize(

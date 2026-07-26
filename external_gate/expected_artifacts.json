@@ -26,11 +26,18 @@
     },
     {
       "glob": "smoke/*/execution.json",
-      "condition": "status == passed; return_code == 0; runtime-preflight.json validates against the clean dispatched commit, config, locks, environment receipts, fixed materialization marker, and weight receipt; output hash and non-empty GPU sample evidence exist"
+      "condition": "status == passed; return_code == 0; schema-v2 runtime-preflight.json validates against the clean dispatched commit, config, locks, four fresh same-attempt environment receipts, bootstrap baselines, fixed materialization marker, and weight receipt; output hash and non-empty GPU sample evidence exist"
     },
     {
       "glob": "integration/*/execution.json",
-      "condition": "status == passed; return_code == 0; runtime-preflight.json validates against the clean dispatched commit, config, locks, environment receipts, fixed materialization marker, and weight receipt; output hash and non-empty GPU sample evidence exist"
+      "condition": "status == passed; return_code == 0; schema-v2 runtime-preflight.json validates against the clean dispatched commit, config, locks, four fresh same-attempt environment receipts, bootstrap baselines, fixed materialization marker, and weight receipt; output hash and non-empty GPU sample evidence exist"
+    },
+    {
+      "globs": [
+        "smoke/*/runtime-environments/*.json",
+        "integration/*/runtime-environments/*.json"
+      ],
+      "condition": "Every successful real run has exactly four credential-free fresh receipts. A failed attempt may retain the ordered receipts produced through the failing audit (0-4), with no later audit run: every passed receipt matches its bootstrap baseline, while at most one terminal failed receipt records the nonempty issues that caused fail-fast abort"
     },
     {
       "glob": "diagnostics/*/scaleguard-diagnostics-*.tar.gz",

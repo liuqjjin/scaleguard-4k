@@ -188,6 +188,9 @@ see [results status](results/STATUS.md).
 
 - Source checkouts, commits, trees, and ordered patches are verified against
   `upstream-lock.yaml`.
+- Every real attempt re-audits all four current runtime environments and binds
+  their complete distribution maps and offline import probes to a fresh
+  schema-v2 preflight receipt before model execution.
 - Model downloads and manual gates are recorded through `weights-lock.json`;
   a locally measured digest does not authenticate a publisher that supplied no
   digest.

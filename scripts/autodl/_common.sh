@@ -924,6 +924,86 @@ if not all(isinstance(layout, dict) and layout for layout in layouts):
 PY
 }
 
+sg_reaudit_runtime_environments() {
+    local sg_log_path="$1"
+    local sg_output_root="$2"
+    local sg_audit_script="${SG_REPO_ROOT}/scripts/bootstrap/audit_environment.py"
+    local sg_environment_root="${SG_REPO_ROOT}/.runtime/envs"
+    local sg_expected_python="3.10.18"
+    local sg_project_python="${SG_REPO_ROOT}/.venv/bin/python"
+    local sg_fourkagent_python="${sg_environment_root}/4kagent/bin/python"
+    local sg_depictqa_python="${sg_environment_root}/depictqa/bin/python"
+    local sg_coz_python="${sg_environment_root}/coz/bin/python"
+    local sg_python
+
+    sg_require_file "${sg_audit_script}" "runtime environment auditor"
+    [[ ! -L "${sg_audit_script}" ]] \
+        || sg_die "runtime environment auditor must not be a symbolic link: ${sg_audit_script}"
+    [[ ! -e "${sg_output_root}" && ! -L "${sg_output_root}" ]] \
+        || sg_die "runtime environment re-audit directory already exists: ${sg_output_root}"
+    mkdir -m 700 "${sg_output_root}"
+    for sg_python in \
+        "${sg_project_python}" \
+        "${sg_fourkagent_python}" \
+        "${sg_depictqa_python}" \
+        "${sg_coz_python}"
+    do
+        [[ -x "${sg_python}" ]] \
+            || sg_die "runtime environment Python is missing: ${sg_python}"
+    done
+
+    (
+        export HF_HUB_DISABLE_TELEMETRY=1
+        export HF_HUB_OFFLINE=1
+        export PYTHONDONTWRITEBYTECODE=1
+        export PYTHONNOUSERSITE=1
+        export TORCH_FORCE_WEIGHTS_ONLY_LOAD=1
+        export TRANSFORMERS_OFFLINE=1
+
+        sg_run_logged \
+            "${sg_log_path}" \
+            "${sg_project_python}" -I "${sg_audit_script}" \
+            --name scaleguard \
+            --project-root "${SG_REPO_ROOT}" \
+            --lock "${SG_REPO_ROOT}/uv.lock" \
+            --output "${sg_output_root}/scaleguard.json" \
+            --expected-python "${sg_expected_python}" \
+            --expect scaleguard-4k==0.1.0.dev0 \
+            --expect pyiqa==0.1.16 \
+            || exit $?
+        sg_run_logged \
+            "${sg_log_path}" \
+            "${sg_fourkagent_python}" -I "${sg_audit_script}" \
+            --name 4kagent \
+            --project-root "${SG_REPO_ROOT}" \
+            --lock "${SG_REPO_ROOT}/environments/4kagent/requirements.resolved.lock" \
+            --lock "${SG_REPO_ROOT}/environments/4kagent/pyiqa.override.lock" \
+            --lock "${SG_REPO_ROOT}/environments/4kagent/hpsv2.override.lock" \
+            --output "${sg_output_root}/4kagent.json" \
+            --expected-python "${sg_expected_python}" \
+            --allow-4kagent-runtime-overrides \
+            || exit $?
+        sg_run_logged \
+            "${sg_log_path}" \
+            "${sg_depictqa_python}" -I "${sg_audit_script}" \
+            --name depictqa \
+            --project-root "${SG_REPO_ROOT}" \
+            --lock "${SG_REPO_ROOT}/environments/depictqa/requirements.resolved.lock" \
+            --output "${sg_output_root}/depictqa.json" \
+            --expected-python "${sg_expected_python}" \
+            || exit $?
+        sg_run_logged \
+            "${sg_log_path}" \
+            "${sg_coz_python}" -I "${sg_audit_script}" \
+            --name coz \
+            --project-root "${SG_REPO_ROOT}" \
+            --lock "${SG_REPO_ROOT}/environments/coz/requirements.resolved.lock" \
+            --output "${sg_output_root}/coz.json" \
+            --expected-python "${sg_expected_python}" \
+            || exit $?
+    ) || sg_die "runtime environment re-audit failed; inspect ${sg_log_path}"
+}
+
 sg_verify_materialized_weights() {
     local sg_log_path="$1"
     local sg_verification_receipt="$2"

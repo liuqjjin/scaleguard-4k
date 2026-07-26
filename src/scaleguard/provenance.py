@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
+import stat
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -144,31 +146,158 @@ FOURKAGENT_AUDITED_OVERRIDES: tuple[dict[str, object], ...] = (
     },
 )
 EXPECTED_PYTHON_VERSION = "3.10.18"
+RUNTIME_PREFLIGHT_MAX_AGE = timedelta(minutes=15)
+RUNTIME_PREFLIGHT_CLOCK_SKEW = timedelta(minutes=1)
 _SHA256 = re.compile(r"[0-9a-f]{64}")
+_ENVIRONMENT_IDENTITY_FIELDS = (
+    "schema_version",
+    "name",
+    "status",
+    "python",
+    "locks",
+    "expected_packages",
+    "packages",
+    "runtime_imports",
+    "audited_overrides",
+    "issues",
+)
+_ENVIRONMENT_RECEIPT_FIELDS = frozenset((*_ENVIRONMENT_IDENTITY_FIELDS, "created_at_utc"))
 
 
 class RuntimePreflightError(ScaleGuardError):
     """Raised when runtime evidence is absent, stale, or inconsistent."""
 
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def _load(path: Path, label: str) -> dict[str, Any]:
-    if path.is_symlink():
-        raise RuntimePreflightError(f"{label} must not be a symbolic link: {path}")
+def _open_regular_evidence(path: Path, label: str) -> tuple[int, os.stat_result]:
     try:
-        value = loads(path.read_text(encoding="utf-8"))
-    except (OSError, StrictJSONError) as error:
+        before = path.lstat()
+    except OSError as error:
+        raise RuntimePreflightError(f"cannot inspect {label} {path}: {error}") from error
+    if not stat.S_ISREG(before.st_mode):
+        raise RuntimePreflightError(f"{label} is not a regular file: {path}")
+
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise RuntimePreflightError(f"cannot open {label} {path}: {error}") from error
+    try:
+        opened = os.fstat(descriptor)
+    except OSError as error:
+        os.close(descriptor)
+        raise RuntimePreflightError(f"cannot inspect opened {label} {path}: {error}") from error
+    if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
+        before.st_dev,
+        before.st_ino,
+    ):
+        os.close(descriptor)
+        raise RuntimePreflightError(f"{label} changed while it was being opened: {path}")
+    return descriptor, opened
+
+
+def _verify_evidence_snapshot(
+    path: Path,
+    label: str,
+    *,
+    opened: os.stat_result,
+    completed: os.stat_result,
+) -> None:
+    stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if not stat.S_ISREG(completed.st_mode) or any(
+        getattr(opened, field) != getattr(completed, field) for field in stable_fields
+    ):
+        raise RuntimePreflightError(f"{label} changed while it was being read: {path}")
+    try:
+        current = path.lstat()
+    except OSError as error:
+        raise RuntimePreflightError(f"cannot recheck {label} {path}: {error}") from error
+    if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != (
+        opened.st_dev,
+        opened.st_ino,
+    ):
+        raise RuntimePreflightError(f"{label} changed while it was being read: {path}")
+
+
+def _snapshot_regular_evidence(
+    path: Path,
+    label: str,
+    *,
+    retain_bytes: bool,
+) -> tuple[bytes | None, int, str]:
+    descriptor, opened = _open_regular_evidence(path, label)
+    digest = hashlib.sha256()
+    payload = bytearray() if retain_bytes else None
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+                if payload is not None:
+                    payload.extend(block)
+            completed = os.fstat(handle.fileno())
+    except OSError as error:
+        raise RuntimePreflightError(f"cannot read and hash {label} {path}: {error}") from error
+    _verify_evidence_snapshot(
+        path,
+        label,
+        opened=opened,
+        completed=completed,
+    )
+    return (bytes(payload) if payload is not None else None), opened.st_size, digest.hexdigest()
+
+
+def _read_regular_evidence(path: Path, label: str) -> tuple[bytes, str]:
+    payload, _size, digest = _snapshot_regular_evidence(path, label, retain_bytes=True)
+    if payload is None:  # pragma: no cover - retain_bytes guarantees a payload
+        raise AssertionError("retained evidence snapshot has no payload")
+    return payload, digest
+
+
+def load_regular_file_snapshot(path: Path, label: str) -> tuple[bytes, str]:
+    """Read and hash one regular file from the same race-checked snapshot."""
+
+    return _read_regular_evidence(path, label)
+
+
+def _evidence_sha256(path: Path, label: str) -> str:
+    _payload, _size, digest = _snapshot_regular_evidence(path, label, retain_bytes=False)
+    return digest
+
+
+def _inventory_file_identity(path: Path, label: str) -> tuple[int, str]:
+    _payload, size, digest = _snapshot_regular_evidence(path, label, retain_bytes=False)
+    return size, digest
+
+
+def sha256(path: Path) -> str:
+    """Hash one regular evidence file without following a symbolic link."""
+
+    return _evidence_sha256(path, "evidence file")
+
+
+def _decode_evidence_object(payload: bytes, path: Path, label: str) -> dict[str, Any]:
+    try:
+        value = loads(payload)
+    except StrictJSONError as error:
         raise RuntimePreflightError(f"cannot read {label} {path}: {error}") from error
     if not isinstance(value, dict):
         raise RuntimePreflightError(f"{label} must be a JSON object")
     return value
+
+
+def _load_snapshot(path: Path, label: str) -> tuple[dict[str, Any], str]:
+    if path.is_symlink():
+        raise RuntimePreflightError(f"{label} must not be a symbolic link: {path}")
+    payload, digest = _read_regular_evidence(path, label)
+    return _decode_evidence_object(payload, path, label), digest
+
+
+def load_evidence_snapshot(path: Path, label: str) -> tuple[dict[str, Any], str]:
+    """Load and hash one strict JSON evidence object from the same file snapshot."""
+
+    return _load_snapshot(path, label)
 
 
 def _evidence_path(value: object, label: str, *, base: Path | None = None) -> Path:
@@ -239,12 +368,20 @@ def _validate_current_lock_set(
     expected: tuple[str, ...],
     project_root: Path,
     label: str,
+    snapshot_digests: dict[str, str] | None = None,
 ) -> None:
     if not isinstance(value, dict) or set(value) != set(expected):
         raise RuntimePreflightError(f"{label} has an unexpected lock set")
     for relative in expected:
         path = project_root / relative
-        if path.is_symlink() or not path.is_file() or value.get(relative) != sha256(path):
+        if path.is_symlink() or not path.is_file():
+            raise RuntimePreflightError(f"{label} lock mismatch: {relative}")
+        digest = (
+            snapshot_digests[relative]
+            if snapshot_digests is not None and relative in snapshot_digests
+            else _evidence_sha256(path, f"{label} lock")
+        )
+        if value.get(relative) != digest:
             raise RuntimePreflightError(f"{label} lock mismatch: {relative}")
 
 
@@ -253,27 +390,25 @@ def _validate_environment_receipt(
     record: object,
     *,
     project_root: Path,
-) -> None:
-    context = f"bootstrap environment {name}"
+    expected_path: Path,
+    context: str,
+) -> tuple[Path, dict[str, Any], str]:
     if not isinstance(record, dict) or set(record) != {"path", "sha256", "status"}:
         raise RuntimePreflightError(f"{context} has an invalid evidence record")
-    expected_relative = f".runtime/receipts/{name}.json"
-    if record.get("path") != expected_relative:
-        raise RuntimePreflightError(f"{context} references an unexpected receipt")
-    path = _evidence_path(record["path"], f"{context} receipt", base=project_root)
-    expected_path = (project_root / expected_relative).resolve()
-    if path != expected_path:
+    receipt_path = _evidence_path(record["path"], f"{context} receipt", base=project_root)
+    if expected_path.is_symlink() or receipt_path != expected_path.resolve():
         raise RuntimePreflightError(f"{context} references an unexpected receipt")
     status = record.get("status")
     expected_status = "passed_with_audited_override" if name == "4kagent" else "passed"
     if status != expected_status:
         raise RuntimePreflightError(f"{context} has an invalid status")
-    if not _valid_digest(record.get("sha256")) or record["sha256"] != sha256(path):
+    receipt, digest = _load_snapshot(receipt_path, f"{context} receipt")
+    if not _valid_digest(record.get("sha256")) or record["sha256"] != digest:
         raise RuntimePreflightError(f"{context} receipt hash mismatch")
 
-    receipt = _load(path, f"{context} receipt")
     if (
-        receipt.get("schema_version") != 1
+        set(receipt) != _ENVIRONMENT_RECEIPT_FIELDS
+        or receipt.get("schema_version") != 1
         or receipt.get("name") != name
         or receipt.get("status") != status
         or receipt.get("issues") != []
@@ -303,19 +438,19 @@ def _validate_environment_receipt(
     for lock_record in lock_records:
         if not isinstance(lock_record, dict):
             raise RuntimePreflightError(f"{context} has a malformed lock record")
-        path = _evidence_path(lock_record.get("path"), f"{context} lock")
+        lock_path = _evidence_path(lock_record.get("path"), f"{context} lock")
         try:
-            relative = path.relative_to(project_root).as_posix()
+            relative = lock_path.relative_to(project_root).as_posix()
         except ValueError as error:
             raise RuntimePreflightError(f"{context} lock escapes the project") from error
         pinned = lock_record.get("pinned_packages")
         if (
             relative not in expected_locks
             or relative in observed_locks
-            or path.is_symlink()
-            or not path.is_file()
+            or lock_path.is_symlink()
+            or not lock_path.is_file()
             or not _valid_digest(lock_record.get("sha256"))
-            or lock_record["sha256"] != sha256(path)
+            or lock_record["sha256"] != _evidence_sha256(lock_path, f"{context} lock")
             or type(pinned) is not int
             or pinned < 0
         ):
@@ -338,6 +473,10 @@ def _validate_environment_receipt(
         or not expected_packages
         or not isinstance(packages, dict)
         or not packages
+        or not all(
+            isinstance(package, str) and package and isinstance(version, str) and version
+            for package, version in packages.items()
+        )
         or runtime_imports != expected_imports
         or not all(
             isinstance(package, str)
@@ -350,6 +489,7 @@ def _validate_environment_receipt(
         or overrides != expected_overrides
     ):
         raise RuntimePreflightError(f"{context} package audit is inconsistent")
+    return receipt_path, receipt, digest
 
 
 def _validate_bootstrap(
@@ -357,16 +497,16 @@ def _validate_bootstrap(
     *,
     project_root: Path,
     commit: str,
-) -> tuple[Path, dict[str, Any]]:
+) -> tuple[Path, str, dict[str, dict[str, Any]]]:
     if not isinstance(record, dict):
         raise RuntimePreflightError("runtime preflight receipt has no bootstrap binding")
     path = _evidence_path(record.get("path"), "bootstrap receipt")
     expected_path = (project_root / ".runtime" / "receipts" / "bootstrap.json").resolve()
     if path != expected_path:
         raise RuntimePreflightError("runtime preflight references an unexpected bootstrap receipt")
-    if not _valid_digest(record.get("sha256")) or record["sha256"] != sha256(path):
+    bootstrap, digest = _load_snapshot(path, "bootstrap receipt")
+    if not _valid_digest(record.get("sha256")) or record["sha256"] != digest:
         raise RuntimePreflightError("bootstrap receipt is stale or did not pass")
-    bootstrap = _load(path, "bootstrap receipt")
     if (
         bootstrap.get("schema_version") != 1
         or bootstrap.get("status") != "passed"
@@ -376,7 +516,12 @@ def _validate_bootstrap(
     _timestamp(bootstrap.get("created_at_utc"), "bootstrap created_at_utc")
     if bootstrap.get("python_version") != EXPECTED_PYTHON_VERSION:
         raise RuntimePreflightError("bootstrap receipt has an unexpected Python version")
-    expected_uv = (project_root / "environments" / "uv.version").read_text(encoding="utf-8").strip()
+    uv_path = project_root / "environments" / "uv.version"
+    uv_payload, uv_digest = _read_regular_evidence(uv_path, "uv version lock")
+    try:
+        expected_uv = uv_payload.decode("utf-8").strip()
+    except UnicodeDecodeError as error:
+        raise RuntimePreflightError(f"cannot read uv version lock {uv_path}: {error}") from error
     if not expected_uv or bootstrap.get("uv_version") != expected_uv:
         raise RuntimePreflightError("bootstrap receipt has an unexpected uv version")
     platform = bootstrap.get("platform")
@@ -396,13 +541,71 @@ def _validate_bootstrap(
         expected=BOOTSTRAP_LOCK_PATHS,
         project_root=project_root,
         label="bootstrap receipt",
+        snapshot_digests={"environments/uv.version": uv_digest},
     )
     environments = bootstrap.get("environments")
     if not isinstance(environments, dict) or set(environments) != set(ENVIRONMENT_LOCK_PATHS):
         raise RuntimePreflightError("bootstrap receipt has an unexpected environment set")
+    environment_receipts: dict[str, dict[str, Any]] = {}
     for name in ENVIRONMENT_LOCK_PATHS:
-        _validate_environment_receipt(name, environments[name], project_root=project_root)
-    return path, bootstrap
+        _path, environment_receipts[name], _digest = _validate_environment_receipt(
+            name,
+            environments[name],
+            project_root=project_root,
+            expected_path=project_root / ".runtime" / "receipts" / f"{name}.json",
+            context=f"bootstrap environment {name}",
+        )
+    return path, digest, environment_receipts
+
+
+def _validate_runtime_environments(
+    value: object,
+    *,
+    receipt_path: Path,
+    project_root: Path,
+    baseline: dict[str, dict[str, Any]],
+    stage_started_at: datetime,
+    preflight_created_at: datetime,
+) -> dict[str, str]:
+    if not isinstance(value, dict) or set(value) != set(ENVIRONMENT_LOCK_PATHS):
+        raise RuntimePreflightError(
+            "runtime preflight receipt has an unexpected runtime environment set"
+        )
+    environment_root = receipt_path.parent / "runtime-environments"
+    if environment_root.is_symlink() or not environment_root.is_dir():
+        raise RuntimePreflightError(
+            f"runtime environment receipt directory is missing or unsafe: {environment_root}"
+        )
+    expected_files = {f"{name}.json" for name in ENVIRONMENT_LOCK_PATHS}
+    observed_files = {path.name for path in environment_root.iterdir()}
+    if observed_files != expected_files:
+        raise RuntimePreflightError(
+            "runtime environment receipt directory has an unexpected file set"
+        )
+
+    digests: dict[str, str] = {}
+    for name in ENVIRONMENT_LOCK_PATHS:
+        context = f"runtime environment {name}"
+        _path, current, digest = _validate_environment_receipt(
+            name,
+            value[name],
+            project_root=project_root,
+            expected_path=environment_root / f"{name}.json",
+            context=context,
+        )
+        created_at = _timestamp(current.get("created_at_utc"), f"{context} created_at_utc")
+        if created_at < stage_started_at or created_at > preflight_created_at:
+            raise RuntimePreflightError(
+                f"{context} receipt was not created during this preflight stage"
+            )
+        baseline_receipt = baseline[name]
+        for field in _ENVIRONMENT_IDENTITY_FIELDS:
+            if current.get(field) != baseline_receipt.get(field):
+                raise RuntimePreflightError(
+                    f"{context} {field} differs from the bootstrap baseline"
+                )
+        digests[name] = digest
+    return digests
 
 
 def _safe_destination(root: Path, value: object, label: str) -> Path:
@@ -449,14 +652,17 @@ def _current_inventory(
         inventory_root = destination
     else:
         raise RuntimePreflightError(f"{label} destination is missing")
-    return [
-        {
-            "path": path.relative_to(inventory_root).as_posix(),
-            "size_bytes": path.stat().st_size,
-            "sha256": sha256(path),
-        }
-        for path in paths
-    ]
+    inventory: list[dict[str, object]] = []
+    for path in paths:
+        size, digest = _inventory_file_identity(path, f"{label} inventory file")
+        inventory.append(
+            {
+                "path": path.relative_to(inventory_root).as_posix(),
+                "size_bytes": size,
+                "sha256": digest,
+            }
+        )
+    return inventory
 
 
 def _weights_root(value: object) -> Path:
@@ -471,8 +677,7 @@ def _weights_root(value: object) -> Path:
     return root
 
 
-def _locked_weight_artifacts(project_root: Path) -> dict[str, dict[str, Any]]:
-    document = _load(project_root / "weights-lock.json", "weights lock")
+def _locked_weight_artifacts(document: dict[str, Any]) -> dict[str, dict[str, Any]]:
     artifacts = document.get("artifacts")
     if document.get("schema_version") != 1 or not isinstance(artifacts, list) or not artifacts:
         raise RuntimePreflightError("weights lock has an invalid artifact inventory")
@@ -522,10 +727,13 @@ def resolve_materialization_sources(
         str(materialization_path),
         "materialization verification receipt",
     )
-    materialization = _load(materialization_path, "materialization verification receipt")
+    materialization, _materialization_digest = _load_snapshot(
+        materialization_path,
+        "materialization verification receipt",
+    )
     root = _weights_root(materialization.get("weights_root"))
     marker_path = root / ".scaleguard-materialization.json"
-    marker = _load(marker_path, "fixed materialization marker")
+    marker, _marker_digest = _load_snapshot(marker_path, "fixed materialization marker")
     if materialization != marker:
         raise RuntimePreflightError(
             "materialization verification receipt differs from the fixed marker"
@@ -547,7 +755,9 @@ def resolve_materialization_sources(
         if candidate.is_symlink() or not candidate.is_file():
             continue
         resolved = candidate.resolve()
-        if sha256(resolved) == expected:
+        payload, digest = _read_regular_evidence(resolved, "source weights receipt candidate")
+        if digest == expected:
+            _decode_evidence_object(payload, resolved, "source weights receipt candidate")
             matches.append(resolved)
     if not matches:
         raise RuntimePreflightError(
@@ -563,7 +773,9 @@ def _validate_materialization(
     *,
     project_root: Path,
     commit: str,
-) -> tuple[Path, Path, Path, Path]:
+    weights_lock: dict[str, Any],
+    weights_lock_digest: str,
+) -> tuple[Path, str, str, str]:
     if (
         not isinstance(materialization_record, dict)
         or not isinstance(marker_record, dict)
@@ -575,25 +787,24 @@ def _validate_materialization(
         materialization_record.get("path"),
         "materialization verification receipt",
     )
-    if not _valid_digest(materialization_record.get("sha256")) or materialization_record[
-        "sha256"
-    ] != sha256(materialization_path):
-        raise RuntimePreflightError("materialization verification receipt is stale or did not pass")
-    materialization = _load(
+    materialization, materialization_digest = _load_snapshot(
         materialization_path,
         "materialization verification receipt",
     )
+    if (
+        not _valid_digest(materialization_record.get("sha256"))
+        or materialization_record["sha256"] != materialization_digest
+    ):
+        raise RuntimePreflightError("materialization verification receipt is stale or did not pass")
     weights_root = _weights_root(materialization.get("weights_root"))
 
     marker_path = _evidence_path(marker_record.get("path"), "fixed materialization marker")
     expected_marker = (weights_root / ".scaleguard-materialization.json").resolve()
     if marker_path != expected_marker:
         raise RuntimePreflightError("runtime preflight references an unexpected fixed marker")
-    if not _valid_digest(marker_record.get("sha256")) or marker_record["sha256"] != sha256(
-        marker_path
-    ):
+    marker, marker_digest = _load_snapshot(marker_path, "fixed materialization marker")
+    if not _valid_digest(marker_record.get("sha256")) or marker_record["sha256"] != marker_digest:
         raise RuntimePreflightError("fixed materialization marker is stale")
-    marker = _load(marker_path, "fixed materialization marker")
     if materialization != marker:
         raise RuntimePreflightError(
             "materialization verification receipt differs from the fixed marker"
@@ -647,13 +858,13 @@ def _validate_materialization(
         layout_destinations.add(destination_value)
 
     weights_path = _evidence_path(weights_record.get("path"), "source weights receipt")
+    weights, weights_digest = _load_snapshot(weights_path, "source weights receipt")
     if (
         not _valid_digest(weights_record.get("sha256"))
-        or weights_record["sha256"] != sha256(weights_path)
-        or marker.get("source_weights_receipt_sha256") != sha256(weights_path)
+        or weights_record["sha256"] != weights_digest
+        or marker.get("source_weights_receipt_sha256") != weights_digest
     ):
         raise RuntimePreflightError("source weights receipt is stale or not bound")
-    weights = _load(weights_path, "source weights receipt")
     if (
         weights.get("schema_version") != 1
         or weights.get("status") != "passed"
@@ -670,7 +881,7 @@ def _validate_materialization(
         raise RuntimePreflightError("source weights receipt is bound to another weight root")
     if (
         weights.get("source_manifest") != "weights-lock.json"
-        or weights.get("source_manifest_sha256") != sha256(project_root / "weights-lock.json")
+        or weights.get("source_manifest_sha256") != weights_lock_digest
         or type(weights.get("optional_artifacts_requested")) is not bool
     ):
         raise RuntimePreflightError("source weights receipt has an invalid manifest binding")
@@ -678,7 +889,7 @@ def _validate_materialization(
     artifacts = weights.get("artifacts")
     if not isinstance(artifacts, list) or not artifacts:
         raise RuntimePreflightError("source weights receipt has no artifact records")
-    locked_artifacts = _locked_weight_artifacts(project_root)
+    locked_artifacts = _locked_weight_artifacts(weights_lock)
     receipt_artifacts: dict[str, dict[str, Any]] = {}
     for index, artifact in enumerate(artifacts):
         artifact_id = artifact.get("id") if isinstance(artifact, dict) else None
@@ -744,7 +955,7 @@ def _validate_materialization(
             raise RuntimePreflightError(f"{context} identity disagrees with weights lock")
     if not layout_sources.issubset(completed_artifact_ids):
         raise RuntimePreflightError("materialized layouts reference incomplete source artifacts")
-    return materialization_path, marker_path, weights_path, weights_root
+    return weights_root, materialization_digest, marker_digest, weights_digest
 
 
 def validate_runtime_preflight(
@@ -752,15 +963,34 @@ def validate_runtime_preflight(
     *,
     config_path: Path | None,
     project_root: Path,
+    require_recent: bool = False,
 ) -> dict[str, Any]:
     """Bind one run to clean source, config, environments, and current weight bytes."""
 
     project_root = project_root.resolve()
     receipt_path = _evidence_path(str(receipt_path), "runtime preflight receipt")
-    receipt = _load(receipt_path, "runtime preflight receipt")
-    if receipt.get("schema_version") != 1 or receipt.get("status") != "passed":
+    receipt, receipt_digest = _load_snapshot(receipt_path, "runtime preflight receipt")
+    if receipt.get("schema_version") != 2 or receipt.get("status") != "passed":
         raise RuntimePreflightError("runtime preflight receipt did not pass")
-    _timestamp(receipt.get("created_at_utc"), "runtime preflight created_at_utc")
+    created_at = _timestamp(
+        receipt.get("created_at_utc"),
+        "runtime preflight created_at_utc",
+    )
+    stage_started_at = _timestamp(
+        receipt.get("stage_started_at_utc"),
+        "runtime preflight stage_started_at_utc",
+    )
+    if stage_started_at > created_at:
+        raise RuntimePreflightError("runtime preflight predates its stage start")
+    if require_recent:
+        now = datetime.now(timezone.utc)
+        if (
+            created_at > now + RUNTIME_PREFLIGHT_CLOCK_SKEW
+            or now - created_at > RUNTIME_PREFLIGHT_MAX_AGE
+        ):
+            raise RuntimePreflightError(
+                "runtime preflight is not recent enough to start a real run"
+            )
     commit = require_clean_git_commit(project_root)
     if receipt.get("project_commit") != commit:
         raise RuntimePreflightError("runtime preflight receipt is bound to another commit")
@@ -772,42 +1002,61 @@ def validate_runtime_preflight(
     config_path = recorded_config_path if config_path is None else config_path.resolve()
     if recorded_config_path != config_path:
         raise RuntimePreflightError("runtime preflight receipt is bound to another config")
-    if not _valid_digest(config.get("sha256")) or config["sha256"] != sha256(config_path):
+    _config_payload, config_digest = _read_regular_evidence(config_path, "runtime config")
+    if not _valid_digest(config.get("sha256")) or config["sha256"] != config_digest:
         raise RuntimePreflightError("runtime config changed after preflight")
 
+    weights_lock, weights_lock_digest = _load_snapshot(
+        project_root / "weights-lock.json",
+        "weights lock",
+    )
     _validate_current_lock_set(
         receipt.get("locks"),
         expected=LOCK_PATHS,
         project_root=project_root,
         label="runtime preflight receipt",
+        snapshot_digests={"weights-lock.json": weights_lock_digest},
     )
-    bootstrap_path, _ = _validate_bootstrap(
+    _bootstrap_path, bootstrap_digest, baseline_environments = _validate_bootstrap(
         receipt.get("bootstrap"),
         project_root=project_root,
         commit=commit,
     )
+    runtime_environment_digests = _validate_runtime_environments(
+        receipt.get("runtime_environments"),
+        receipt_path=receipt_path,
+        project_root=project_root,
+        baseline=baseline_environments,
+        stage_started_at=stage_started_at,
+        preflight_created_at=created_at,
+    )
     (
-        materialization_path,
-        marker_path,
-        weights_path,
         weights_root,
+        materialization_digest,
+        marker_digest,
+        weights_digest,
     ) = _validate_materialization(
         receipt.get("materialization"),
         receipt.get("materialization_marker"),
         receipt.get("source_weights_receipt"),
         project_root=project_root,
         commit=commit,
+        weights_lock=weights_lock,
+        weights_lock_digest=weights_lock_digest,
     )
     return {
         "runtime_evidence_verified": True,
         "runtime_preflight_receipt": str(receipt_path),
-        "runtime_preflight_sha256": sha256(receipt_path),
-        "bootstrap_receipt_sha256": sha256(bootstrap_path),
-        "materialization_receipt_sha256": sha256(materialization_path),
-        "materialization_marker_sha256": sha256(marker_path),
-        "source_weights_receipt_sha256": sha256(weights_path),
+        "runtime_preflight_sha256": receipt_digest,
+        "bootstrap_receipt_sha256": bootstrap_digest,
+        "runtime_environment_receipt_sha256": runtime_environment_digests,
+        "materialization_receipt_sha256": materialization_digest,
+        "materialization_marker_sha256": marker_digest,
+        "source_weights_receipt_sha256": weights_digest,
         "weights_root": str(weights_root),
         "project_commit": commit,
         "project_root": str(project_root),
         "runtime_config_path": str(config_path),
+        "runtime_config_sha256": config_digest,
+        "runtime_stage_started_at": stage_started_at.isoformat(),
     }

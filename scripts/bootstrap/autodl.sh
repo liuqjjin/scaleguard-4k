@@ -66,17 +66,53 @@ sg_bootstrap_receipt="${sg_receipt_root}/bootstrap.json"
 sg_write_stage_receipt() {
     local sg_status="$1"
     local sg_return_code="$2"
-    local sg_temporary="${sg_receipt_root}/.bootstrap.json.tmp.$$"
-    {
-        printf '{\n'
-        printf '  "schema_version": 1,\n'
-        printf '  "status": "%s",\n' "${sg_status}"
-        printf '  "updated_at_utc": "%s",\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-        printf '  "return_code": %s,\n' "${sg_return_code}"
-        printf '  "claim": "This receipt supports no environment or GPU claim."\n'
-        printf '}\n'
-    } > "${sg_temporary}"
-    mv "${sg_temporary}" "${sg_bootstrap_receipt}"
+    python3 - \
+        "${sg_bootstrap_receipt}" \
+        "${sg_status}" \
+        "${sg_return_code}" <<'PY'
+import datetime as dt
+import json
+import os
+import pathlib
+import sys
+import tempfile
+
+raw_output, status, return_code = sys.argv[1:]
+candidate = pathlib.Path(raw_output)
+output = candidate.parent.resolve() / candidate.name
+if output.is_symlink() or (output.exists() and not output.is_file()):
+    raise SystemExit(f"bootstrap stage receipt output is unsafe: {output}")
+document = {
+    "schema_version": 1,
+    "status": status,
+    "updated_at_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+    "return_code": int(return_code),
+    "claim": "This receipt supports no environment or GPU claim.",
+}
+descriptor, temporary_name = tempfile.mkstemp(
+    prefix=f".{output.name}.",
+    suffix=".tmp",
+    dir=output.parent,
+)
+temporary = pathlib.Path(temporary_name)
+try:
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        json.dump(document, handle, indent=2, sort_keys=True, allow_nan=False)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, output)
+    directory_descriptor = os.open(
+        output.parent,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+    )
+    try:
+        os.fsync(directory_descriptor)
+    finally:
+        os.close(directory_descriptor)
+finally:
+    temporary.unlink(missing_ok=True)
+PY
 }
 
 sg_bootstrap_failed() {
@@ -242,7 +278,7 @@ sg_sync_env \
     https://download.pytorch.org/whl/cu126
 
 sg_audit_script="${sg_repo_root}/scripts/bootstrap/audit_environment.py"
-"${sg_repo_root}/.venv/bin/python" "${sg_audit_script}" \
+"${sg_repo_root}/.venv/bin/python" -I "${sg_audit_script}" \
     --name scaleguard \
     --project-root "${sg_repo_root}" \
     --lock "${sg_repo_root}/uv.lock" \
@@ -250,7 +286,7 @@ sg_audit_script="${sg_repo_root}/scripts/bootstrap/audit_environment.py"
     --expected-python "${sg_python_version}" \
     --expect scaleguard-4k==0.1.0.dev0 \
     --expect pyiqa==0.1.16
-"${sg_env_root}/4kagent/bin/python" "${sg_audit_script}" \
+"${sg_env_root}/4kagent/bin/python" -I "${sg_audit_script}" \
     --name 4kagent \
     --project-root "${sg_repo_root}" \
     --lock "${sg_repo_root}/environments/4kagent/requirements.resolved.lock" \
@@ -259,13 +295,13 @@ sg_audit_script="${sg_repo_root}/scripts/bootstrap/audit_environment.py"
     --output "${sg_receipt_root}/4kagent.json" \
     --expected-python "${sg_python_version}" \
     --allow-4kagent-runtime-overrides
-"${sg_env_root}/depictqa/bin/python" "${sg_audit_script}" \
+"${sg_env_root}/depictqa/bin/python" -I "${sg_audit_script}" \
     --name depictqa \
     --project-root "${sg_repo_root}" \
     --lock "${sg_repo_root}/environments/depictqa/requirements.resolved.lock" \
     --output "${sg_receipt_root}/depictqa.json" \
     --expected-python "${sg_python_version}"
-"${sg_env_root}/coz/bin/python" "${sg_audit_script}" \
+"${sg_env_root}/coz/bin/python" -I "${sg_audit_script}" \
     --name coz \
     --project-root "${sg_repo_root}" \
     --lock "${sg_repo_root}/environments/coz/requirements.resolved.lock" \
@@ -291,8 +327,6 @@ sg_audit_script="${sg_repo_root}/scripts/bootstrap/audit_environment.py"
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
-import json
 import pathlib
 import subprocess
 import sys
@@ -300,15 +334,8 @@ from typing import Any
 
 sys.path.insert(0, str(pathlib.Path(sys.argv[4]).resolve()))
 
-from scaleguard.strict_json import loads_object
-
-
-def sha256(path: pathlib.Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+from scaleguard.evaluation.evidence import write_json_atomic
+from scaleguard.provenance import load_evidence_snapshot, sha256
 
 
 receipt_root = pathlib.Path(sys.argv[1]).resolve()
@@ -318,12 +345,15 @@ project_root = pathlib.Path.cwd().resolve()
 environment_receipts: dict[str, Any] = {}
 for name in ("scaleguard", "4kagent", "depictqa", "coz"):
     path = receipt_root / f"{name}.json"
-    document = loads_object(path.read_text(encoding="utf-8"))
+    document, digest = load_evidence_snapshot(
+        path,
+        f"bootstrap environment {name} receipt",
+    )
     if document.get("status") not in {"passed", "passed_with_audited_override"}:
         raise SystemExit(f"environment audit did not pass: {name}")
     environment_receipts[name] = {
         "path": str(path.relative_to(project_root)),
-        "sha256": sha256(path),
+        "sha256": digest,
         "status": document["status"],
     }
 
@@ -367,12 +397,7 @@ document = {
         "This receipt contains no GPU inference or quality-result claim."
     ),
 }
-temporary = receipt_root / ".bootstrap.json.tmp"
-temporary.write_text(
-    json.dumps(document, indent=2, sort_keys=True) + "\n",
-    encoding="utf-8",
-)
-temporary.replace(receipt_root / "bootstrap.json")
+write_json_atomic(receipt_root / "bootstrap.json", document)
 PY
 
 trap - EXIT

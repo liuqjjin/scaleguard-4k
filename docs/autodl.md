@@ -262,26 +262,38 @@ For each run the wrapper:
    `--verify-only` mode, and rehashes every completed artifact against the
    bound download receipt;
 5. runs `scaleguard doctor`;
-6. writes a preflight receipt bound to the current Git commit, config, lock
-   hashes, audited environments, and materialization verification;
-7. starts per-GPU memory/utilization sampling;
-8. executes `scaleguard run --config … --input … --output …
+6. reruns the locked distribution, dependency, offline import, and 4KAgent
+   tool-entrypoint audit with each of the four isolated interpreters, without
+   account credentials;
+7. writes a schema-v2 preflight receipt bound to the current Git commit,
+   config, lock hashes, fresh per-attempt environment receipts, bootstrap
+   baselines, and materialization verification;
+8. starts per-GPU memory/utilization sampling;
+9. executes `scaleguard run --config … --input … --output …
    --runtime-preflight …`;
-9. requires a fresh, non-empty non-symlink output, snapshots its exact bytes and
+10. requires a fresh, non-empty non-symlink output, snapshots its exact bytes and
    cross-checks both hashes;
-10. snapshots and validates the CLI-named ScaleGuard manifest, rejects
+11. snapshots and validates the CLI-named ScaleGuard manifest, rejects
    `mock: true`, verifies a
    completed 4KAgent event and at least one non-mock CoZ candidate, and checks
    the final output hash against that manifest;
-11. writes `execution.json`, the validated manifest/output snapshots, the raw log and a
+12. writes `execution.json`, the validated manifest/output snapshots, the raw log and a
    complete evidence inventory.
 
 The wrapper privatizes all ambient credentials before preflight.
 `scaleguard doctor` receives a fixed non-secret presence marker under the name
 declared by `fourkagent.api_key_env`; only the actual `scaleguard run` child
 receives that variable's real value. GPU probes, upstream verification,
-materialization verification, evidence extraction, and post-run checks receive
-no account credentials.
+environment re-audit, materialization verification, evidence extraction, and
+post-run checks receive no account credentials.
+
+The per-attempt receipts live under
+`runtime-environments/{scaleguard,4kagent,depictqa,coz}.json`. Preflight rejects
+missing, stale, relocated, or symlinked receipts and any difference from the
+bootstrap baseline in Python identity, lock inventory, complete installed
+distribution map, import/entrypoint probes, audited overrides, status, or
+issues. This catches an install, uninstall, or import breakage introduced after
+bootstrap before a real model process starts.
 
 An explicit output path must not already exist. This prevents a stale image from
 turning a no-op into a false pass. Default output paths are unique to each run.
@@ -369,6 +381,9 @@ specific cause, then rerun the failed stage.
   commit SHA.
 - Upstream verification failure: restore the checkout specified by
   `upstream-lock.yaml`; do not silently run a different commit.
+- Runtime re-audit failure: inspect the attempt log and the partial
+  `runtime-environments/` receipts, rerun the locked bootstrap to repair
+  distribution drift, and do not install packages over an audited environment.
 - CUDA OOM: keep the raw failure, then change only the recorded tile/offload
   config. Do not lower the GPU preflight thresholds to hide an OOM.
 - Command success without output: treat the run as failed and inspect the

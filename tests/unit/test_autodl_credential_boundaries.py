@@ -103,6 +103,9 @@ def test_autodl_project_helpers_use_the_installed_project_interpreter(
 ) -> None:
     bootstrap = (ROOT / "scripts" / "autodl" / "bootstrap.sh").read_text(encoding="utf-8")
     download = (ROOT / "scripts" / "autodl" / "download_weights.sh").read_text(encoding="utf-8")
+    environment_bootstrap = (ROOT / "scripts" / "bootstrap" / "autodl.sh").read_text(
+        encoding="utf-8"
+    )
     common = COMMON.read_text(encoding="utf-8")
 
     assert (
@@ -112,6 +115,8 @@ def test_autodl_project_helpers_use_the_installed_project_interpreter(
     assert '"${sg_project_python}" "${sg_here}/_download_weights.py"' in download
     assert '"${sg_project_python}" "${sg_materializer}"' in download
     assert '"${sg_project_python}" "${sg_materializer}"' in common
+    assert environment_bootstrap.count('-I "${sg_audit_script}"') == 4
+    assert common.count('-I "${sg_audit_script}"') == 4
 
     clean_environment = {
         "HOME": os.environ["HOME"],
@@ -122,6 +127,7 @@ def test_autodl_project_helpers_use_the_installed_project_interpreter(
     for helper in (
         ROOT / "scripts" / "autodl" / "_validate_bootstrap_receipt.py",
         ROOT / "scripts" / "autodl" / "_download_weights.py",
+        ROOT / "scripts" / "autodl" / "_write_preflight_receipt.py",
         ROOT / "scripts" / "weights" / "materialize.py",
     ):
         result = subprocess.run(
@@ -462,3 +468,103 @@ exec {real_command!r} "$@"
     observations = probe_log.read_text(encoding="utf-8").splitlines()
     assert observations
     assert all(line.endswith("=sanitized") for line in observations)
+
+
+def test_runtime_environment_reaudit_uses_all_isolated_pythons_without_credentials(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    probe_log = tmp_path / "runtime-audits.txt"
+    audit = project / "scripts" / "bootstrap" / "audit_environment.py"
+    audit.parent.mkdir(parents=True)
+    audit.write_text("# audit fixture\n", encoding="utf-8")
+    locks = (
+        "uv.lock",
+        "environments/4kagent/requirements.resolved.lock",
+        "environments/4kagent/pyiqa.override.lock",
+        "environments/4kagent/hpsv2.override.lock",
+        "environments/depictqa/requirements.resolved.lock",
+        "environments/coz/requirements.resolved.lock",
+    )
+    for relative in locks:
+        path = project / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture\n", encoding="utf-8")
+
+    python_fixture = """#!/bin/sh
+if [ -n "${HF_TOKEN+x}" ] \
+    || [ -n "${GITHUB_TOKEN+x}" ] \
+    || [ -n "${CUSTOM_SCHEDULER_CREDENTIAL+x}" ]; then
+    exit 91
+fi
+[ "${HF_HUB_OFFLINE:-}" = "1" ] || exit 92
+[ "${TRANSFORMERS_OFFLINE:-}" = "1" ] || exit 93
+printf '%s|%s\\n' "$0" "$*" >> "$PROBE_LOG"
+"""
+    interpreters = (
+        project / ".venv" / "bin" / "python",
+        project / ".runtime" / "envs" / "4kagent" / "bin" / "python",
+        project / ".runtime" / "envs" / "depictqa" / "bin" / "python",
+        project / ".runtime" / "envs" / "coz" / "bin" / "python",
+    )
+    for interpreter in interpreters:
+        interpreter.parent.mkdir(parents=True)
+        interpreter.write_text(python_fixture, encoding="utf-8")
+        interpreter.chmod(0o755)
+
+    output_root = tmp_path / "fresh-runtime-environments"
+    log = tmp_path / "reaudit.log"
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "SCALEGUARD_REPO_ROOT": str(project),
+            "PROBE_LOG": str(probe_log),
+            "HF_TOKEN": "download-private",
+            "GITHUB_TOKEN": "ambient-private",
+            "CUSTOM_SCHEDULER_CREDENTIAL": "runtime-private",
+        }
+    )
+    script = f"""
+source {str(COMMON)!r}
+sg_register_sensitive_env_name CUSTOM_SCHEDULER_CREDENTIAL
+sg_make_sensitive_environment_private
+sg_reaudit_runtime_environments {str(log)!r} {str(output_root)!r}
+"""
+    _run_bash(script, env=environment)
+
+    observations = probe_log.read_text(encoding="utf-8").splitlines()
+    assert len(observations) == 4
+    assert {line.split("|", 1)[0] for line in observations} == {str(path) for path in interpreters}
+    assert all("|-I " in line for line in observations)
+    assert {line.split("--name ", 1)[1].split()[0] for line in observations} == {
+        "scaleguard",
+        "4kagent",
+        "depictqa",
+        "coz",
+    }
+    runner = (ROOT / "scripts" / "autodl" / "_run_scaleguard.sh").read_text(encoding="utf-8")
+    assert runner.index("doctor --config") < runner.index("sg_reaudit_runtime_environments")
+    assert runner.index("sg_reaudit_runtime_environments") < runner.index(
+        "_write_preflight_receipt.py"
+    )
+    assert runner.index("_write_preflight_receipt.py") < runner.index("--runtime-preflight")
+
+    interpreters[2].write_text("#!/bin/sh\nexit 31\n", encoding="utf-8")
+    interpreters[2].chmod(0o755)
+    failed_output_root = tmp_path / "failed-runtime-environments"
+    failed_script = f"""
+source {str(COMMON)!r}
+sg_register_sensitive_env_name CUSTOM_SCHEDULER_CREDENTIAL
+sg_make_sensitive_environment_private
+sg_reaudit_runtime_environments {str(log)!r} {str(failed_output_root)!r}
+"""
+    failed = subprocess.run(
+        ["/bin/bash", "-uec", failed_script],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert failed.returncode != 0
+    assert "runtime environment re-audit failed" in failed.stderr

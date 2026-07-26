@@ -105,6 +105,7 @@ def _runtime_manifest(
             "runtime_preflight_sha256": "a" * 64,
             "project_root": str(tmp_path),
             "runtime_config_path": str(tmp_path / "runtime.yaml"),
+            "runtime_config_sha256": "c" * 64,
         }
     )
     _rewrite(path, payload)
@@ -116,14 +117,26 @@ def _mock_runtime_dependencies(
     config: dict[str, Any],
     *,
     digest: str = "a" * 64,
+    config_digest: str = "c" * 64,
+    current_config_digest: str | None = None,
 ) -> None:
     monkeypatch.setattr(
         "scaleguard.provenance.validate_runtime_preflight",
-        lambda *_args, **_kwargs: {"runtime_preflight_sha256": digest},
+        lambda *_args, **_kwargs: {
+            "runtime_preflight_sha256": digest,
+            "runtime_config_sha256": config_digest,
+        },
     )
     monkeypatch.setattr(
-        "scaleguard.config.load_config",
-        lambda _path: SimpleNamespace(as_dict=lambda: config),
+        "scaleguard.provenance.load_regular_file_snapshot",
+        lambda *_args, **_kwargs: (
+            b"fixture",
+            config_digest if current_config_digest is None else current_config_digest,
+        ),
+    )
+    monkeypatch.setattr(
+        "scaleguard.config.parse_config",
+        lambda _document, **_kwargs: SimpleNamespace(as_dict=lambda: config),
     )
 
 
@@ -377,6 +390,7 @@ def test_validator_rejects_unverified_runtime_completion(
         "runtime_preflight_receipt",
         "project_root",
         "runtime_config_path",
+        "runtime_config_sha256",
     ],
 )
 def test_validator_rejects_incomplete_runtime_provenance(
@@ -420,6 +434,22 @@ def test_validator_rejects_runtime_preflight_digest_mismatch(
     _mock_runtime_dependencies(monkeypatch, payload["config"], digest="b" * 64)
 
     with pytest.raises(ManifestValidationError, match="digest disagrees"):
+        validate_run_manifest(path)
+
+
+def test_validator_rejects_runtime_config_digest_mismatch(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path, payload = _runtime_manifest(tmp_path, make_image)
+    _mock_runtime_dependencies(
+        monkeypatch,
+        payload["config"],
+        current_config_digest="d" * 64,
+    )
+
+    with pytest.raises(ManifestValidationError, match="config digest disagrees"):
         validate_run_manifest(path)
 
 

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from scaleguard.contracts import CompletionLevel, Decision, RunStatus
-from scaleguard.errors import ArtifactError, ScaleGuardError
+from scaleguard.errors import ArtifactError, ConfigurationError, ScaleGuardError
 from scaleguard.images import inspect_image
 from scaleguard.strict_json import StrictJSONError, loads
 
@@ -589,6 +589,7 @@ def validate_run_manifest(
         preflight_path = provenance.get("runtime_preflight_receipt")
         project_root = provenance.get("project_root")
         config_path = provenance.get("runtime_config_path")
+        config_digest = provenance.get("runtime_config_sha256")
         if not isinstance(preflight_path, str) or not preflight_path:
             raise ManifestValidationError(
                 f"{completion.value} runtime preflight provenance is incomplete"
@@ -601,9 +602,14 @@ def validate_run_manifest(
             raise ManifestValidationError(
                 f"{completion.value} runtime preflight provenance is incomplete"
             )
-        from scaleguard.config import load_config
+        if not isinstance(config_digest, str) or not config_digest:
+            raise ManifestValidationError(
+                f"{completion.value} runtime preflight provenance is incomplete"
+            )
+        from scaleguard.config import parse_config
         from scaleguard.provenance import (
             RuntimePreflightError,
+            load_regular_file_snapshot,
             validate_runtime_preflight,
         )
 
@@ -613,7 +619,12 @@ def validate_run_manifest(
                 config_path=Path(config_path),
                 project_root=Path(project_root),
             )
-        except RuntimePreflightError as error:
+            config_payload, current_config_digest = load_regular_file_snapshot(
+                Path(config_path),
+                "runtime config",
+            )
+            current_config = parse_config(config_payload, source=Path(config_path))
+        except (ConfigurationError, RuntimePreflightError) as error:
             raise ManifestValidationError(
                 f"{completion.value} runtime preflight is invalid: {error}"
             ) from error
@@ -623,7 +634,14 @@ def validate_run_manifest(
             raise ManifestValidationError(
                 f"{completion.value} runtime preflight digest disagrees with provenance"
             )
-        if load_config(Path(config_path)).as_dict() != config:
+        if (
+            validated_provenance.get("runtime_config_sha256") != config_digest
+            or current_config_digest != config_digest
+        ):
+            raise ManifestValidationError(
+                f"{completion.value} runtime config digest disagrees with provenance"
+            )
+        if current_config.as_dict() != config:
             raise ManifestValidationError(
                 f"{completion.value} manifest config differs from its preflighted config"
             )

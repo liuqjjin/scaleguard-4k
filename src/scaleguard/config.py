@@ -452,15 +452,13 @@ def _validate_types(config: PipelineConfig) -> None:
     )
 
 
-def load_config(path: Path) -> PipelineConfig:
-    """Load a strict configuration without environment-variable interpolation."""
+def parse_config(document: str | bytes, *, source: Path) -> PipelineConfig:
+    """Parse one strict configuration snapshot without environment interpolation."""
 
     try:
-        raw = load_strict_yaml(path.read_text(encoding="utf-8"))
-    except OSError as error:
-        raise ConfigurationError(f"cannot read configuration {path}: {error}") from error
+        raw = load_strict_yaml(document)
     except StrictYAMLError as error:
-        raise ConfigurationError(f"invalid YAML in {path}: {error}") from error
+        raise ConfigurationError(f"invalid YAML in {source}: {error}") from error
     if raw is None:
         raw = {}
     if not isinstance(raw, dict):
@@ -480,3 +478,13 @@ def load_config(path: Path) -> PipelineConfig:
     )
     validate_config(config)
     return config
+
+
+def load_config(path: Path) -> PipelineConfig:
+    """Load a strict configuration without environment-variable interpolation."""
+
+    try:
+        document = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ConfigurationError(f"cannot read configuration {path}: {error}") from error
+    return parse_config(document, source=path)

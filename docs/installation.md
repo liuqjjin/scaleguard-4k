@@ -143,6 +143,11 @@ receipt:
 These receipts establish the installed dependency contract only. They contain
 no GPU inference or quality-result claim.
 
+Smoke and integration do not trust these historical bytes alone: immediately
+before model execution they rerun the same four audits into the attempt
+directory and bind an exact baseline comparison into a schema-v2 runtime
+preflight receipt.
+
 The aggregate `bootstrap.json` is written as `running` before provisioning and
 is replaced with `passed` only after every lock, checkout, environment, and
 audit check succeeds. Any ordinary hook failure replaces it with `failed`, the

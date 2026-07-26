@@ -528,13 +528,35 @@ def audit_runtime_imports(
 
 
 def write_atomic(path: Path, document: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(
-        json.dumps(document, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    expanded = path.expanduser()
+    candidate = expanded if expanded.is_absolute() else Path.cwd() / expanded
+    output = candidate.parent.resolve() / candidate.name
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.is_symlink() or (output.exists() and not output.is_file()):
+        raise RuntimeError(f"environment audit output is unsafe: {output}")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{output.name}.",
+        suffix=".tmp",
+        dir=output.parent,
     )
-    temporary.replace(path)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(document, handle, indent=2, sort_keys=True, allow_nan=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, output)
+        directory_descriptor = os.open(
+            output.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -657,7 +679,7 @@ def main() -> int:
         "audited_overrides": overrides,
         "issues": issues,
     }
-    write_atomic(args.output.resolve(), document)
+    write_atomic(args.output, document)
     return 0 if not issues else 1
 
 

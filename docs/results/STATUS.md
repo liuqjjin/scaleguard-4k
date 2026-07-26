@@ -21,7 +21,7 @@ the authoritative claim boundary until a later evidence review updates it.
 | Upstream identity | 4KAgent and CoZ commits, root trees, ordered patches, and licenses are locked and audited |
 | Runtime dependency identity | DepictQA is pinned as a 4KAgent transitive perception service |
 | Weight identity | immutable revisions, known hashes, licenses, optional entries, and a manual gate are recorded |
-| Deployment preparation | dual-4090 preflight, bootstrap, weight, smoke, integration, diagnostics, and external-gate contracts exist |
+| Deployment preparation | dual-4090 preflight, fresh runtime re-attestation, bootstrap, weight, smoke, integration, diagnostics, and external-gate contracts exist |
 | Evaluation preparation | hash-bound RGB PSNR/SSIM and offline PyIQA receipt harnesses, calibration receipts, and paired non-imputed summary tooling exist |
 
 Local checks demonstrate repository contracts only. The configured AutoDL
