@@ -1,0 +1,12 @@
+schema_version: 1
+dependencies:
+  depictqa:
+    name: DepictQA
+    role: 4kagent_transitive_perception_service
+    parent: fourkagent
+    url: https://github.com/XPixelGroup/DepictQA.git
+    commit: 06583c6ff2a0e6ae8095d24ee853b792f1e3293d
+    tree: d48ddf46fad98e445220cbcc0c86eccaf72feb7d
+    license: Apache-2.0
+    checkout: third_party/dependencies/DepictQA
+    patches: []

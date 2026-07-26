@@ -1,0 +1,29 @@
+diff --git a/osediff_sd3.py b/osediff_sd3.py
+index a7e7369..5c7b4b3 100644
+--- a/osediff_sd3.py
++++ b/osediff_sd3.py
+@@ -744,7 +744,7 @@ class OSEDiff_SD3_TEST_TILE(torch.nn.Module):
+         # Insert LoRA into VAE
+         print(f"Loading LoRA to VAE from {self.vae_path}")
+         self.model.vae, self.lora_vae_modules_encoder = inject_lora_vae(self.model.vae, lora_rank=args.lora_rank, verbose=False)
+-        encoder_state_dict_fp16 = torch.load(self.vae_path, map_location="cpu")
++        encoder_state_dict_fp16 = torch.load(self.vae_path, map_location="cpu", weights_only=True)
+         self.model.vae.encoder.load_state_dict(encoder_state_dict_fp16)
+         
+         # save original forward (only once)
+@@ -785,6 +785,7 @@ class OSEDiff_SD3_TEST_TILE(torch.nn.Module):
+     @torch.no_grad()
+     def create_full_latent(self, x_full: torch.Tensor, vlm_model, vlm_processor, full_path, next_path, prompt_type) -> torch.Tensor:
+         device = self.model.transformer.device
++        self.model.scheduler.set_timesteps(1, device=device)
+         # 1) encode to full latent (via VAEHook)
+         z_full = self.model.vae.encode(x_full).latent_dist.sample() \
+                 * self.model.vae.config.scaling_factor
+@@ -883,6 +884,7 @@ class OSEDiff_SD3_TEST_TILE(torch.nn.Module):
+                 padding=True,
+                 return_tensors="pt",
+             )
++            inputs = inputs.to(next(vlm_model.parameters()).device)
+             generated_ids = vlm_model.generate(**inputs, max_new_tokens=16)
+             generated_ids_trimmed = [
+                 out_ids[len(in_ids) :] for in_ids, out_ids in zip(inputs.input_ids, generated_ids)

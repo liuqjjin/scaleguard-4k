@@ -1,0 +1,5 @@
+# HPSv2 1.2.0 declares training/test-only pins that conflict with the
+# security-updated inference environment. Install this exact wheel with
+# --no-deps, then require the three exact audited metadata overrides in ADR 0005.
+hpsv2==1.2.0 \
+    --hash=sha256:3ee638b06847bef24e1de43d0b5e3890a4a850034b4bf618e4bb3e78e2d806a1

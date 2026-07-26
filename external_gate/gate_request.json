@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "gate_id": "autodl-2x4090-coz-gated-v1",
+  "status": "awaiting_external_resources",
+  "current_completion_level": "STATIC_READY",
+  "completion_level_note": "The source package is at STATIC_READY based on local static and unit checks. Gate execution must use the final clean committed HEAD; this status does not claim GPU execution, model reproduction, metrics, or external-gate completion.",
+  "algorithm_upstreams": [
+    {
+      "name": "4KAgent",
+      "repository": "https://github.com/taco-group/4KAgent",
+      "reference_audit_commit": "04179ffed12c1db64890a48ac6d51ae4abeaee37",
+      "resolved_commit_source": "upstream-lock.yaml"
+    },
+    {
+      "name": "Chain-of-Zoom",
+      "repository": "https://github.com/bryanswkim/Chain-of-Zoom",
+      "reference_audit_commit": "5a4f351c9c655568c4705d5fc53ef70a3f28905f",
+      "resolved_commit_source": "upstream-lock.yaml"
+    }
+  ],
+  "required_hardware": {
+    "platform": "Linux",
+    "gpu_count": 2,
+    "gpu_name_pattern": "4090",
+    "minimum_memory_mib_per_gpu": 24000,
+    "minimum_nvidia_driver": "560.28.03",
+    "minimum_free_cache_disk_gib": 150
+  },
+  "required_credentials": [
+    {
+      "environment_name": "HF_TOKEN",
+      "reason": "Access immutable gated Stable Diffusion 3 files declared by the audited weight manifest",
+      "alternative": "A prior hf auth login under the configured HF_HOME",
+      "must_not_appear_in_commands_or_logs": true
+    },
+    {
+      "environment_name": "OPENAI_API_KEY",
+      "reason": "Run the locked 4KAgent planner through the configured API-backed LLM",
+      "alternative": null,
+      "must_not_appear_in_commands_or_logs": true
+    }
+  ],
+  "conditional_credentials": [],
+  "required_user_inputs": [
+    "The audited root weights-lock.json",
+    "The manually acquired DepictQA degradation delta placed at its locked destination; upstream published no digest",
+    "An authorized smoke-test image",
+    "An authorized integration-test image"
+  ],
+  "patch_evidence": {
+    "source": "upstream-lock.yaml",
+    "requirement": "Every applied patch path and SHA-256 must pass scaleguard upstream verify before GPU execution"
+  },
+  "runtime_dependency_evidence": {
+    "source": "runtime-dependencies.yaml",
+    "scope": "4KAgent transitive runtime dependencies only",
+    "requirement": "Every dependency checkout must pass origin, disabled push URL, commit, tree, and worktree verification before GPU execution"
+  },
+  "weight_materialization_evidence": {
+    "hook": "scripts/weights/materialize.py",
+    "fixed_marker": "$SCALEGUARD_CACHE_ROOT/weights/.scaleguard-materialization.json",
+    "requirement": "The marker is bound to the download receipt and dispatched commit, all required layouts verify, and checkout_mutations is false"
+  },
+  "commands": [
+    "bash scripts/autodl/check_gpu.sh",
+    "bash scripts/autodl/bootstrap.sh",
+    "bash scripts/autodl/download_weights.sh",
+    "bash scripts/autodl/run_smoke.sh --input \"$SCALEGUARD_SMOKE_INPUT\"",
+    "bash scripts/autodl/run_integration.sh --input \"$SCALEGUARD_INTEGRATION_INPUT\"",
+    "bash scripts/autodl/collect_diagnostics.sh"
+  ],
+  "pass_conditions_source": "external_gate/expected_artifacts.json",
+  "result_template": "external_gate/RESULT_TEMPLATE.json",
+  "redaction_policy": "external_gate/REDACTION.md",
+  "recovery": [
+    "Keep the failed run directory; do not delete raw evidence.",
+    "Run collect_diagnostics.sh after a failure.",
+    "Correct the diagnosed configuration or environment issue and rerun; each attempt receives a new evidence directory."
+  ]
+}

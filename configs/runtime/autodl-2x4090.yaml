@@ -1,0 +1,71 @@
+runtime:
+  run_root: runs
+  process_timeout_seconds: 7200
+  keep_temporary_files: false
+  gpu_poll_interval_seconds: 0.25
+
+fourkagent:
+  mode: upstream
+  checkout: third_party/checkouts/4KAgent
+  python_executable: .runtime/envs/4kagent/bin/python
+  profile: FastGen4K_P
+  tool_gpu: "0"
+  depictqa_command:
+    - "{project_root}/.runtime/envs/depictqa/bin/python"
+    - "{project_root}/third_party/overlays/4kagent/serve_depictqa_eval.py"
+    - --depictqa-checkout
+    - "{project_root}/third_party/dependencies/DepictQA"
+    - --app-script
+    - "{checkout}/installation/custom_depictqa_scripts/app_eval.py"
+    - --base-config
+    - "{checkout}/installation/custom_depictqa_scripts/config_eval.yaml"
+    - --weights-root
+    - "{project_root}/weights/4kagent/depictqa"
+    - --session-dir
+    - "{service_work_dir}"
+  depictqa_cwd: third_party/dependencies/DepictQA
+  depictqa_host: 127.0.0.1
+  depictqa_port: 5001
+  depictqa_startup_timeout_seconds: 900
+  depictqa_visible_devices: "1"
+  perception_model_path: weights/4kagent/models/Qwen2.5-VL-7B-Instruct
+  toolbox_root: weights/4kagent/runtime/toolbox-root
+  hps_root: weights/4kagent/hpsv2
+  quality_model_path: weights/metrics/pyiqa/musiq_koniq_ckpt-e95806b9.pth
+  llm_model: gpt-4-turbo
+  api_key_env: OPENAI_API_KEY
+
+coz:
+  mode: persistent
+  checkout: third_party/checkouts/Chain-of-Zoom
+  python_executable: .runtime/envs/coz/bin/python
+  visible_devices: "0,1"
+  model_path: weights/models/stabilityai/stable-diffusion-3-medium-diffusers
+  qwen_model_path: weights/models/Qwen/Qwen2.5-VL-3B-Instruct
+  sr_lora_path: weights/chain-of-zoom/ckpt/SR_LoRA/model_20001.pkl
+  vae_path: weights/chain-of-zoom/ckpt/SR_VAE/vae_encoder_20001.pt
+  vlm_lora_path: weights/chain-of-zoom/ckpt/VLM_LoRA/checkpoint-10000
+  prompt_type: vlm
+  seed: 20250727
+  mixed_precision: fp32
+  tile_size: 512
+  tile_overlap: 64
+
+metrics:
+  quality_backend: pyiqa
+  quality_metric: musiq
+  quality_device: cpu
+  quality_model_path: weights/metrics/pyiqa/musiq_koniq_ckpt-e95806b9.pth
+  min_quality_gain: 0.0
+  max_scale_nrmse: 0.12
+  max_scale_edge_mae: 0.10
+  measurement_enabled: false
+  measurement_model: resize
+  measurement_parameters: {}
+  max_measurement_nrmse: 0.12
+
+controller:
+  target_factor: 4
+  max_coz_steps: 2
+  color_strategy: adain
+  accept_unvalidated_quality_proxy: false

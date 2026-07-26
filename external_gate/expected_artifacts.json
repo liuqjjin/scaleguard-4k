@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "gate_id": "autodl-2x4090-coz-gated-v1",
+  "artifact_root": "artifacts/autodl",
+  "required": [
+    {
+      "glob": "bootstrap/*/bootstrap.json",
+      "condition": "status == passed, installation_scope == project-autodl-hook, gpu_preflight_skipped == false, git_commit equals the dispatched commit, doctor_status is passed or passed_with_deferred_weights, and the runtime receipt validation plus aggregate receipt SHA-256 fields are present; deferred weights require weights_ready_at_bootstrap == false"
+    },
+    {
+      "globs": [
+        "gpu-check/*/gpu_check.json",
+        "bootstrap/*/gpu-preflight/gpu_check.json",
+        "smoke/*/gpu-preflight/gpu_check.json",
+        "integration/*/gpu-preflight/gpu_check.json"
+      ],
+      "condition": "Every listed stage that was run has status == passed; the standalone gate preflight must exist, two selected GPUs match 4090, and each reports at least 24000 MiB"
+    },
+    {
+      "glob": "weight-download/*/weights-receipt.json",
+      "condition": "status == passed; immutable downloads have SHA-256; the required no-digest manual delta is recorded_manual with a measured hash and is not described as source-authenticated"
+    },
+    {
+      "glob": "weight-download/*/materialization-receipt.json",
+      "condition": "status == passed; source_weights_receipt_sha256 binds the download receipt; source_git_commit and weights_root match the run; layouts are verified; checkout_mutations == false; errors is empty; content equals the fixed marker"
+    },
+    {
+      "glob": "smoke/*/execution.json",
+      "condition": "status == passed; return_code == 0; runtime-preflight.json validates against the clean dispatched commit, config, locks, environment receipts, fixed materialization marker, and weight receipt; output hash and non-empty GPU sample evidence exist"
+    },
+    {
+      "glob": "integration/*/execution.json",
+      "condition": "status == passed; return_code == 0; runtime-preflight.json validates against the clean dispatched commit, config, locks, environment receipts, fixed materialization marker, and weight receipt; output hash and non-empty GPU sample evidence exist"
+    },
+    {
+      "glob": "diagnostics/*/scaleguard-diagnostics-*.tar.gz",
+      "condition": "archive exists, its .sha256 verifies, and a human reviewed it for secrets before transfer"
+    }
+  ],
+  "required_project_evidence": [
+    "ScaleGuard run manifest identifies real, non-fake backends and exact configuration",
+    "Upstream verification records the two core commits from upstream-lock.yaml and the 4KAgent transitive dependency from runtime-dependencies.yaml",
+    "Per-scale images, decisions, scores, stderr, and failure or rollback state are retained",
+    "No completion level is raised solely because these wrapper scripts returned success"
+  ]
+}

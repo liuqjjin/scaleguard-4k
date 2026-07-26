@@ -1,0 +1,85 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "scaleguard-4k"
+version = "0.1.0.dev0"
+description = "Trusted scale control for 4KAgent and Chain-of-Zoom"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+license-files = [
+  "LICENSE",
+  "NOTICE",
+  "third_party/licenses/Chain-of-Zoom-MIT.txt",
+]
+authors = [{ name = "ScaleGuard-4K contributors" }]
+keywords = ["image-restoration", "super-resolution", "vision-language-models"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+  "Topic :: Scientific/Engineering :: Image Processing",
+]
+dependencies = [
+  "numpy>=1.26,<2.3; python_version < '3.14'",
+  "numpy>=2.3,<3; python_version >= '3.14'",
+  "Pillow>=10,<13",
+  "PyYAML>=6,<7",
+]
+
+[project.optional-dependencies]
+metrics = [
+  "pyiqa==0.1.16",
+]
+dev = [
+  "hatchling==1.27.0",
+  "mypy>=1.15,<2",
+  "pip-audit==2.10.1",
+  "pytest>=8.3,<10",
+  "pytest-cov>=6,<8",
+  "ruff>=0.11,<1",
+  "types-PyYAML>=6.0.12",
+]
+
+[project.scripts]
+scaleguard = "scaleguard.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/scaleguard"]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["scaleguard"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "DTZ", "ISC", "PIE", "PT", "RET", "RUF"]
+ignore = ["ISC001"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101"]
+
+[tool.mypy]
+strict = true
+warn_unreachable = true
+packages = ["scaleguard"]

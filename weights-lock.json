@@ -1,0 +1,284 @@
+{
+  "schema_version": 1,
+  "artifacts": [
+    {
+      "id": "coz-sd3-medium-diffusers",
+      "provider": "huggingface",
+      "repo_id": "stabilityai/stable-diffusion-3-medium-diffusers",
+      "revision": "ea42f8cef0f178587cf766dc8129abd379c90671",
+      "license": "Stability AI Non-Commercial Research Community License",
+      "gated": true,
+      "required": true,
+      "destination": "models/stabilityai/stable-diffusion-3-medium-diffusers",
+      "files": [
+        "**/*"
+      ],
+      "known_sha256": null,
+      "verify_on_download": true,
+      "source": "https://huggingface.co/stabilityai/stable-diffusion-3-medium-diffusers",
+      "notes": "Hugging Face access is auto-gated. Accept the model terms before downloading. The post-download receipt hashes every selected file."
+    },
+    {
+      "id": "coz-qwen2.5-vl-3b-instruct",
+      "provider": "huggingface",
+      "repo_id": "Qwen/Qwen2.5-VL-3B-Instruct",
+      "revision": "66285546d2b821cf421d4f5eb2576359d3770cd3",
+      "license": "Qwen Research License Agreement",
+      "gated": false,
+      "required": true,
+      "destination": "models/Qwen/Qwen2.5-VL-3B-Instruct",
+      "files": [
+        "**/*"
+      ],
+      "known_sha256": null,
+      "verify_on_download": true,
+      "source": "https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct",
+      "notes": "The pinned 3B model uses Qwen's non-commercial research license; do not infer Apache-2.0 terms from other Qwen sizes."
+    },
+    {
+      "id": "4kagent-qwen2.5-vl-7b-instruct",
+      "provider": "huggingface",
+      "repo_id": "Qwen/Qwen2.5-VL-7B-Instruct",
+      "revision": "cc594898137f460bfe9f0759e9844b3ce807cfb5",
+      "license": "Apache-2.0",
+      "gated": false,
+      "required": true,
+      "destination": "4kagent/models/Qwen2.5-VL-7B-Instruct",
+      "files": [
+        "**/*"
+      ],
+      "known_sha256": null,
+      "verify_on_download": true,
+      "source": "https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct",
+      "notes": "4KAgent's pinned DepictQA profile still constructs its local perception VLM to obtain the HPS prompt. The adapter forces this immutable local path and offline loading."
+    },
+    {
+      "id": "coz-sr-lora",
+      "provider": "https",
+      "repo_id": "bryanswkim/Chain-of-Zoom",
+      "revision": "5a4f351c9c655568c4705d5fc53ef70a3f28905f",
+      "license": "NOASSERTION",
+      "gated": false,
+      "required": true,
+      "destination": "chain-of-zoom/ckpt/SR_LoRA/model_20001.pkl",
+      "files": [
+        "model_20001.pkl"
+      ],
+      "known_sha256": "697d3f9ab69a222006ca3ae48503cf057774c8142646301e9bba90e58242e47e",
+      "verify_on_download": true,
+      "url": "https://raw.githubusercontent.com/bryanswkim/Chain-of-Zoom/5a4f351c9c655568c4705d5fc53ef70a3f28905f/ckpt/SR_LoRA/model_20001.pkl",
+      "sha256": "697d3f9ab69a222006ca3ae48503cf057774c8142646301e9bba90e58242e47e",
+      "source": "https://github.com/bryanswkim/Chain-of-Zoom/blob/5a4f351c9c655568c4705d5fc53ef70a3f28905f/ckpt/SR_LoRA/model_20001.pkl",
+      "notes": "Tracked by the CoZ repository. No separate per-checkpoint model card or license was found."
+    },
+    {
+      "id": "coz-vae-adapter",
+      "provider": "https",
+      "repo_id": "bryanswkim/Chain-of-Zoom",
+      "revision": "5a4f351c9c655568c4705d5fc53ef70a3f28905f",
+      "license": "NOASSERTION",
+      "gated": false,
+      "required": true,
+      "destination": "chain-of-zoom/ckpt/SR_VAE/vae_encoder_20001.pt",
+      "files": [
+        "vae_encoder_20001.pt"
+      ],
+      "known_sha256": "ed7f7aa03dfcbce9016d51c5aa8d3920428b3d7c9a678c721cd062d01805ae4a",
+      "verify_on_download": true,
+      "url": "https://raw.githubusercontent.com/bryanswkim/Chain-of-Zoom/5a4f351c9c655568c4705d5fc53ef70a3f28905f/ckpt/SR_VAE/vae_encoder_20001.pt",
+      "sha256": "ed7f7aa03dfcbce9016d51c5aa8d3920428b3d7c9a678c721cd062d01805ae4a",
+      "source": "https://github.com/bryanswkim/Chain-of-Zoom/blob/5a4f351c9c655568c4705d5fc53ef70a3f28905f/ckpt/SR_VAE/vae_encoder_20001.pt",
+      "notes": "Tracked by the CoZ repository. No separate per-checkpoint model card or license was found."
+    },
+    {
+      "id": "coz-vlm-lora-config",
+      "provider": "https",
+      "repo_id": "bryanswkim/Chain-of-Zoom",
+      "revision": "5a4f351c9c655568c4705d5fc53ef70a3f28905f",
+      "license": "NOASSERTION",
+      "gated": false,
+      "required": true,
+      "destination": "chain-of-zoom/ckpt/VLM_LoRA/checkpoint-10000/adapter_config.json",
+      "files": [
+        "adapter_config.json"
+      ],
+      "known_sha256": "66ebc2c4fcfe472c503814f7440b5e4bde2a2e4d197a52495e42df8dca69017e",
+      "verify_on_download": true,
+      "url": "https://raw.githubusercontent.com/bryanswkim/Chain-of-Zoom/5a4f351c9c655568c4705d5fc53ef70a3f28905f/ckpt/VLM_LoRA/checkpoint-10000/adapter_config.json",
+      "sha256": "66ebc2c4fcfe472c503814f7440b5e4bde2a2e4d197a52495e42df8dca69017e",
+      "source": "https://github.com/bryanswkim/Chain-of-Zoom/blob/5a4f351c9c655568c4705d5fc53ef70a3f28905f/ckpt/VLM_LoRA/checkpoint-10000/adapter_config.json",
+      "notes": "Configuration paired with the GRPO VLM adapter; keep both files at the same pinned revision."
+    },
+    {
+      "id": "coz-vlm-lora-weights",
+      "provider": "https",
+      "repo_id": "bryanswkim/Chain-of-Zoom",
+      "revision": "5a4f351c9c655568c4705d5fc53ef70a3f28905f",
+      "license": "NOASSERTION",
+      "gated": false,
+      "required": true,
+      "destination": "chain-of-zoom/ckpt/VLM_LoRA/checkpoint-10000/adapter_model.safetensors",
+      "files": [
+        "adapter_model.safetensors"
+      ],
+      "known_sha256": "1ba6fc24e76e0e078ceb6e067c49bcfbe86cb0d8995add1515172d922fba2ebd",
+      "verify_on_download": true,
+      "url": "https://raw.githubusercontent.com/bryanswkim/Chain-of-Zoom/5a4f351c9c655568c4705d5fc53ef70a3f28905f/ckpt/VLM_LoRA/checkpoint-10000/adapter_model.safetensors",
+      "sha256": "1ba6fc24e76e0e078ceb6e067c49bcfbe86cb0d8995add1515172d922fba2ebd",
+      "source": "https://github.com/bryanswkim/Chain-of-Zoom/blob/5a4f351c9c655568c4705d5fc53ef70a3f28905f/ckpt/VLM_LoRA/checkpoint-10000/adapter_model.safetensors",
+      "notes": "Tracked by the CoZ repository. No separate per-checkpoint model card or license was found."
+    },
+    {
+      "id": "coz-dape-adapter",
+      "provider": "https",
+      "repo_id": "bryanswkim/Chain-of-Zoom",
+      "revision": "5a4f351c9c655568c4705d5fc53ef70a3f28905f",
+      "license": "NOASSERTION",
+      "gated": false,
+      "required": false,
+      "destination": "chain-of-zoom/ckpt/DAPE/DAPE.pth",
+      "files": [
+        "DAPE.pth"
+      ],
+      "known_sha256": "a7028be2edcbe9ab0bd1c4ab6f2a2a86f4b44d32261a4faa50ae10fdd9b2feba",
+      "verify_on_download": true,
+      "url": "https://raw.githubusercontent.com/bryanswkim/Chain-of-Zoom/5a4f351c9c655568c4705d5fc53ef70a3f28905f/ckpt/DAPE/DAPE.pth",
+      "sha256": "a7028be2edcbe9ab0bd1c4ab6f2a2a86f4b44d32261a4faa50ae10fdd9b2feba",
+      "source": "https://github.com/bryanswkim/Chain-of-Zoom/blob/5a4f351c9c655568c4705d5fc53ef70a3f28905f/ckpt/DAPE/DAPE.pth",
+      "notes": "Optional DAPE prompt path. The ScaleGuard runtime profile uses the CoZ VLM prompt path instead."
+    },
+    {
+      "id": "4kagent-toolbox-archive",
+      "provider": "huggingface",
+      "repo_id": "YSZuo/4KAgent-Toolbox-Pretrained-Models",
+      "revision": "296428714177474f40a841a1677a935b7ea3bc9c",
+      "license": "NOASSERTION",
+      "gated": false,
+      "required": true,
+      "destination": "4kagent/toolbox",
+      "files": [
+        "4KAgent_toolbox_pretrained_ckpts.tar.gz"
+      ],
+      "known_sha256": "5caae37bbf06d2690d93974d80bfed42c55c4ad89aead5aa455420687b417c7e",
+      "verify_on_download": true,
+      "include": [
+        "4KAgent_toolbox_pretrained_ckpts.tar.gz"
+      ],
+      "source": "https://huggingface.co/YSZuo/4KAgent-Toolbox-Pretrained-Models",
+      "notes": "The repository card says Apache-2.0, but the archive aggregates checkpoints from separately licensed expert projects. Retain and review each component's terms. It also contains assets that upstream notes may otherwise auto-download."
+    },
+    {
+      "id": "4kagent-depictqa-vicuna",
+      "provider": "huggingface",
+      "repo_id": "lmsys/vicuna-7b-v1.5",
+      "revision": "3321f76e3f527bd14065daf69dad9344000a201d",
+      "license": "Llama 2 Community License",
+      "gated": false,
+      "required": true,
+      "destination": "4kagent/depictqa/vicuna-7b-v1.5",
+      "files": [
+        "**/*"
+      ],
+      "known_sha256": null,
+      "verify_on_download": true,
+      "source": "https://huggingface.co/lmsys/vicuna-7b-v1.5",
+      "notes": "Required by the local DepictQA configuration used in the pinned FastGen4K_P profile."
+    },
+    {
+      "id": "4kagent-depictqa-dq495k",
+      "provider": "huggingface",
+      "repo_id": "zhiyuanyou/DepictQA2-DQ495K",
+      "revision": "915fee700b9f41c8be7da5d5b83da8a71dfc332b",
+      "license": "Apache-2.0",
+      "gated": false,
+      "required": true,
+      "destination": "4kagent/depictqa/dq495k",
+      "files": [
+        "ckpt.pt"
+      ],
+      "known_sha256": "4494778f6045effa9252e145184e0cd5d2b184de3bd7be37849f81558dea2f56",
+      "verify_on_download": true,
+      "include": [
+        "ckpt.pt"
+      ],
+      "source": "https://huggingface.co/zhiyuanyou/DepictQA2-DQ495K",
+      "notes": "Upstream installation renames ckpt.pt to DQ495K.pt in the DepictQA delta directory."
+    },
+    {
+      "id": "4kagent-depictqa-clip-vit-l14",
+      "provider": "https",
+      "repo_id": "openai/CLIP",
+      "revision": null,
+      "license": "NOASSERTION",
+      "gated": false,
+      "required": true,
+      "destination": "4kagent/depictqa/ViT-L-14.pt",
+      "files": [
+        "ViT-L-14.pt"
+      ],
+      "known_sha256": "b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836",
+      "verify_on_download": true,
+      "url": "https://openaipublic.azureedge.net/clip/models/b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836/ViT-L-14.pt",
+      "sha256": "b8cca3fd41ae0c99ba7e8951adf17d267cdb84cd88be6f7c2e0eca1737a03836",
+      "source": "https://github.com/openai/CLIP",
+      "notes": "The upstream URL is content-addressed by the expected SHA-256. Review the model-weight terms separately from the CLIP code license."
+    },
+    {
+      "id": "4kagent-depictqa-degradation-delta",
+      "provider": "manual",
+      "repo_id": "taco-group/4KAgent",
+      "revision": "04179ffed12c1db64890a48ac6d51ae4abeaee37",
+      "license": "NOASSERTION",
+      "gated": false,
+      "required": true,
+      "destination": "4kagent/depictqa/delta/degra_eval.pt",
+      "files": [
+        "degra_eval.pt"
+      ],
+      "known_sha256": null,
+      "verify_on_download": true,
+      "source": "https://drive.google.com/file/d/1o-PN1iXctWl62Tdb8fZs1eD1Ehv6HBMh/view",
+      "notes": "The pinned 4KAgent installation guide supplies only this Google Drive object and no digest. Download it manually, place it at the destination, then let the weight receipt compute and record its SHA-256. Do not treat an unverified file as reproduced."
+    },
+    {
+      "id": "4kagent-hpsv2-2.1",
+      "provider": "huggingface",
+      "repo_id": "xswu/HPSv2",
+      "revision": "697403c78157020a1ae59d23f111aa58ced35b0a",
+      "license": "Apache-2.0",
+      "gated": false,
+      "required": true,
+      "destination": "4kagent/hpsv2",
+      "files": [
+        "HPS_v2.1_compressed.pt"
+      ],
+      "known_sha256": "c57a38fb4a2f7e7c15bf00da2ea377cdf165448b4dd1052a484c215a998c9837",
+      "verify_on_download": true,
+      "include": [
+        "HPS_v2.1_compressed.pt"
+      ],
+      "source": "https://huggingface.co/xswu/HPSv2",
+      "notes": "4KAgent calls hpsv2.score with hps_version=v2.1; an unlocked library cache download would otherwise follow a mutable branch."
+    },
+    {
+      "id": "scaleguard-pyiqa-musiq-koniq",
+      "provider": "huggingface",
+      "repo_id": "chaofengc/IQA-PyTorch-Weights",
+      "revision": "0df2df423c65f6a64209309695f3845727431027",
+      "license": "CC-BY-NC-SA-4.0",
+      "gated": false,
+      "required": true,
+      "destination": "metrics/pyiqa",
+      "files": [
+        "musiq_koniq_ckpt-e95806b9.pth"
+      ],
+      "known_sha256": "e95806b9eae5f3814c410f574ba8e552362bd5bc63d758ed5b97860f5d6185aa",
+      "verify_on_download": true,
+      "include": [
+        "musiq_koniq_ckpt-e95806b9.pth"
+      ],
+      "source": "https://huggingface.co/chaofengc/IQA-PyTorch-Weights",
+      "notes": "Selected by the AutoDL research profile through optional PyIQA 0.1.16. The weight repository is non-commercial and share-alike; this restriction is separate from the ScaleGuard source license."
+    }
+  ]
+}

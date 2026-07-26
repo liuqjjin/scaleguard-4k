@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "gate_id": "autodl-2x4090-coz-gated-v1",
+  "status": null,
+  "executed_at_utc": null,
+  "git_commit": null,
+  "upstream_lock_sha256": null,
+  "runtime_dependencies_lock_sha256": null,
+  "weight_manifest_sha256": null,
+  "host": {
+    "os": null,
+    "driver_version": null,
+    "cuda_runtime": null,
+    "gpus": []
+  },
+  "checks": {
+    "bootstrap": {
+      "status": null,
+      "evidence_path": null,
+      "runtime_receipt_validation_path": null,
+      "runtime_aggregate_receipt_sha256": null
+    },
+    "gpu_preflight": {
+      "status": null,
+      "evidence_path": null
+    },
+    "weights": {
+      "status": null,
+      "evidence_path": null,
+      "materialization_evidence_path": null,
+      "materialization_marker_sha256": null,
+      "manual_artifacts": [
+        {
+          "id": "4kagent-depictqa-degradation-delta",
+          "measured_sha256": null,
+          "upstream_digest_authenticated": false
+        }
+      ]
+    },
+    "smoke": {
+      "status": null,
+      "evidence_path": null,
+      "runtime_preflight_path": null,
+      "runtime_preflight_sha256": null,
+      "run_id": null,
+      "output_sha256": null,
+      "peak_memory_used_mib_by_gpu": {}
+    },
+    "integration": {
+      "status": null,
+      "evidence_path": null,
+      "runtime_preflight_path": null,
+      "runtime_preflight_sha256": null,
+      "run_id": null,
+      "output_sha256": null,
+      "peak_memory_used_mib_by_gpu": {}
+    }
+  },
+  "highest_supported_completion_level": null,
+  "failures": [],
+  "diagnostics_archive": {
+    "path": null,
+    "sha256": null,
+    "human_redaction_reviewed": false
+  },
+  "reviewer_notes": null
+}

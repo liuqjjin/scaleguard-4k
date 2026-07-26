@@ -1,0 +1,83 @@
+cff-version: 1.2.0
+message: >-
+  If you use ScaleGuard-4K, cite this software and the 4KAgent and
+  Chain-of-Zoom papers listed below.
+title: "ScaleGuard-4K: Degradation-Aware Agentic Restoration with Scale- and Measurement-Consistent Extreme Super-Resolution"
+type: software
+authors:
+  - name: ScaleGuard-4K contributors
+version: 0.1.0.dev0
+license: Apache-2.0
+abstract: >-
+  A research-engineering framework that keeps 4KAgent as the high-level
+  degradation-aware restoration controller, runs Chain-of-Zoom as the sole
+  terminal generative super-resolution session, and records explicit
+  quality, cross-scale, and measurement-consistency decisions.
+keywords:
+  - image restoration
+  - extreme super-resolution
+  - vision-language models
+  - agentic imaging
+  - computational imaging
+references:
+  - type: conference-paper
+    title: "4KAgent: Agentic Any Image to 4K Super-Resolution"
+    authors:
+      - given-names: Yushen
+        family-names: Zuo
+      - given-names: Qi
+        family-names: Zheng
+      - given-names: Mingyang
+        family-names: Wu
+      - given-names: Xinrui
+        family-names: Jiang
+      - given-names: Renjie
+        family-names: Li
+      - given-names: Jian
+        family-names: Wang
+      - given-names: Yide
+        family-names: Zhang
+      - given-names: Gengchen
+        family-names: Mai
+      - given-names: Lihong
+        family-names: Wang
+      - given-names: James Y
+        family-names: Zou
+      - given-names: Xiaoyu
+        family-names: Wang
+      - given-names: Ming-Hsuan
+        family-names: Yang
+      - given-names: Zhengzhong
+        family-names: Tu
+    collection-title: Advances in Neural Information Processing Systems 38
+    year: 2025
+    url: "https://proceedings.neurips.cc/paper_files/paper/2025/hash/f0075fe4e59652cf43148dcfab8d3c93-Abstract-Conference.html"
+  - type: conference-paper
+    title: "Chain-of-Zoom: Extreme Super-Resolution via Scale Autoregression and Preference Alignment"
+    authors:
+      - given-names: Bryan Sangwoo
+        family-names: Kim
+      - given-names: Jeongsol
+        family-names: Kim
+      - given-names: Jong Chul
+        family-names: Ye
+    collection-title: Advances in Neural Information Processing Systems 38
+    year: 2025
+    url: "https://proceedings.neurips.cc/paper_files/paper/2025/hash/b66d8cbb01ac8212830068f3d75b4c5c-Abstract-Conference.html"
+  - type: conference-paper
+    title: "An Intelligent Agentic System for Complex Image Restoration Problems"
+    authors:
+      - given-names: Kaiwen
+        family-names: Zhu
+      - given-names: Jinjin
+        family-names: Gu
+      - given-names: Zhiyuan
+        family-names: You
+      - given-names: Yu
+        family-names: Qiao
+      - given-names: Chao
+        family-names: Dong
+    collection-title: International Conference on Learning Representations
+    year: 2025
+    url: "https://proceedings.iclr.cc/paper_files/paper/2025/hash/921ac785fa9edc73cacaf2664f43d234-Abstract-Conference.html"
+    notes: Lineage reference only; AgenticIR is not a ScaleGuard-4K runtime dependency.

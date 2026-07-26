@@ -1,0 +1,82 @@
+ScaleGuard-4K
+Copyright 2026 ScaleGuard-4K contributors
+
+ScaleGuard-4K source code is licensed under the Apache License, Version 2.0.
+That license applies only to this project's original source and does not
+relicense upstream code, optional packages, model weights, datasets, or model
+outputs.
+
+Core upstream code
+------------------
+
+4KAgent
+  https://github.com/taco-group/4KAgent
+  Audited commit: 04179ffed12c1db64890a48ac6d51ae4abeaee37
+  License declared by the repository: Apache-2.0
+
+  The 4KAgent checkout contains many embedded expert tools with their own
+  licenses and notices. Its model toolbox aggregates third-party checkpoints.
+  Keep those notices and review the terms of every enabled tool and weight.
+
+Chain-of-Zoom
+  https://github.com/bryanswkim/Chain-of-Zoom
+  Audited commit: 5a4f351c9c655568c4705d5fc53ef70a3f28905f
+  MIT License
+  Copyright (c) 2025 Bryan Sangwoo Kim
+
+  ScaleGuard-4K carries two small, ordered, content-hashed patches against this
+  commit. The MIT notice applies to the upstream portions represented by those
+  patches. A complete copy is distributed at
+  third_party/licenses/Chain-of-Zoom-MIT.txt.
+
+Code lineage acknowledgement
+----------------------------
+
+The 4KAgent authors state that their code is built upon AgenticIR:
+  https://github.com/Kaiwen-Zhu/AgenticIR
+
+AgenticIR is an acknowledgement and design-lineage reference only. It is not a
+ScaleGuard-4K runtime, checkout, or third core project, and no AgenticIR source
+is copied here. The audited AgenticIR commit has no root license file; do not
+copy its source without separate permission.
+
+Optional image-quality package
+------------------------------
+
+PyIQA 0.1.16 / IQA-PyTorch
+  https://pypi.org/project/pyiqa/0.1.16/
+  Copyright (c) 2022 Chaofeng Chen
+  Required Notice: Copyright (c) 2022 Chaofeng Chen
+  Code license: PolyForm Noncommercial License 1.0.0, with the NTU S-Lab
+  License 1.0 applying to identified components.
+
+Both licenses restrict use to non-commercial purposes. The selected MUSIQ
+weight is hosted in chaofengc/IQA-PyTorch-Weights under CC-BY-NC-SA-4.0.
+PyIQA is an optional metric dependency; its terms do not change the
+Apache-2.0 license on original ScaleGuard-4K source, but a runtime that installs
+or uses it is subject to those additional restrictions. This project therefore
+does not claim that the complete research runtime is commercially usable.
+
+Model and weight terms
+----------------------
+
+The code licenses above are not model licenses. In particular:
+
+* stabilityai/stable-diffusion-3-medium-diffusers is auto-gated and uses the
+  Stability AI Non-Commercial Research Community License.
+* Qwen/Qwen2.5-VL-3B-Instruct uses the Qwen Research License Agreement and is
+  limited to non-commercial research/evaluation without a separate commercial
+  license. Required attribution when redistributing Qwen materials:
+  "Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT, Copyright (c)
+  Alibaba Cloud. All Rights Reserved."
+* lmsys/vicuna-7b-v1.5 uses the Llama 2 Community License.
+* zhiyuanyou/DepictQA2-DQ495K declares Apache-2.0 on its model card.
+* The CoZ-specific SR, VAE, DAPE, and VLM adapter files are distributed in the
+  MIT-licensed CoZ repository, but the audit found no separate per-checkpoint
+  model card. They remain NOASSERTION in the weight lock.
+* The 4KAgent toolbox model repository declares Apache-2.0 at repository level,
+  but its archive aggregates separately sourced expert-model weights; the
+  archive remains NOASSERTION as a whole.
+
+See weights-lock.json for immutable revisions, known hashes, manual gates, and
+source links. A hash identifies content; it does not grant usage rights.

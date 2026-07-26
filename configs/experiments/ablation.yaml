@@ -1,0 +1,32 @@
+schema_version: "1.0"
+name: core-ablation
+status: protocol_only
+groups:
+  - id: a_only
+    description: 4KAgent native restoration without CoZ
+    target_factor: 1
+    scale_control: disabled
+  - id: b_only
+    description: CoZ applied directly to the observed input
+    restoration: identity
+    fixed_coz_steps: 1
+  - id: ab_fixed
+    description: 4KAgent restoration followed by a fixed number of CoZ steps
+    fixed_coz_steps: 1
+  - id: scaleguard
+    description: 4KAgent restoration followed by gated one-step CoZ states
+    scale_control: trusted
+paired_requirements:
+  same_inputs: true
+  same_coz_seed_per_input: true
+  same_quality_metric_revision: true
+  preserve_raw_manifests: true
+  report_failures: true
+metrics:
+  full_reference: [psnr, ssim, lpips]
+  no_reference: [musiq, clipiqa]
+  consistency: [scale_nrmse, scale_edge_mae, measurement_nrmse]
+  systems: [success_rate, stop_rate, rollback_rate, wall_time_seconds, peak_vram_mib]
+notes:
+  - No numerical result belongs in this file.
+  - Thresholds must be calibrated on a validation split disjoint from evaluation.

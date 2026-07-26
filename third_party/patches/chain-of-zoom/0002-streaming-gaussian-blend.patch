@@ -1,0 +1,58 @@
+diff --git a/osediff_sd3.py b/osediff_sd3.py
+--- a/osediff_sd3.py
++++ b/osediff_sd3.py
+@@ -799,19 +799,20 @@ class OSEDiff_SD3_TEST_TILE(torch.nn.Module):
+         cols = (W - tsize + stride - 1)//stride + 1
+         print(f'TILE SIZE: {tsize}, TILE OVERLAP: {tover}, STRIDE: {stride}, ROWS: {rows}, COLS: {cols}')
+ 
+-        # 3) make gaussian weight patched [B,C,tsize,tsize]
+-        weights = self._make_gaussian(tsize, tsize, 1).to(z_full.device)
++        # 3) make gaussian weights and allocate streaming accumulators
++        weights = self._make_gaussian(tsize, tsize, 1).to(
++            z_full.device, dtype=z_full.dtype
++        )
++        z_norm = torch.zeros_like(z_full)
++        norm = torch.zeros_like(z_full)
+ 
+-        # 4) collect all patches
+-        positions = []
+-        out_tiles = []
++        # 4) process and blend one patch at a time
+         timestep = self.model.scheduler.timesteps[0].expand(B).to(z_full.device)
+ 
+         for i in range(rows):
+             y0 = min(i*stride, H - tsize)
+             for j in range(cols):
+                 x0 = min(j*stride, W - tsize)
+-                positions.append((y0, x0))
+                 patch = z_full[:, :, y0:y0+tsize, x0:x0+tsize]
+                 
+                 # decode and save patch for later usage
+@@ -829,22 +830,14 @@ class OSEDiff_SD3_TEST_TILE(torch.nn.Module):
+                 pooled_emb = pooled_emb.to(z_full.device, dtype=torch.float32)
+                 
+                 v = self.predict_vector(patch, timestep, prompt_emb, pooled_emb)
+-                out_tiles.append(patch - v)
+-
+-        # 5) accumulate + normalize
+-        z_out = torch.zeros_like(z_full)
+-        z_norm = torch.zeros_like(z_full)
+-        norm  = torch.zeros_like(z_full)
+-
+-        for (y0,x0), tile in zip(positions, out_tiles):
+-            z_out[:, :, y0:y0+tsize, x0:x0+tsize] += tile
+-            z_norm[:, :, y0:y0+tsize, x0:x0+tsize] += tile * weights
+-            norm[:, :, y0:y0+tsize, x0:x0+tsize] += weights
++                tile = patch - v
++                z_norm[:, :, y0:y0+tsize, x0:x0+tsize] += tile * weights
++                norm[:, :, y0:y0+tsize, x0:x0+tsize] += weights
+ 
+-        # 6) avoid division by zero and finalize
++        # 5) avoid division by zero and finalize
+         eps = 1e-10
+         z_norm = z_norm / (norm + eps)
+-        return z_norm, z_out
++        return z_norm, None
+ 
+     @torch.no_grad()
+     def decode_full_latent(self, z_full: torch.Tensor) -> torch.Tensor:

@@ -1,0 +1,34 @@
+runtime:
+  run_root: runs
+  process_timeout_seconds: 30
+  keep_temporary_files: false
+  gpu_poll_interval_seconds: 0.5
+
+fourkagent:
+  mode: fake
+  tool_gpu: "0"
+
+coz:
+  mode: fake
+  visible_devices: "0,1"
+  seed: 20250727
+  tile_size: 512
+  tile_overlap: 64
+
+metrics:
+  quality_backend: gradient_proxy
+  quality_metric: musiq
+  quality_device: cpu
+  min_quality_gain: -0.02
+  max_scale_nrmse: 0.12
+  max_scale_edge_mae: 0.10
+  measurement_enabled: false
+  measurement_model: resize
+  measurement_parameters: {}
+  max_measurement_nrmse: 0.12
+
+controller:
+  target_factor: 4
+  max_coz_steps: 2
+  color_strategy: adain
+  accept_unvalidated_quality_proxy: false

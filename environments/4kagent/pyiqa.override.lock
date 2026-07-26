@@ -1,0 +1,5 @@
+# PyIQA 0.1.13 hard-pins Transformers 4.37.2. The security-updated 4KAgent
+# runtime uses 5.5.0, so this exact audited wheel is installed with --no-deps
+# after the fully resolved base environment. See ADR 0005.
+pyiqa==0.1.13 \
+    --hash=sha256:306483a6f5b667d7bfd8185ee9142b2a5722757c69752434f393c610b9ad2313

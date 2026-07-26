@@ -1,0 +1,24 @@
+schema_version: 1
+repositories:
+  fourkagent:
+    name: 4KAgent
+    url: https://github.com/taco-group/4KAgent.git
+    commit: 04179ffed12c1db64890a48ac6d51ae4abeaee37
+    tree: 66f62367c915042ef945562bddc791bfc445fb42
+    license: Apache-2.0
+    checkout: third_party/checkouts/4KAgent
+    patches: []
+  chain_of_zoom:
+    name: Chain-of-Zoom
+    url: https://github.com/bryanswkim/Chain-of-Zoom.git
+    commit: 5a4f351c9c655568c4705d5fc53ef70a3f28905f
+    tree: 177741fa5443a5073f29b1cf3ffad67e596d0b5d
+    license: MIT
+    checkout: third_party/checkouts/Chain-of-Zoom
+    patches:
+      - path: third_party/patches/chain-of-zoom/0001-full-inference-contract.patch
+        sha256: b9f2b6c293b8ac7e48be8188318992f16cee9f6f9affa2ccf0f41307027d00a0
+      - path: third_party/patches/chain-of-zoom/0002-streaming-gaussian-blend.patch
+        sha256: 446c82cfdeb9e822814292511bdf80b7bd0401c08a54d82d7d29d4983901ca78
+    patched_files:
+      osediff_sd3.py: c5aea528f9f1206cae6ca666b5d0907a1b18e701300ce1252a9468d682fa6084

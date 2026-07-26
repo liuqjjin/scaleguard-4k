@@ -1,0 +1,3 @@
+# ScaleGuard's Linux x86_64 bootstrap installer.
+uv==0.11.16 \
+    --hash=sha256:9b10086165189c39c53142a0e2f34e0b8889ef681886f589ed17be45a1a774c7
