@@ -341,6 +341,11 @@ def test_fourkagent_adapter_manages_depictqa_and_expands_project_relative_paths(
 ) -> None:
     source = make_image(tmp_path / "source.png", size=(6, 4))
     destination = tmp_path / "output.png"
+    interpreter_target = tmp_path / "shared-python"
+    interpreter_target.write_text("#!/bin/sh\n", encoding="utf-8")
+    interpreter_entrypoint = tmp_path / ".runtime/envs/4kagent/bin/python"
+    interpreter_entrypoint.parent.mkdir(parents=True)
+    interpreter_entrypoint.symlink_to(interpreter_target)
     config = FourKAgentConfig(
         mode="upstream",
         checkout=Path("third_party/checkouts/4KAgent"),
@@ -416,9 +421,9 @@ def test_fourkagent_adapter_manages_depictqa_and_expands_project_relative_paths(
     project_root = tmp_path.resolve()
     checkout = (project_root / "third_party/checkouts/4KAgent").resolve()
     assert adapter.checkout == checkout
-    assert adapter.python_executable == str(
-        (project_root / ".runtime/envs/4kagent/bin/python").resolve()
-    )
+    assert adapter.python_executable == str(interpreter_entrypoint)
+    assert Path(adapter.python_executable).is_symlink()
+    assert adapter.python_executable != str(interpreter_target.resolve())
     assert managed_calls == [
         {
             "argv": (

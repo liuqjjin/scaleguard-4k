@@ -1,4 +1,14 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
+# shellcheck shell=bash
+if [[ $- != *p* ]]; then
+    printf '%s\n' "error: invoke this AutoDL entry directly; an explicit Bash must use -p" >&2
+    exit 2
+fi
+while IFS= read -r sg_imported_function; do
+    builtin unset -f -- "${sg_imported_function}"
+done < <(builtin compgen -A function)
+builtin unset sg_imported_function
+builtin set +x +v
 # shellcheck source-path=SCRIPTDIR
 set -Eeuo pipefail
 
@@ -11,7 +21,9 @@ if [[ "${sg_here}" != /* ]]; then
     sg_here="${PWD}/${sg_here}"
 fi
 # shellcheck source=_common.sh
+# shellcheck disable=SC1091
 source "${sg_here}/_common.sh"
+# shellcheck disable=SC2154
 sg_here="${sg_script_dir}"
 
 sg_resolve_autodl_scheduler_envs
@@ -41,7 +53,7 @@ sg_finalize_failed_bootstrap() {
     local sg_original_rc=$?
     set +e
     if [[ ! -f "${SG_RUN_DIR}/bootstrap.json" ]] && command -v python3 >/dev/null 2>&1; then
-        python3 - \
+        python3 -I - \
             "${SG_RUN_DIR}/bootstrap.json" \
             "${sg_bootstrap_started_at}" \
             "$(sg_timestamp)" \
@@ -127,11 +139,11 @@ sg_weight_link="${SG_REPO_ROOT}/weights"
 mkdir -p "${sg_weight_cache}"
 if [[ -L "${sg_weight_link}" ]]; then
     sg_actual_weight_target="$(
-        python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' \
+        python3 -I -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' \
             "${sg_weight_link}"
     )"
     sg_expected_weight_target="$(
-        python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' \
+        python3 -I -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' \
             "${sg_weight_cache}"
     )"
     [[ "${sg_actual_weight_target}" == "${sg_expected_weight_target}" ]] \
@@ -161,7 +173,8 @@ elif [[ -f "${SG_REPO_ROOT}/scripts/bootstrap/autodl.sh" ]]; then
     sg_failure_phase="project-autodl-hook"
     if sg_run_logged \
         "${sg_log}" \
-        bash "${SG_REPO_ROOT}/scripts/bootstrap/autodl.sh"
+        env SCALEGUARD_INTERNAL_SANITIZED_BOOTSTRAP=1 \
+        /bin/bash -p "${SG_REPO_ROOT}/scripts/bootstrap/autodl.sh"
     then
         :
     else
@@ -180,14 +193,14 @@ elif [[ -f "${SG_REPO_ROOT}/pyproject.toml" ]]; then
     sg_note "No project AutoDL hook found; installing the ScaleGuard core environment only."
     sg_python="${SCALEGUARD_BOOTSTRAP_PYTHON:-python3}"
     if [[ ! -x "${SG_REPO_ROOT}/.venv/bin/python" ]]; then
-        if ! sg_run_logged "${sg_log}" "${sg_python}" -m venv "${SG_REPO_ROOT}/.venv"; then
+        if ! sg_run_logged "${sg_log}" "${sg_python}" -I -m venv "${SG_REPO_ROOT}/.venv"; then
             sg_die "virtual environment creation failed; inspect ${sg_log}"
         fi
     fi
     if [[ -f "${SG_REPO_ROOT}/requirements.lock" ]]; then
         if ! sg_run_logged \
             "${sg_log}" \
-            "${SG_REPO_ROOT}/.venv/bin/python" -m pip install \
+            "${SG_REPO_ROOT}/.venv/bin/python" -I -m pip install \
             --require-hashes -r "${SG_REPO_ROOT}/requirements.lock"
         then
             sg_die "locked dependency installation failed; inspect ${sg_log}"
@@ -199,7 +212,7 @@ elif [[ -f "${SG_REPO_ROOT}/pyproject.toml" ]]; then
     fi
     if ! sg_run_logged \
         "${sg_log}" \
-        "${SG_REPO_ROOT}/.venv/bin/python" -m pip install "${sg_install_args[@]}"
+        "${SG_REPO_ROOT}/.venv/bin/python" -I -m pip install "${sg_install_args[@]}"
     then
         sg_die "ScaleGuard installation failed; inspect ${sg_log}"
     fi
@@ -214,7 +227,7 @@ if [[ "${sg_installation_scope}" == "project-autodl-hook" ]]; then
     sg_require_file "${sg_runtime_receipt_source}" "project AutoDL aggregate receipt"
     if sg_run_logged \
         "${sg_log}" \
-        "${SG_REPO_ROOT}/.venv/bin/python" "${sg_here}/_validate_bootstrap_receipt.py" \
+        "${SG_REPO_ROOT}/.venv/bin/python" -I "${sg_here}/_validate_bootstrap_receipt.py" \
         --source "${sg_runtime_receipt_source}" \
         --project-root "${SG_REPO_ROOT}" \
         --git-commit "$(git -C "${SG_REPO_ROOT}" rev-parse HEAD)" \
@@ -277,7 +290,7 @@ fi
     cat "${sg_doctor_stderr}"
 } | sg_redact_stream | tee -a "${sg_log}"
 
-python3 - \
+python3 -I - \
     "${sg_doctor_json}" \
     "${SG_RUN_DIR}/doctor-summary.json" \
     "${sg_doctor_rc}" \
@@ -386,13 +399,13 @@ sg_require_clean_project
 git rev-parse HEAD > "${SG_RUN_DIR}/git-commit.txt"
 git status --short > "${SG_RUN_DIR}/git-status.txt"
 git submodule status --recursive > "${SG_RUN_DIR}/submodules.txt" 2>&1 || true
-"${SG_REPO_ROOT}/.venv/bin/python" -m pip freeze \
+"${SG_REPO_ROOT}/.venv/bin/python" -I -m pip freeze \
     > "${SG_RUN_DIR}/pip-freeze.txt" 2>&1 || true
 sg_sha256 "${sg_lock}" > "${SG_RUN_DIR}/upstream-lock.sha256"
 sg_sha256 "${sg_dependency_lock}" > "${SG_RUN_DIR}/runtime-dependencies.sha256"
 sg_sha256 "${sg_config}" > "${SG_RUN_DIR}/runtime-config.sha256"
 
-python3 - \
+python3 -I - \
     "${SG_RUN_DIR}/bootstrap.json" \
     "${sg_skip_gpu_check}" \
     "$(sg_timestamp)" \

@@ -5,6 +5,7 @@ from scaleguard.backends.command import CommandRestorationBackend, CommandScaleB
 from scaleguard.backends.coz import CoZBackend
 from scaleguard.backends.fake import FakeRestorationBackend, FakeScaleBackend
 from scaleguard.backends.fourkagent import FourKAgentBackend
+from scaleguard.backends.identity import IdentityRestorationBackend
 
 __all__ = [
     "CoZBackend",
@@ -13,6 +14,7 @@ __all__ = [
     "FakeRestorationBackend",
     "FakeScaleBackend",
     "FourKAgentBackend",
+    "IdentityRestorationBackend",
     "RestorationBackend",
     "ScaleBackend",
     "ScaleSession",

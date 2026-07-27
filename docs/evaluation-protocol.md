@@ -1,7 +1,8 @@
 # Evaluation protocol
 
-Status: protocol, hash-bound image metrics, calibration, and paired-summary
-tooling implemented; no real experiment results have been collected.
+Status: executable four-group orchestration, hash-bound image metrics,
+calibration, and paired-summary tooling implemented; no real experiment results
+have been collected.
 
 This protocol separates controller calibration from final evaluation and keeps
 all comparisons paired by exact input bytes. It does not authorize a dataset,
@@ -48,9 +49,56 @@ members silently.
 | AB-fixed | 4KAgent restoration followed by a fixed CoZ step count |
 | ScaleGuard | 4KAgent restoration followed by gated one-step CoZ states |
 
-That file is currently `protocol_only`; it is not a four-group model runner and
-contains no measurements. Before `RESEARCH_EVALUATED`, each group needs an
-audited executable configuration and retained manifest.
+The protocol is executable but contains no measurements. The runner requires a
+clean, fixed Git HEAD and a real base configuration with
+`controller.target_factor: 4`, at least one configured CoZ step, upstream
+4KAgent, and persistent CoZ. It generates these exact group semantics:
+
+| Group | 4KAgent | Target | CoZ steps | Acceptance |
+| --- | --- | ---: | ---: | --- |
+| A-only | upstream | 1 | 0 | fixed |
+| B-only | identity observation | 4 | 1 | fixed |
+| AB-fixed | upstream | 4 | 1 | fixed |
+| ScaleGuard | upstream | 4 | 1 | trusted |
+
+A-only is the native-resolution restoration-component baseline. Its output is
+not secretly resized to 4x: full-reference metrics at the 4x target are marked
+not applicable for that group.
+
+Plan an authorized suite without starting a model:
+
+```bash
+.venv/bin/python -I scripts/experiments/run_ablation.py \
+  --base-config configs/runtime/autodl-2x4090.yaml \
+  --input /authorized-data/evaluation/image-001.png \
+  --seed 20250727 \
+  --output-dir /root/autodl-tmp/scaleguard-4k/ablation/plan-001 \
+  --plan-only
+```
+
+Omit `--plan-only` to execute. Repeat `--input` and `--seed` to declare the
+Cartesian product. Each input is copied once into a hash-named immutable suite
+snapshot; the deterministic sample ID is `sha256[:16]-s<seed>` and is shared by
+all four groups. Duplicate sample IDs, a non-empty output directory, unsafe
+root destinations, a dirty or changed HEAD, and changed protocol, base config,
+runner, input, config, manifest, or run artifacts fail the suite.
+
+Every job directly invokes the fixed
+`scripts/autodl/run_experiment.sh` wrapper. That wrapper creates a new runtime
+preflight for the generated config. The orchestrator has no API-key option,
+does not serialize credentials, and leaves credential scoping and redaction to
+the wrapper.
+
+`suite-receipt.json` is atomically replaced before and after every job. A
+non-zero job or malformed evidence is retained and does not stop later jobs.
+The receipt records exact input/config/runner/protocol hashes, argv and return
+code, clean commits before and after execution, full manifest and run-artifact
+inventory hashes, and the per-job runtime evidence digests. At suite completion
+it fully revalidates each manifest and enforces within-sample equality of input
+evidence, quality configuration, project commit, runtime execution binding,
+environment installation identity, and stable weight/materialization/source
+identity. Fresh preflight and environment-receipt file hashes are retained per
+job but are not incorrectly required to match across jobs.
 
 For every input, keep constant:
 
@@ -138,7 +186,7 @@ The default calibration algorithm uses acceptable, non-mock samples only:
 Generate the receipt from run directories:
 
 ```bash
-uv run --locked python scripts/experiments/calibrate_gates.py \
+uv run --locked python -I scripts/experiments/calibrate_gates.py \
   --runs runs/calibration \
   --labels artifacts/calibration/labels.csv \
   --output artifacts/calibration/receipt.json \
@@ -166,6 +214,12 @@ Verification checks schema, receipt digest, empty issue list, minimum sample
 count, input evidence hashes, backend and proxy identity, measurement identity,
 bootstrap intervals, and exact threshold equality. A file merely present at
 the configured path is not enough; run this verifier.
+
+The controller repeats that verification when it is constructed and records
+the resolved receipt path, size, SHA-256, and semantic result in the run
+manifest. Measurement value plus canonical forward-model identity are required
+exactly when measurement consistency is enabled and are forbidden when it is
+disabled.
 
 Quantile calibration defines an acceptable-sample envelope. It does not prove
 optimal classification, causality, or human preference generalization. Report
@@ -274,24 +328,35 @@ After all four manifests exist for each exact input, generate non-imputed
 tables:
 
 ```bash
-uv run --locked python scripts/experiments/summarize_ablation.py \
-  --a-only runs/ablation/a-only \
-  --b-only runs/ablation/b-only \
-  --ab-fixed runs/ablation/ab-fixed \
-  --scaleguard runs/ablation/scaleguard \
+uv run --locked python -I scripts/experiments/summarize_ablation.py \
+  --a-only /root/autodl-tmp/scaleguard-4k/ablation/suite-001/jobs/a-only \
+  --b-only /root/autodl-tmp/scaleguard-4k/ablation/suite-001/jobs/b-only \
+  --ab-fixed /root/autodl-tmp/scaleguard-4k/ablation/suite-001/jobs/ab-fixed \
+  --scaleguard /root/autodl-tmp/scaleguard-4k/ablation/suite-001/jobs/scaleguard \
+  --suite-receipt /root/autodl-tmp/scaleguard-4k/ablation/suite-001/suite-receipt.json \
   --output-csv artifacts/ablation/paired.csv \
   --output-json artifacts/ablation/paired.json \
   --artifact-root "$PWD"
 ```
 
-Rows are paired by verified input SHA-256. The summary:
+Rows are paired by `experiment_sample_id`, deterministically derived from the
+verified full input SHA-256 and seed. The summary:
 
 - verifies input and final-image hashes;
+- reopens each configured calibration receipt as one byte snapshot and repeats
+  its semantic verification against the manifest metric configuration;
 - retains missing groups, failures, mock runs, and missing metrics as issues;
+- independently revalidates the passed suite, every raw wrapper attempt,
+  manifest path/hash binding, and within-sample hardware identity;
 - marks a pair research-eligible only when all four real successful groups are
-  complete and issue-free;
+  complete, issue-free, and exactly present in that verified suite receipt;
 - records all source-manifest hashes; and
 - computes no aggregate headline claim.
+
+The suite reader requires the recorded clean project commit to remain checked
+out and every original raw evidence path to remain available. Omitting
+`--suite-receipt` is allowed for diagnostic table generation, but every pair is
+then explicitly marked `research_eligible: false`.
 
 ## Statistical reporting
 

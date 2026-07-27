@@ -1,4 +1,14 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
+# shellcheck shell=bash
+if [[ $- != *p* ]]; then
+    printf '%s\n' "error: invoke this AutoDL entry directly; an explicit Bash must use -p" >&2
+    exit 2
+fi
+while IFS= read -r sg_imported_function; do
+    builtin unset -f -- "${sg_imported_function}"
+done < <(builtin compgen -A function)
+builtin unset sg_imported_function
+builtin set +x +v
 set -Eeuo pipefail
 
 sg_entry_source="${BASH_SOURCE[0]}"

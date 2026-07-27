@@ -2,8 +2,14 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import signal
+import subprocess
+import sys
+import time
 from collections import deque
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +17,7 @@ import pytest
 from PIL import Image
 
 from scaleguard.backends.coz import (
+    _MAX_PROTOCOL_RESPONSE_BYTES,
     CoZBackend,
     OneShotCoZSession,
     PersistentCoZSession,
@@ -77,7 +84,15 @@ def test_one_shot_coz_contract_builds_a_single_scale_request(
 ) -> None:
     source = make_image(tmp_path / "source.jpg", size=(5, 3), image_format="JPEG")
     destination = tmp_path / "candidate.png"
-    config = coz_config(tmp_path)
+    interpreter_target = tmp_path / "shared-python"
+    interpreter_target.write_text("#!/bin/sh\n", encoding="utf-8")
+    interpreter_entrypoint = tmp_path / ".runtime/envs/coz/bin/python"
+    interpreter_entrypoint.parent.mkdir(parents=True)
+    interpreter_entrypoint.symlink_to(interpreter_target)
+    config = replace(
+        coz_config(tmp_path),
+        python_executable=".runtime/envs/coz/bin/python",
+    )
     backend = CoZBackend(config, RuntimeConfig(), project_root=tmp_path)
 
     def fake_run(
@@ -90,6 +105,9 @@ def test_one_shot_coz_contract_builds_a_single_scale_request(
         label: str,
         **_kwargs: Any,
     ) -> ProcessEvidence:
+        assert argv[0] == str(interpreter_entrypoint)
+        assert Path(argv[0]).is_symlink()
+        assert argv[0] != str(interpreter_target.resolve())
         assert env == {
             "CUDA_VISIBLE_DEVICES": "0,1",
             "HF_HUB_DISABLE_TELEMETRY": "1",
@@ -208,8 +226,14 @@ class MemoryStdout:
         self.lines = deque(lines or [])
         self.closed = False
 
-    def readline(self) -> str:
-        return self.lines.popleft() if self.lines else ""
+    def readline(self, size: int = -1) -> str:
+        if not self.lines:
+            return ""
+        line = self.lines.popleft()
+        if size >= 0 and len(line) > size:
+            self.lines.appendleft(line[size:])
+            return line[:size]
+        return line
 
     def close(self) -> None:
         self.closed = True
@@ -279,23 +303,6 @@ class MemoryStdin:
         self.closed = True
 
 
-class ReadySelector:
-    def __init__(self, *, force_timeout: bool = False) -> None:
-        self.stream: MemoryStdout | None = None
-        self.force_timeout = force_timeout
-
-    def register(self, stream: MemoryStdout, _event: int) -> None:
-        self.stream = stream
-
-    def select(self, _timeout: float) -> list[tuple[object, int]]:
-        if self.force_timeout or self.stream is None or not self.stream.lines:
-            return []
-        return [(object(), 1)]
-
-    def close(self) -> None:
-        return None
-
-
 def test_persistent_coz_full_protocol_lifecycle_uses_an_in_memory_worker(
     tmp_path: Path,
     make_image: Callable[..., Path],
@@ -309,10 +316,6 @@ def test_persistent_coz_full_protocol_lifecycle_uses_an_in_memory_worker(
         return process
 
     monkeypatch.setattr("scaleguard.backends.coz.subprocess.Popen", fake_popen)
-    monkeypatch.setattr(
-        "scaleguard.backends.coz.selectors.DefaultSelector",
-        ReadySelector,
-    )
     source = make_image(tmp_path / "source.png", size=(4, 3))
     destination = tmp_path / "candidate.png"
     backend = CoZBackend(
@@ -377,10 +380,6 @@ def test_persistent_coz_startup_failure_terminates_and_closes_every_stream(
         "scaleguard.backends.coz.subprocess.Popen",
         lambda *_args, **_kwargs: process,
     )
-    monkeypatch.setattr(
-        "scaleguard.backends.coz.selectors.DefaultSelector",
-        ReadySelector,
-    )
     monkeypatch.setattr(session, "_terminate", lambda: terminated.append(True))
     monkeypatch.setattr(session, "_request", lambda _operation: health_outcome)
 
@@ -404,10 +403,6 @@ def test_persistent_coz_nonzero_exit_after_close_invalidates_the_session(
     monkeypatch.setattr(
         "scaleguard.backends.coz.subprocess.Popen",
         lambda *_args, **_kwargs: process,
-    )
-    monkeypatch.setattr(
-        "scaleguard.backends.coz.selectors.DefaultSelector",
-        ReadySelector,
     )
 
     with pytest.raises(WorkerError, match="exited with code 17 after close"):
@@ -446,10 +441,6 @@ def test_persistent_request_rejects_missing_process_broken_pipe_and_id_mismatch(
         session._request("health")
 
     process.stdin.fail = False
-    monkeypatch.setattr(
-        "scaleguard.backends.coz.selectors.DefaultSelector",
-        ReadySelector,
-    )
     original_write = process.stdin.write
 
     def mismatched_write(value: str) -> int:
@@ -485,10 +476,6 @@ def test_persistent_response_rejects_closed_or_malformed_protocol(
     process.stdout.lines.append(line)
     session.process = process  # type: ignore[assignment]
     session.protocol_log = io.StringIO()
-    monkeypatch.setattr(
-        "scaleguard.backends.coz.selectors.DefaultSelector",
-        ReadySelector,
-    )
 
     with pytest.raises(WorkerError, match=message):
         session._read_response(0.1)
@@ -496,19 +483,95 @@ def test_persistent_response_rejects_closed_or_malformed_protocol(
 
 def test_persistent_response_timeout_raises_without_touching_a_gpu_process(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = bare_persistent_session(tmp_path)
-    process = MemoryProcess()
-    process.returncode = 0
-    session.process = process  # type: ignore[assignment]
-    monkeypatch.setattr(
-        "scaleguard.backends.coz.selectors.DefaultSelector",
-        lambda: ReadySelector(force_timeout=True),
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            "import sys,time; sys.stdout.write('{'); sys.stdout.flush(); time.sleep(30)",
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        start_new_session=True,
     )
+    session.process = process
+    started = time.monotonic()
 
     with pytest.raises(WorkerTimeoutError, match="response timed out"):
         session._read_response(0.1)
+
+    assert time.monotonic() - started < 3.0
+    assert process.poll() is not None
+
+
+def test_persistent_response_rejects_incomplete_and_oversized_lines(
+    tmp_path: Path,
+) -> None:
+    session = bare_persistent_session(tmp_path)
+    process = MemoryProcess()
+    session.process = process  # type: ignore[assignment]
+    process.stdout.lines.append('{"status":"ok"}')
+
+    with pytest.raises(WorkerError, match="incomplete protocol response"):
+        session._read_response(0.1)
+
+    process.stdout.lines.append("x" * (_MAX_PROTOCOL_RESPONSE_BYTES + 1))
+    with pytest.raises(WorkerError, match="exceeded"):
+        session._read_response(0.1)
+
+
+def test_persistent_close_reaps_descendants_after_the_worker_leader_exits(
+    tmp_path: Path,
+) -> None:
+    child_pid_path = tmp_path / "child.pid"
+    code = (
+        "import pathlib,subprocess,sys\n"
+        "child = subprocess.Popen("
+        "[sys.executable, '-I', '-c', 'import time; time.sleep(30)'], "
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid))\n"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-I", "-c", code],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        start_new_session=True,
+    )
+    process.wait(timeout=2.0)
+    session = bare_persistent_session(tmp_path)
+    session.process = process
+
+    session.__exit__(None, None, None)
+
+    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    try:
+        deadline = time.monotonic() + 1.0
+        while _process_is_running(child_pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not _process_is_running(child_pid)
+    finally:
+        if _process_is_running(child_pid):
+            os.kill(child_pid, signal.SIGKILL)
+
+
+def _process_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    status = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return status.returncode == 0 and not status.stdout.strip().startswith("Z")
 
 
 def test_persistent_scale_and_state_operations_validate_worker_responses(

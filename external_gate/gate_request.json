@@ -62,12 +62,12 @@
     "requirement": "The marker is bound to the download receipt and dispatched commit, all required layouts verify, and checkout_mutations is false"
   },
   "commands": [
-    "bash scripts/autodl/check_gpu.sh",
-    "bash scripts/autodl/bootstrap.sh",
-    "bash scripts/autodl/download_weights.sh",
-    "bash scripts/autodl/run_smoke.sh --input \"$SCALEGUARD_SMOKE_INPUT\"",
-    "bash scripts/autodl/run_integration.sh --input \"$SCALEGUARD_INTEGRATION_INPUT\"",
-    "bash scripts/autodl/collect_diagnostics.sh"
+    "scripts/autodl/check_gpu.sh",
+    "scripts/autodl/bootstrap.sh",
+    "scripts/autodl/download_weights.sh",
+    "scripts/autodl/run_smoke.sh --input \"$SCALEGUARD_SMOKE_INPUT\"",
+    "scripts/autodl/run_integration.sh --input \"$SCALEGUARD_INTEGRATION_INPUT\"",
+    "scripts/autodl/collect_diagnostics.sh"
   ],
   "pass_conditions_source": "external_gate/expected_artifacts.json",
   "result_template": "external_gate/RESULT_TEMPLATE.json",

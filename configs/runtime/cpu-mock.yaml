@@ -31,4 +31,5 @@ controller:
   target_factor: 4
   max_coz_steps: 2
   color_strategy: adain
+  acceptance_policy: trusted
   accept_unvalidated_quality_proxy: false

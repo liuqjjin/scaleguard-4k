@@ -9,20 +9,13 @@ from scaleguard.config import FourKAgentConfig, RuntimeConfig
 from scaleguard.contracts import ProcessEvidence, WorkerResult
 from scaleguard.errors import ArtifactError, WorkerError
 from scaleguard.images import inspect_image, normalize_to_png
-from scaleguard.runtime.process import ProcessRunner, format_command
+from scaleguard.runtime.process import ProcessRunner, format_command, project_executable
 from scaleguard.runtime.service import ManagedService, tcp_ready
 from scaleguard.strict_json import StrictJSONError, loads_object
 
 
 def _project_path(project_root: Path, path: Path) -> Path:
     return path.resolve() if path.is_absolute() else (project_root / path).resolve()
-
-
-def _project_executable(project_root: Path, executable: str) -> str:
-    path = Path(executable)
-    if path.is_absolute():
-        return str(path)
-    return str((project_root / path).resolve()) if "/" in executable else executable
 
 
 class FourKAgentBackend:
@@ -41,7 +34,7 @@ class FourKAgentBackend:
         self.config = config
         self.project_root = project_root.resolve()
         self.checkout = _project_path(self.project_root, config.checkout)
-        self.python_executable = _project_executable(self.project_root, config.python_executable)
+        self.python_executable = project_executable(self.project_root, config.python_executable)
         self.runner = ProcessRunner(
             timeout_seconds=runtime.process_timeout_seconds,
             gpu_poll_interval_seconds=runtime.gpu_poll_interval_seconds,

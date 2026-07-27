@@ -142,10 +142,16 @@ controller:
         return {
             "runtime_evidence_verified": True,
             "runtime_config_sha256": config_digest,
+            "runtime_profile_bound": True,
+            "runtime_execution_binding": {},
         }
 
     monkeypatch.setenv("SCALEGUARD_PROJECT_ROOT", str(PROJECT_ROOT))
     monkeypatch.setattr("scaleguard.cli.validate_runtime_preflight", validate)
+    monkeypatch.setattr(
+        "scaleguard.cli.bind_runtime_config",
+        lambda config, **_kwargs: config,
+    )
 
     exit_code = main(
         [

@@ -38,13 +38,13 @@ export OPENAI_API_KEY
 export CUDA_VISIBLE_DEVICES=0,1
 export SCALEGUARD_SMOKE_INPUT=/authorized-data/smoke.png
 export SCALEGUARD_INTEGRATION_INPUT=/authorized-data/integration.png
-bash scripts/autodl/bootstrap.sh
+scripts/autodl/bootstrap.sh
 mkdir -p weights/4kagent/depictqa/delta
 # 在已授权浏览器打开：
 # https://drive.google.com/file/d/1o-PN1iXctWl62Tdb8fZs1eD1Ehv6HBMh/view
 # 将合法取得的文件上传为以下精确路径：
 test -s weights/4kagent/depictqa/delta/degra_eval.pt
-bash external_gate/commands.sh
+external_gate/commands.sh
 unset HF_TOKEN OPENAI_API_KEY
 ```
 

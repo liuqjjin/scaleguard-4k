@@ -32,6 +32,11 @@ def main() -> int:
     parser.add_argument("--output-csv", type=Path, required=True)
     parser.add_argument("--output-json", type=Path, required=True)
     parser.add_argument("--artifact-root", type=Path)
+    parser.add_argument(
+        "--suite-receipt",
+        type=Path,
+        help="passed ablation suite receipt required for research eligibility",
+    )
     args = parser.parse_args()
     try:
         summary = summarize_paired_manifests(
@@ -44,6 +49,7 @@ def main() -> int:
             args.output_csv,
             args.output_json,
             artifact_root=args.artifact_root,
+            suite_receipt=args.suite_receipt,
         )
     except (OSError, ScaleGuardError, ValueError) as error:
         parser.error(str(error))

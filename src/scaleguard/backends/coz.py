@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import json
-import os
-import selectors
-import signal
+import queue
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -17,19 +16,20 @@ from scaleguard.config import CoZConfig, RuntimeConfig
 from scaleguard.contracts import ProcessEvidence, WorkerResult
 from scaleguard.errors import ArtifactError, WorkerError, WorkerTimeoutError
 from scaleguard.images import file_sha256, inspect_image, normalize_to_png
-from scaleguard.runtime.process import ProcessRunner, minimal_subprocess_environment
+from scaleguard.runtime.process import (
+    ProcessRunner,
+    minimal_subprocess_environment,
+    project_executable,
+    terminate_process_group,
+)
 from scaleguard.strict_json import StrictJSONError, loads
+
+_MAX_PROTOCOL_RESPONSE_BYTES = 1024 * 1024
+_PROTOCOL_READER_SHUTDOWN_SECONDS = 1.0
 
 
 def _project_path(project_root: Path, path: Path) -> Path:
     return path.resolve() if path.is_absolute() else (project_root / path).resolve()
-
-
-def _project_executable(project_root: Path, executable: str) -> str:
-    path = Path(executable)
-    if path.is_absolute():
-        return str(path)
-    return str((project_root / path).resolve()) if "/" in executable else executable
 
 
 def _model_location(project_root: Path, value: str) -> str:
@@ -95,7 +95,7 @@ class _Arguments:
             raise ValueError("CoZ SR LoRA and VAE paths are required")
         self.config = config
         self.argv = [
-            _project_executable(project_root, config.python_executable),
+            project_executable(project_root, config.python_executable),
             str(worker),
             "--checkout",
             str(checkout),
@@ -330,10 +330,10 @@ class PersistentCoZSession:
                         f"CoZ persistent worker exited with code {returncode} after close"
                     )
         except (WorkerError, WorkerTimeoutError, subprocess.TimeoutExpired):
-            self._terminate()
             if exc_type is None:
                 raise
         finally:
+            self._terminate()
             self.stopped = time.monotonic()
             self._close_streams()
 
@@ -439,23 +439,55 @@ class PersistentCoZSession:
     def _read_response(self, timeout: float) -> dict[str, Any]:
         if self.process is None or self.process.stdout is None:
             raise WorkerError("CoZ persistent worker has no protocol stream")
-        selector = selectors.DefaultSelector()
-        selector.register(self.process.stdout, selectors.EVENT_READ)
+        process = self.process
+        stream = process.stdout
+        assert stream is not None
+        deadline = time.monotonic() + timeout
+        result: queue.Queue[tuple[str | None, BaseException | None]] = queue.Queue(maxsize=1)
+
+        def read_line() -> None:
+            try:
+                result.put((stream.readline(_MAX_PROTOCOL_RESPONSE_BYTES + 1), None))
+            except BaseException as error:
+                result.put((None, error))
+
+        reader = threading.Thread(
+            target=read_line,
+            name="coz-protocol-reader",
+            daemon=True,
+        )
+        reader.start()
         try:
-            ready = selector.select(timeout)
-        finally:
-            selector.close()
-        if not ready:
+            line, read_error = result.get(timeout=max(0.0, deadline - time.monotonic()))
+        except queue.Empty as error:
             self._terminate()
+            reader.join(timeout=_PROTOCOL_READER_SHUTDOWN_SECONDS)
             raise WorkerTimeoutError(
                 f"CoZ persistent worker response timed out after {timeout:.1f}s"
-            )
-        line = self.process.stdout.readline()
+            ) from error
+        if read_error is not None:
+            self._terminate()
+            raise WorkerError(
+                f"cannot read CoZ persistent worker response: "
+                f"{type(read_error).__name__}: {read_error}"
+            ) from read_error
+        assert line is not None
         if not line:
-            returncode = self.process.poll()
+            self._terminate()
+            returncode = process.poll()
             raise WorkerError(
                 f"CoZ persistent worker closed its protocol stream (returncode={returncode})"
             )
+        encoded = line.encode("utf-8")
+        if len(encoded) > _MAX_PROTOCOL_RESPONSE_BYTES:
+            self._terminate()
+            raise WorkerError(
+                "CoZ persistent worker protocol response exceeded "
+                f"{_MAX_PROTOCOL_RESPONSE_BYTES} bytes"
+            )
+        if not line.endswith("\n"):
+            self._terminate()
+            raise WorkerError("CoZ persistent worker returned an incomplete protocol response")
         if self.protocol_log is not None:
             self.protocol_log.write(line)
             self.protocol_log.flush()
@@ -468,20 +500,9 @@ class PersistentCoZSession:
         return response
 
     def _terminate(self) -> None:
-        if self.process is None or self.process.poll() is not None:
+        if self.process is None:
             return
-        try:
-            os.killpg(self.process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
-        try:
-            self.process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(self.process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            self.process.wait(timeout=5)
+        terminate_process_group(self.process)
 
     def _close_streams(self) -> None:
         if self.process is not None:

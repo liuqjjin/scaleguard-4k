@@ -1,4 +1,14 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
+# shellcheck shell=bash
+if [[ $- != *p* ]]; then
+    printf '%s\n' "error: invoke this AutoDL entry directly; an explicit Bash must use -p" >&2
+    exit 2
+fi
+while IFS= read -r sg_imported_function; do
+    builtin unset -f -- "${sg_imported_function}"
+done < <(builtin compgen -A function)
+builtin unset sg_imported_function
+builtin set +x +v
 # shellcheck source-path=SCRIPTDIR
 set -Eeuo pipefail
 
@@ -11,7 +21,9 @@ if [[ "${sg_here}" != /* ]]; then
     sg_here="${PWD}/${sg_here}"
 fi
 # shellcheck source=_common.sh
+# shellcheck disable=SC1091
 source "${sg_here}/_common.sh"
+# shellcheck disable=SC2154
 sg_here="${sg_script_dir}"
 
 sg_resolve_autodl_scheduler_envs
@@ -126,7 +138,7 @@ sg_available_kib="$(
 sg_available_kib="${sg_available_kib:-0}"
 sg_git_commit="$(git -C "${SG_REPO_ROOT}" rev-parse HEAD 2>/dev/null || true)"
 
-python3 - \
+python3 -I - \
     "${SG_RUN_DIR}/gpu_inventory.csv" \
     "${sg_errors}" \
     "${SG_RUN_DIR}/gpu_check.json" \

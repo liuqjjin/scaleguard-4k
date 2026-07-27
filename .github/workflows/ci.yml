@@ -40,7 +40,7 @@ jobs:
       - name: Compile Python sources
         env:
           PYTHONPYCACHEPREFIX: ${{ runner.temp }}/pycache-${{ matrix.python-version }}
-        run: uv run --locked python -m compileall -q src scripts examples tests third_party/overlays
+        run: uv run --locked python -I -m compileall -q src scripts examples tests third_party/overlays
 
       - name: Lint
         run: uv run --locked ruff check .
@@ -57,7 +57,7 @@ jobs:
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
           SCALEGUARD_TEST_MODE: "cpu"
-        run: uv run --locked python -m pytest --cov=scaleguard --cov-report=term-missing -q
+        run: uv run --locked python -I -m pytest --cov=scaleguard --cov-report=term-missing -q
 
       - name: Verify ShellCheck availability
         if: matrix.python-version == '3.12'
@@ -99,7 +99,7 @@ jobs:
           uv venv --python "${{ matrix.python-version }}" "${smoke_root}/venv"
           uv pip install --python "${smoke_root}/venv/bin/python" "${wheel}"
 
-          "${smoke_root}/venv/bin/python" - \
+          "${smoke_root}/venv/bin/python" -I - \
             "${GITHUB_WORKSPACE}/configs/runtime/cpu-mock.yaml" \
             "${smoke_root}/config.yaml" \
             "${smoke_root}/runs" \
@@ -161,7 +161,7 @@ jobs:
               encoding="utf-8",
           )
           PY
-          "${smoke_root}/venv/bin/python" \
+          "${smoke_root}/venv/bin/python" -I \
             "${GITHUB_WORKSPACE}/examples/make_fixture.py" \
             "${smoke_root}/input.png"
 

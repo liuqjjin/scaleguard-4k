@@ -1,27 +1,53 @@
 schema_version: "1.0"
 name: core-ablation
-status: protocol_only
+status: executable
+integration_runner: scripts/autodl/run_experiment.sh
+base_requirements:
+  controller_target_factor: 4
+  minimum_max_coz_steps: 1
+  fourkagent_mode: upstream
+  coz_mode: persistent
 groups:
-  - id: a_only
-    description: 4KAgent native restoration without CoZ
+  - id: A-only
+    description: 4KAgent native restoration without a CoZ scale transition
+    fourkagent_mode: upstream
+    coz_mode: persistent
     target_factor: 1
-    scale_control: disabled
-  - id: b_only
-    description: CoZ applied directly to the observed input
-    restoration: identity
-    fixed_coz_steps: 1
-  - id: ab_fixed
-    description: 4KAgent restoration followed by a fixed number of CoZ steps
-    fixed_coz_steps: 1
-  - id: scaleguard
-    description: 4KAgent restoration followed by gated one-step CoZ states
-    scale_control: trusted
+    max_coz_steps: 0
+    acceptance_policy: fixed
+    comparison_resolution: restoration_native
+  - id: B-only
+    description: One CoZ transition applied directly to the observed input
+    fourkagent_mode: identity
+    coz_mode: persistent
+    target_factor: 4
+    max_coz_steps: 1
+    acceptance_policy: fixed
+    comparison_resolution: target_4x
+  - id: AB-fixed
+    description: 4KAgent restoration followed by exactly one CoZ transition
+    fourkagent_mode: upstream
+    coz_mode: persistent
+    target_factor: 4
+    max_coz_steps: 1
+    acceptance_policy: fixed
+    comparison_resolution: target_4x
+  - id: ScaleGuard
+    description: 4KAgent restoration followed by one trusted CoZ transition
+    fourkagent_mode: upstream
+    coz_mode: persistent
+    target_factor: 4
+    max_coz_steps: 1
+    acceptance_policy: trusted
+    comparison_resolution: target_4x
 paired_requirements:
-  same_inputs: true
-  same_coz_seed_per_input: true
+  same_input_snapshot: true
+  same_coz_seed_per_sample: true
   same_quality_metric_revision: true
   preserve_raw_manifests: true
-  report_failures: true
+  fresh_preflight_per_job: true
+  continue_after_failure: true
+  no_metric_imputation: true
 metrics:
   full_reference: [psnr, ssim, lpips]
   no_reference: [musiq, clipiqa]
@@ -30,3 +56,4 @@ metrics:
 notes:
   - No numerical result belongs in this file.
   - Thresholds must be calibrated on a validation split disjoint from evaluation.
+  - A-only is a native-resolution restoration baseline; 4x full-reference metrics are not applicable and its output must never be resized to fill the pair.

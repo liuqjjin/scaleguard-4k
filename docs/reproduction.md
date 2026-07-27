@@ -38,7 +38,7 @@ CUDA hidden and the Hugging Face/Transformers offline flags set.
 Exercise the public CLI:
 
 ```bash
-uv run --locked python examples/make_fixture.py /tmp/scaleguard-input.jpg
+uv run --locked python -I examples/make_fixture.py /tmp/scaleguard-input.jpg
 uv run --locked scaleguard run \
   --config configs/runtime/cpu-mock.yaml \
   --input /tmp/scaleguard-input.jpg \
@@ -51,7 +51,7 @@ uv run --locked scaleguard manifest validate runs/cpu-contract/manifest.json
 Confirm rather than assume the evidence boundary:
 
 ```bash
-python3 - <<'PY'
+uv run --locked python -I - <<'PY'
 import json
 from pathlib import Path
 
@@ -72,7 +72,7 @@ as an image-quality metric.
 Materialize and verify the exact two core repositories:
 
 ```bash
-uv run --locked python scripts/upstream/materialize.py \
+uv run --locked python -I scripts/upstream/materialize.py \
   upstream-lock.yaml \
   --mapping repositories \
   --project-root "$PWD"
@@ -82,7 +82,7 @@ uv run --locked scaleguard upstream verify --lock upstream-lock.yaml
 Materialize the selected 4KAgent transitive service dependency separately:
 
 ```bash
-uv run --locked python scripts/upstream/materialize.py \
+uv run --locked python -I scripts/upstream/materialize.py \
   runtime-dependencies.yaml \
   --mapping dependencies \
   --project-root "$PWD"
@@ -99,12 +99,15 @@ checkout changes. It is still static evidence: no model is loaded.
 
 The AutoDL environment contract is Linux `x86_64` with glibc 2.28 or newer and
 a system `python3` with `venv`. The user does not need to preinstall the pinned
-uv. The project hook reuses uv only when `PATH` already supplies exactly
-0.11.16; otherwise it creates `.runtime/bootstrap-uv` and installs that version
-from the hashed `environments/bootstrap/uv.lock`. It then installs uv-managed
-Python 3.10.18 for ScaleGuard and each of the three isolated 4KAgent, DepictQA,
-and CoZ environments. It materializes both source locks, installs hash-resolved
-base locks plus the two hash-pinned 4KAgent override wheels, and writes:
+uv. The project hook clears `.runtime/bootstrap-uv`, reconstructs uv 0.11.16
+from the hashed wheel in `environments/bootstrap/uv.lock`, and rejects its
+executable unless it matches `environments/bootstrap/uv-binary.sha256`. That
+private uv reinstalls the exact managed CPython 3.10.18 archive declared in
+`environments/python-downloads.json`; a same-version executable on `PATH` is
+never evidence-valid. It then installs ScaleGuard and each of the three
+isolated 4KAgent, DepictQA, and CoZ environments. It materializes both source
+locks, installs hash-resolved base locks plus the two hash-pinned 4KAgent
+override wheels, and writes:
 
 ```text
 .runtime/receipts/{scaleguard,4kagent,depictqa,coz}.json
@@ -168,7 +171,7 @@ After those conditions exist, run:
 export CUDA_VISIBLE_DEVICES=0,1
 export SCALEGUARD_SMOKE_INPUT=/authorized-data/smoke.png
 export SCALEGUARD_INTEGRATION_INPUT=/authorized-data/integration.png
-bash external_gate/commands.sh
+external_gate/commands.sh
 ```
 
 The complete user-owned steps, success criteria, and redaction rules are in:
@@ -191,9 +194,12 @@ evidence in this order:
    preflight, Linux `x86_64`/glibc identity, hash-pinned uv 0.11.16 bootstrap
    identity, Python 3.10.18, both materialized source locks, resolved lock
    hashes, environment-receipt hashes, upstream verification, and doctor
-   outcome. Both bootstrap receipts must be `passed`. Inspect all four copied
-   environment receipts; the 4KAgent receipt must contain only the exact
-   audited PyIQA override described above.
+   outcome. Both bootstrap receipts must be `passed`. The AutoDL scripts must
+   invoke the CLI through the lexical project entry
+   `.venv/bin/python -I -m scaleguard.cli`; `SCALEGUARD_CLI`,
+   `SCALEGUARD_PYTHON`, and `PATH` resolution are not evidence-valid. Inspect
+   all four copied environment receipts; the 4KAgent receipt must contain only
+   the exact audited PyIQA override described above.
 2. four per-attempt `runtime-environments/*.json` receipts and the
    schema-v2 `runtime-preflight.json`: exact match to the bootstrap baselines,
    same-attempt paths, fresh timestamps, and bound hashes.
@@ -242,6 +248,13 @@ Trusted thresholds are a separate evidence stage. A calibration receipt:
 - binds metric identity and measurement model;
 - records quantiles, bootstrap settings, sample counts, and issues; and
 - must match the exact runtime thresholds.
+
+Controller construction records the receipt's resolved path, size, SHA-256, and
+semantic verification in the manifest. Paired-summary review independently
+reopens the same byte snapshot and repeats the check. Rewriting thresholds and
+nearby self-digests does not preserve eligibility. Measurement value and
+canonical forward-model identity must appear together only when the observation
+gate is enabled.
 
 Follow [the evaluation protocol](evaluation-protocol.md). A receipt with
 `status: insufficient_data`, any issue, a proxy backend, a hash mismatch, or

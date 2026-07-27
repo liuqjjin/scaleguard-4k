@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
+import shutil
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -11,6 +14,13 @@ import pytest
 
 ROOT = Path(__file__).parents[2]
 COMMON = ROOT / "scripts" / "autodl" / "_common.sh"
+
+
+def _copy_common(project: Path) -> Path:
+    destination = project / "scripts" / "autodl" / "_common.sh"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(COMMON, destination)
+    return destination
 
 
 def _run_bash(
@@ -31,11 +41,15 @@ def _run_bash(
 
 def test_common_helpers_limit_each_credential_phase() -> None:
     script = f"""
-source {str(COMMON)!r}
 export HF_TOKEN=hf-phase-only
 export OPENAI_API_KEY=openai-must-not-leak
 export GITHUB_TOKEN=github-must-not-leak
 export CUSTOM_SCHEDULER_CREDENTIAL=custom-runtime-only
+export UNRELATED_SERVICE_TOKEN=unknown-must-not-leak
+export PIP_INDEX_URL=https://user:pass@packages.example.invalid/simple
+export BASH_ENV=/tmp/poison-bash-env
+export PYTHONPATH=/tmp/poison-pythonpath
+source {str(COMMON)!r}
 sg_register_sensitive_env_name CUSTOM_SCHEDULER_CREDENTIAL
 sg_run_sanitized python3 -c 'import json,os; print(json.dumps(dict(os.environ)))'
 sg_run_with_download_credentials \
@@ -51,16 +65,28 @@ sg_run_with_scheduler_credential CUSTOM_SCHEDULER_CREDENTIAL \
         "OPENAI_API_KEY",
         "GITHUB_TOKEN",
         "CUSTOM_SCHEDULER_CREDENTIAL",
+        "UNRELATED_SERVICE_TOKEN",
+        "PIP_INDEX_URL",
+        "BASH_ENV",
+        "PYTHONPATH",
     ):
         assert name not in sanitized
     assert download["HF_TOKEN"] == "hf-phase-only"
     assert "OPENAI_API_KEY" not in download
     assert "GITHUB_TOKEN" not in download
     assert "CUSTOM_SCHEDULER_CREDENTIAL" not in download
+    assert "UNRELATED_SERVICE_TOKEN" not in download
+    assert "PIP_INDEX_URL" not in download
+    assert "BASH_ENV" not in download
+    assert "PYTHONPATH" not in download
     assert runtime["CUSTOM_SCHEDULER_CREDENTIAL"] == "custom-runtime-only"
     assert "HF_TOKEN" not in runtime
     assert "OPENAI_API_KEY" not in runtime
     assert "GITHUB_TOKEN" not in runtime
+    assert "UNRELATED_SERVICE_TOKEN" not in runtime
+    assert "PIP_INDEX_URL" not in runtime
+    assert "BASH_ENV" not in runtime
+    assert "PYTHONPATH" not in runtime
 
 
 def test_doctor_gets_marker_while_model_gets_real_scheduler_secret(
@@ -109,12 +135,12 @@ def test_autodl_project_helpers_use_the_installed_project_interpreter(
     common = COMMON.read_text(encoding="utf-8")
 
     assert (
-        '"${SG_REPO_ROOT}/.venv/bin/python" "${sg_here}/_validate_bootstrap_receipt.py"'
+        '"${SG_REPO_ROOT}/.venv/bin/python" -I "${sg_here}/_validate_bootstrap_receipt.py"'
     ) in bootstrap
     assert 'sg_project_python="${SG_REPO_ROOT}/.venv/bin/python"' in download
-    assert '"${sg_project_python}" "${sg_here}/_download_weights.py"' in download
-    assert '"${sg_project_python}" "${sg_materializer}"' in download
-    assert '"${sg_project_python}" "${sg_materializer}"' in common
+    assert '"${sg_project_python}" -I "${sg_here}/_download_weights.py"' in download
+    assert '"${sg_project_python}" -I "${sg_materializer}"' in download
+    assert '"${sg_project_python}" -I "${sg_materializer}"' in common
     assert environment_bootstrap.count('-I "${sg_audit_script}"') == 4
     assert common.count('-I "${sg_audit_script}"') == 4
 
@@ -131,7 +157,7 @@ def test_autodl_project_helpers_use_the_installed_project_interpreter(
         ROOT / "scripts" / "weights" / "materialize.py",
     ):
         result = subprocess.run(
-            [str(project_python), str(helper), "--help"],
+            [str(project_python), "-I", str(helper), "--help"],
             cwd=tmp_path,
             env=clean_environment,
             check=False,
@@ -139,6 +165,242 @@ def test_autodl_project_helpers_use_the_installed_project_interpreter(
             text=True,
         )
         assert result.returncode == 0, f"{helper}: {result.stderr}"
+
+
+def test_autodl_cli_resolution_is_bound_to_the_project_venv(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    marker = tmp_path / "fallback-invoked.txt"
+    for name in ("python3", "scaleguard"):
+        executable = fake_bin / name
+        executable.write_text(
+            f"#!/bin/sh\nprintf '%s\\n' {name!r} >> {shlex.quote(str(marker))}\nexit 97\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
+
+    environment = os.environ.copy()
+    environment.pop("SCALEGUARD_CLI", None)
+    environment.pop("SCALEGUARD_PYTHON", None)
+    environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+    result = _run_bash(
+        f"""
+source {str(COMMON)!r}
+sg_resolve_cli
+printf '<%s>\\n' "${{SG_CLI[@]}}"
+""",
+        env=environment,
+    )
+
+    assert result.stdout.splitlines() == [
+        f"<{ROOT / '.venv' / 'bin' / 'python'}>",
+        "<-I>",
+        "<-m>",
+        "<scaleguard.cli>",
+    ]
+    assert not marker.exists()
+
+    for variable, executable in (
+        ("SCALEGUARD_CLI", fake_bin / "scaleguard"),
+        ("SCALEGUARD_PYTHON", fake_bin / "python3"),
+    ):
+        overridden_environment = environment.copy()
+        overridden_environment[variable] = str(executable)
+        overridden = subprocess.run(
+            [
+                "/bin/bash",
+                "-uec",
+                f"source {str(COMMON)!r}; sg_resolve_cli",
+            ],
+            cwd=ROOT,
+            env=overridden_environment,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert overridden.returncode != 0
+        assert f"{variable} is not allowed for AutoDL evidence" in overridden.stderr
+        assert not marker.exists()
+
+
+def test_autodl_cli_resolution_attests_prefix_and_module_source(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project_common = _copy_common(project)
+    package = project / "src" / "scaleguard"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "cli.py").write_text("def main():\n    return 0\n", encoding="utf-8")
+
+    venv = project / ".venv"
+    subprocess.run(
+        [sys.executable, "-m", "venv", "--without-pip", str(venv)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    project_python = venv / "bin" / "python"
+    site_packages = Path(
+        subprocess.run(
+            [
+                str(project_python),
+                "-I",
+                "-c",
+                "import site; print(site.getsitepackages()[0])",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    source_binding = site_packages / "scaleguard-source.pth"
+    source_binding.write_text(f"{project / 'src'}\n", encoding="utf-8")
+
+    environment = os.environ.copy()
+    environment.pop("SCALEGUARD_CLI", None)
+    environment.pop("SCALEGUARD_PYTHON", None)
+    valid = _run_bash(
+        f"""
+source {str(project_common)!r}
+sg_resolve_cli
+printf '%s\\n' "${{SG_CLI[@]}}"
+""",
+        env=environment,
+    )
+    assert valid.stdout.splitlines() == [
+        str(project_python),
+        "-I",
+        "-m",
+        "scaleguard.cli",
+    ]
+
+    foreign_source = tmp_path / "foreign-source"
+    foreign_package = foreign_source / "scaleguard"
+    foreign_package.mkdir(parents=True)
+    (foreign_package / "__init__.py").write_text("", encoding="utf-8")
+    (foreign_package / "cli.py").write_text("def main():\n    return 0\n", encoding="utf-8")
+    source_binding.write_text(f"{foreign_source}\n", encoding="utf-8")
+    foreign_module = subprocess.run(
+        ["/bin/bash", "-uec", f"source {str(project_common)!r}; sg_resolve_cli"],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert foreign_module.returncode != 0
+    assert "ScaleGuard CLI module mismatch" in foreign_module.stderr
+    assert "project ScaleGuard CLI attestation failed" in foreign_module.stderr
+
+    foreign_project = tmp_path / "foreign-project"
+    foreign_common = _copy_common(foreign_project)
+    foreign_expected_package = foreign_project / "src" / "scaleguard"
+    foreign_expected_package.mkdir(parents=True)
+    (foreign_expected_package / "__init__.py").write_text("", encoding="utf-8")
+    (foreign_expected_package / "cli.py").write_text(
+        "def main():\n    return 0\n",
+        encoding="utf-8",
+    )
+    foreign_launcher = foreign_project / ".venv" / "bin" / "python"
+    foreign_launcher.parent.mkdir(parents=True)
+    foreign_launcher.write_text(
+        f'#!/bin/sh\nexec {shlex.quote(str(project_python))} "$@"\n',
+        encoding="utf-8",
+    )
+    foreign_launcher.chmod(0o755)
+    foreign_prefix = subprocess.run(
+        ["/bin/bash", "-uec", f"source {str(foreign_common)!r}; sg_resolve_cli"],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert foreign_prefix.returncode != 0
+    assert "ScaleGuard interpreter mismatch" in foreign_prefix.stderr
+    assert "project ScaleGuard CLI attestation failed" in foreign_prefix.stderr
+
+
+def test_common_rejects_an_ambient_alternate_repository_root(tmp_path: Path) -> None:
+    attacker = tmp_path / "attacker"
+    fake_python = attacker / ".venv" / "bin" / "python"
+    marker = tmp_path / "executed"
+    fake_python.parent.mkdir(parents=True)
+    fake_python.write_text(
+        f"#!/bin/sh\nprintf owned > {shlex.quote(str(marker))}\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+    environment = os.environ.copy()
+    environment["SCALEGUARD_REPO_ROOT"] = str(attacker)
+
+    result = subprocess.run(
+        ["/bin/bash", "-uec", f"source {str(COMMON)!r}; sg_resolve_cli"],
+        cwd=ROOT,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "must match the repository containing _common.sh" in result.stderr
+    assert not marker.exists()
+
+
+def test_common_rejects_a_symlinked_runtime_root_before_git_can_run(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project_common = _copy_common(project)
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    (project / ".runtime").symlink_to(attacker, target_is_directory=True)
+
+    result = subprocess.run(
+        ["/bin/bash", "-uec", f"source {str(project_common)!r}; git status"],
+        cwd=project,
+        env=os.environ.copy(),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode != 0
+    assert "runtime root must not be a symbolic link" in result.stderr
+
+
+def test_common_uses_a_fresh_private_home_and_disables_git_configuration(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    project_common = _copy_common(project)
+    ambient_home = tmp_path / "ambient-home"
+    ambient_home.mkdir()
+    (ambient_home / ".gitconfig").write_text(
+        "[core]\n\tfsmonitor = /tmp/attacker-hook\n",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["HOME"] = str(ambient_home)
+
+    result = _run_bash(
+        f"""
+source {str(project_common)!r}
+printf '%s\\n' "${{HOME}}"
+printf '<%s>\\n' "$(git config --global --get core.fsmonitor || :)"
+""",
+        env=environment,
+        cwd=project,
+    )
+
+    isolated_home = Path(result.stdout.splitlines()[0])
+    assert isolated_home.parent == project / ".runtime" / "isolated-homes"
+    assert isolated_home != ambient_home
+    assert not isolated_home.is_symlink()
+    assert isolated_home.stat().st_uid == os.geteuid()
+    assert isolated_home.stat().st_mode & 0o777 == 0o700
+    assert list(isolated_home.iterdir()) == []
+    assert result.stdout.splitlines()[1] == "<>"
 
 
 def test_diagnostics_sanitizer_bootstraps_project_source_for_system_python(
@@ -202,6 +464,13 @@ def test_shell_scheduler_resolver_rejects_ambiguous_yaml(
 
 
 def test_external_gate_scopes_credentials_by_phase(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    (project / "external_gate").mkdir(parents=True)
+    (project / "scripts" / "autodl").mkdir(parents=True)
+    shutil.copy2(ROOT / "external_gate" / "commands.sh", project / "external_gate/commands.sh")
+    shutil.copy2(COMMON, project / "scripts/autodl/_common.sh")
+    (project / "weights-lock.json").write_text("{}\n", encoding="utf-8")
+
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     phase_log = tmp_path / "phases.jsonl"
@@ -215,10 +484,21 @@ exit 97
         encoding="utf-8",
     )
     fake_env.chmod(0o755)
-    fake_bash = fake_bin / "bash"
-    fake_bash.write_text(
-        """#!/bin/sh
-python3 - "$1" "$BOUNDARY_LOG" <<'PY'
+    for name in (
+        "check_gpu.sh",
+        "bootstrap.sh",
+        "download_weights.sh",
+        "run_smoke.sh",
+        "run_integration.sh",
+        "collect_diagnostics.sh",
+    ):
+        probe = project / "scripts" / "autodl" / name
+        probe.write_text(
+            f"""#!/bin/sh
+{shlex.quote(sys.executable)} -I - {shlex.quote("scripts/autodl/" + name)} \
+{shlex.quote(str(phase_log))} <<'PY'
+"""
+            """\
 import json
 import os
 import pathlib
@@ -237,9 +517,9 @@ with pathlib.Path(sys.argv[2]).open("a", encoding="utf-8") as handle:
     handle.write(json.dumps(record) + "\\n")
 PY
 """,
-        encoding="utf-8",
-    )
-    fake_bash.chmod(0o755)
+            encoding="utf-8",
+        )
+        probe.chmod(0o755)
     runtime_config = tmp_path / "runtime.yaml"
     runtime_config.write_text(
         "fourkagent:\n  api_key_env: RUNTIME_SCHEDULER_CREDENTIAL\n",
@@ -261,7 +541,6 @@ PY
     env.update(
         {
             "PATH": f"{fake_bin}:{env['PATH']}",
-            "BOUNDARY_LOG": str(phase_log),
             "ENV_PROBE": str(env_probe),
             "SCALEGUARD_AUTODL_CONFIG": str(runtime_config),
             "SCALEGUARD_SMOKE_CONFIG": str(smoke_config),
@@ -269,7 +548,7 @@ PY
             "SCALEGUARD_CACHE_ROOT": str(cache),
             "SCALEGUARD_ARTIFACT_ROOT": str(artifact_root),
             "SCALEGUARD_RUN_ID": "external-phase-test",
-            "SCALEGUARD_WEIGHTS_MANIFEST": str(ROOT / "weights-lock.json"),
+            "SCALEGUARD_WEIGHTS_MANIFEST": str(project / "weights-lock.json"),
             "SCALEGUARD_SMOKE_INPUT": str(ROOT / "pyproject.toml"),
             "SCALEGUARD_INTEGRATION_INPUT": str(ROOT / "pyproject.toml"),
             "HF_TOKEN": "hf-download-only",
@@ -281,8 +560,8 @@ PY
         }
     )
     subprocess.run(
-        ["/bin/bash", str(ROOT / "external_gate" / "commands.sh")],
-        cwd=ROOT,
+        [str(project / "external_gate" / "commands.sh")],
+        cwd=project,
         env=env,
         check=True,
         capture_output=True,
@@ -340,23 +619,6 @@ PY
 def test_diagnostics_exact_redaction_uses_private_fd_and_sanitized_probes(
     tmp_path: Path,
 ) -> None:
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    probe_log = tmp_path / "probe.txt"
-    fake_uname = fake_bin / "uname"
-    fake_uname.write_text(
-        """#!/bin/sh
-if [ -n "${CUSTOM_SCHEDULER_CREDENTIAL+x}" ] || [ -n "${HF_TOKEN+x}" ]; then
-    printf 'visible\\n' > "$PROBE_LOG"
-else
-    printf 'sanitized\\n' > "$PROBE_LOG"
-fi
-/usr/bin/uname "$@"
-""",
-        encoding="utf-8",
-    )
-    fake_uname.chmod(0o755)
-
     config = tmp_path / "runtime.yaml"
     config.write_text(
         "fourkagent:\n  api_key_env: CUSTOM_SCHEDULER_CREDENTIAL\n",
@@ -375,8 +637,6 @@ fi
     env = os.environ.copy()
     env.update(
         {
-            "PATH": f"{fake_bin}:{env['PATH']}",
-            "PROBE_LOG": str(probe_log),
             "SCALEGUARD_AUTODL_CONFIG": str(config),
             "SCALEGUARD_CACHE_ROOT": str(cache),
             "SCALEGUARD_ARTIFACT_ROOT": str(artifact_root),
@@ -387,7 +647,6 @@ fi
     )
     subprocess.run(
         [
-            "/bin/bash",
             str(ROOT / "scripts" / "autodl" / "collect_diagnostics.sh"),
             "--source",
             str(source),
@@ -401,7 +660,6 @@ fi
         text=True,
     )
 
-    assert probe_log.read_text(encoding="utf-8") == "sanitized\n"
     with tarfile.open(bundle, "r:gz") as archive:
         content = b"\n".join(
             archive.extractfile(member).read()
@@ -415,25 +673,12 @@ fi
 def test_standalone_runner_privatizes_credentials_before_child_processes(
     tmp_path: Path,
 ) -> None:
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    probe_log = tmp_path / "runner-probes.txt"
-    for command, real_command in (("cat", "/bin/cat"), ("tr", "/usr/bin/tr")):
-        wrapper = fake_bin / command
-        wrapper.write_text(
-            f"""#!/bin/sh
-if [ -n "${{CUSTOM_SCHEDULER_CREDENTIAL+x}}" \
-    || [ -n "${{HF_TOKEN+x}}" \
-    || [ -n "${{GITHUB_TOKEN+x}}" ]; then
-    printf '{command}=visible\\n' >> "$PROBE_LOG"
-else
-    printf '{command}=sanitized\\n' >> "$PROBE_LOG"
-fi
-exec {real_command!r} "$@"
-""",
-            encoding="utf-8",
-        )
-        wrapper.chmod(0o755)
+    startup_marker = tmp_path / "bash-env-ran.txt"
+    poison = tmp_path / "poison.sh"
+    poison.write_text(
+        f"printf 'unsafe\\n' > {shlex.quote(str(startup_marker))}\n",
+        encoding="utf-8",
+    )
     config = tmp_path / "runtime.yaml"
     config.write_text(
         "fourkagent:\n  api_key_env: CUSTOM_SCHEDULER_CREDENTIAL\n",
@@ -442,16 +687,20 @@ exec {real_command!r} "$@"
     env = os.environ.copy()
     env.update(
         {
-            "PATH": f"{fake_bin}:{env['PATH']}",
-            "PROBE_LOG": str(probe_log),
+            "BASH_ENV": str(poison),
+            "SHELLOPTS": "xtrace",
+            "PS4": "${HF_TOKEN}",
+            "LC_VENDOR_API_TOKEN": "locale-private",
+            "BASH_FUNC_source%%": "() { printf '%s\\n' \"$HF_TOKEN\" >&2; }",
+            "BASH_FUNC_unset%%": "() { printf '%s\\n' \"$HF_TOKEN\" >&2; }",
+            "BASH_FUNC_builtin%%": "() { printf '%s\\n' \"$HF_TOKEN\" >&2; }",
             "CUSTOM_SCHEDULER_CREDENTIAL": "runtime-private",
             "HF_TOKEN": "download-private",
             "GITHUB_TOKEN": "ambient-private",
         }
     )
-    subprocess.run(
+    result = subprocess.run(
         [
-            "/bin/bash",
             str(ROOT / "scripts" / "autodl" / "_run_scaleguard.sh"),
             "smoke",
             "--config",
@@ -465,15 +714,22 @@ exec {real_command!r} "$@"
         text=True,
     )
 
-    observations = probe_log.read_text(encoding="utf-8").splitlines()
-    assert observations
-    assert all(line.endswith("=sanitized") for line in observations)
+    assert not startup_marker.exists()
+    combined = result.stdout + result.stderr
+    for secret in (
+        "runtime-private",
+        "download-private",
+        "ambient-private",
+        "locale-private",
+    ):
+        assert secret not in combined
 
 
 def test_runtime_environment_reaudit_uses_all_isolated_pythons_without_credentials(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "project"
+    project_common = _copy_common(project)
     probe_log = tmp_path / "runtime-audits.txt"
     audit = project / "scripts" / "bootstrap" / "audit_environment.py"
     audit.parent.mkdir(parents=True)
@@ -491,7 +747,8 @@ def test_runtime_environment_reaudit_uses_all_isolated_pythons_without_credentia
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("fixture\n", encoding="utf-8")
 
-    python_fixture = """#!/bin/sh
+    python_fixture = (
+        """#!/bin/sh
 if [ -n "${HF_TOKEN+x}" ] \
     || [ -n "${GITHUB_TOKEN+x}" ] \
     || [ -n "${CUSTOM_SCHEDULER_CREDENTIAL+x}" ]; then
@@ -499,8 +756,10 @@ if [ -n "${HF_TOKEN+x}" ] \
 fi
 [ "${HF_HUB_OFFLINE:-}" = "1" ] || exit 92
 [ "${TRANSFORMERS_OFFLINE:-}" = "1" ] || exit 93
-printf '%s|%s\\n' "$0" "$*" >> "$PROBE_LOG"
 """
+        f"""printf '%s|%s\\n' "$0" "$*" >> {shlex.quote(str(probe_log))}
+"""
+    )
     interpreters = (
         project / ".venv" / "bin" / "python",
         project / ".runtime" / "envs" / "4kagent" / "bin" / "python",
@@ -517,15 +776,13 @@ printf '%s|%s\\n' "$0" "$*" >> "$PROBE_LOG"
     environment = os.environ.copy()
     environment.update(
         {
-            "SCALEGUARD_REPO_ROOT": str(project),
-            "PROBE_LOG": str(probe_log),
             "HF_TOKEN": "download-private",
             "GITHUB_TOKEN": "ambient-private",
             "CUSTOM_SCHEDULER_CREDENTIAL": "runtime-private",
         }
     )
     script = f"""
-source {str(COMMON)!r}
+source {str(project_common)!r}
 sg_register_sensitive_env_name CUSTOM_SCHEDULER_CREDENTIAL
 sg_make_sensitive_environment_private
 sg_reaudit_runtime_environments {str(log)!r} {str(output_root)!r}
@@ -553,7 +810,7 @@ sg_reaudit_runtime_environments {str(log)!r} {str(output_root)!r}
     interpreters[2].chmod(0o755)
     failed_output_root = tmp_path / "failed-runtime-environments"
     failed_script = f"""
-source {str(COMMON)!r}
+source {str(project_common)!r}
 sg_register_sensitive_env_name CUSTOM_SCHEDULER_CREDENTIAL
 sg_make_sensitive_environment_private
 sg_reaudit_runtime_environments {str(log)!r} {str(failed_output_root)!r}

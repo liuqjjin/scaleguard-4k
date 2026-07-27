@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -25,6 +26,7 @@ from scaleguard.provenance import (
 )
 
 _NOW = "2026-07-27T00:00:00Z"
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 @dataclass(frozen=True)
@@ -79,6 +81,58 @@ def test_clean_git_check_does_not_pass_ambient_credentials(
     assert all("GITHUB_TOKEN" not in env for env in observed_environments)
 
 
+def test_independent_environment_reaudit_rejects_drift_without_forwarding_credentials(
+    runtime_evidence: RuntimeEvidence,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auditor = runtime_evidence.root / "scripts/bootstrap/audit_environment.py"
+    auditor.parent.mkdir(parents=True)
+    auditor.write_text("# fixture auditor\n", encoding="utf-8")
+    expected = {
+        name: _read_json(path) for name, path in runtime_evidence.runtime_environments.items()
+    }
+    observed_environments: list[dict[str, str]] = []
+
+    def run(
+        args: tuple[str, ...],
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        environment = kwargs.get("env")
+        assert isinstance(environment, dict)
+        observed_environments.append(environment)
+        output = Path(args[args.index("--output") + 1])
+        _write_json(output, {"name": args[args.index("--name") + 1]})
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+    def validate(
+        name: str,
+        record: object,
+        **_kwargs: object,
+    ) -> tuple[Path, dict[str, Any], str]:
+        assert isinstance(record, dict)
+        path = Path(str(record["path"]))
+        document = json.loads(json.dumps(expected[name]))
+        if name == "coz":
+            document["packages"]["coz-fixture"] = "9.9"
+        return path, document, sha256(path)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "promotion-secret")
+    monkeypatch.setenv("GITHUB_TOKEN", "github-secret")
+    monkeypatch.setattr(provenance.subprocess, "run", run)
+    monkeypatch.setattr(provenance, "validate_environment_receipt", validate)
+
+    with pytest.raises(RuntimePreflightError, match="coz differs from independent re-audit"):
+        provenance._reaudit_runtime_environments(
+            expected,
+            project_root=runtime_evidence.root,
+            receipt_parent=runtime_evidence.preflight.parent,
+        )
+
+    assert len(observed_environments) == len(ENVIRONMENT_LOCK_PATHS)
+    assert all("OPENAI_API_KEY" not in env for env in observed_environments)
+    assert all("GITHUB_TOKEN" not in env for env in observed_environments)
+
+
 def _read_json(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert isinstance(payload, dict)
@@ -105,12 +159,167 @@ def _file_inventory(path: Path) -> list[dict[str, object]]:
     ]
 
 
+def _runtime_import_origin(root: Path, environment: Path, name: str, module: str) -> Path:
+    from_checkout = (
+        name == "scaleguard"
+        or (name == "4kagent" and module.startswith(("llm.", "pipeline.", "entrypoint:")))
+        or (name == "depictqa" and module.startswith("model."))
+        or (name == "coz" and module == "osediff_sd3")
+    )
+    if not from_checkout:
+        origin = environment / "lib/python3.10/site-packages/runtime_fixture.py"
+    elif name == "scaleguard":
+        origin = root / "src" / (module.replace(".", "/") + ".py")
+    elif name == "4kagent":
+        checkout = root / "third_party/checkouts/4KAgent"
+        origin = (
+            checkout / module.removeprefix("entrypoint:")
+            if module.startswith("entrypoint:")
+            else checkout / (module.replace(".", "/") + ".py")
+        )
+    elif name == "depictqa":
+        origin = root / "third_party/dependencies/DepictQA/src" / (module.replace(".", "/") + ".py")
+    else:
+        origin = root / "third_party/checkouts/Chain-of-Zoom/osediff_sd3.py"
+    origin.parent.mkdir(parents=True, exist_ok=True)
+    origin.write_text("FIXTURE = True\n", encoding="utf-8")
+    return origin.resolve()
+
+
+def _environment_document(
+    root: Path,
+    *,
+    name: str,
+    lock_paths: tuple[str, ...],
+    status: str,
+    base_prefix: Path,
+    base_executable: Path,
+    stdlib_root: Path,
+) -> dict[str, Any]:
+    prefix = root / (".venv" if name == "scaleguard" else f".runtime/envs/{name}")
+    executable = prefix / "bin/python"
+    executable.parent.mkdir(parents=True)
+    executable.symlink_to(base_executable)
+    pyvenv = prefix / "pyvenv.cfg"
+    pyvenv.write_text(f"home = {base_prefix}\n", encoding="utf-8")
+    package = f"{name}-fixture"
+    packages = {package: "1.0"}
+    distribution = {
+        "name": package,
+        "version": "1.0",
+        "record_path": (f"lib/python3.10/site-packages/{package}-1.0.dist-info/RECORD"),
+        "file_count": 1,
+        "merkle_root": hashlib.sha256(f"{name}-distribution".encode()).hexdigest(),
+    }
+    venv_metadata = {
+        "file_count": 1,
+        "merkle_root": hashlib.sha256(f"{name}-venv".encode()).hexdigest(),
+    }
+    interpreter = {
+        "realpath": str(base_executable),
+        "size_bytes": base_executable.stat().st_size,
+        "sha256": sha256(base_executable),
+        "pyvenv_config_path": str(pyvenv),
+        "pyvenv_config_size_bytes": pyvenv.stat().st_size,
+        "pyvenv_config_sha256": sha256(pyvenv),
+    }
+    base_runtime = {
+        "prefix": str(base_prefix),
+        "executable": str(base_executable),
+        "executable_realpath": str(base_executable),
+        "executable_size_bytes": base_executable.stat().st_size,
+        "executable_sha256": sha256(base_executable),
+        "executable_alias_count": 0,
+        "executable_alias_merkle_root": provenance._merkle_root([]),
+        "executable_aliases": [],
+        "stdlib_root": str(stdlib_root),
+        "stdlib_file_count": 1,
+        "stdlib_merkle_root": hashlib.sha256(b"fixture-stdlib").hexdigest(),
+    }
+    inventory_root, inventory_count, runtime_root, runtime_count = (
+        provenance._installation_merkle_roots(
+            [distribution],
+            venv_metadata,
+            interpreter,
+            base_runtime,
+        )
+    )
+    installation = {
+        "algorithm": "sha256-merkle-v1",
+        "environment_root": str(prefix),
+        "distribution_count": 1,
+        "distribution_file_count": 1,
+        "file_count": inventory_count + runtime_count,
+        "merkle_root": provenance._merkle_root(
+            [
+                provenance._merkle_payload(
+                    {
+                        "kind": "venv-installation",
+                        "file_count": inventory_count,
+                        "merkle_root": inventory_root,
+                    }
+                ),
+                provenance._merkle_payload(
+                    {
+                        "kind": "python-runtime",
+                        "file_count": runtime_count,
+                        "merkle_root": runtime_root,
+                    }
+                ),
+            ]
+        ),
+        "distributions": [distribution],
+        "venv_metadata": venv_metadata,
+        "interpreter": interpreter,
+        "base_runtime": base_runtime,
+    }
+    return {
+        "schema_version": 2,
+        "name": name,
+        "status": status,
+        "created_at_utc": _NOW,
+        "python": {
+            "executable": str(executable),
+            "executable_realpath": str(base_executable),
+            "prefix": str(prefix),
+            "base_prefix": str(base_prefix),
+            "version": "3.10.18",
+            "implementation": "CPython",
+            "platform": "Linux-6.8.0-x86_64",
+        },
+        "locks": [
+            {
+                "path": str((root / relative).resolve()),
+                "sha256": sha256(root / relative),
+                "pinned_packages": 1,
+            }
+            for relative in lock_paths
+        ],
+        "expected_packages": packages,
+        "packages": packages,
+        "installation_files": installation,
+        "runtime_imports": [
+            {
+                "module": module,
+                "symbols": list(symbols),
+                "origin": str(_runtime_import_origin(root, prefix, name, module)),
+            }
+            for module, symbols in ENVIRONMENT_RUNTIME_IMPORTS[name]
+        ],
+        "audited_overrides": (list(FOURKAGENT_AUDITED_OVERRIDES) if name == "4kagent" else []),
+        "issues": [],
+    }
+
+
 @pytest.fixture
 def runtime_evidence(tmp_path: Path) -> RuntimeEvidence:
     root = tmp_path / "project"
     root.mkdir()
     _git(root, "init", "-q")
-    (root / ".gitignore").write_text(".runtime/\n.venv/\n", encoding="utf-8")
+    (root / ".gitignore").write_text(
+        ".runtime/\n.venv/\nthird_party/\nsrc/\n",
+        encoding="utf-8",
+    )
 
     config = root / "configs" / "runtime.yaml"
     config.parent.mkdir(parents=True)
@@ -119,11 +328,34 @@ def runtime_evidence(tmp_path: Path) -> RuntimeEvidence:
     for relative in all_locks:
         path = root / relative
         path.parent.mkdir(parents=True, exist_ok=True)
-        content = (
-            "0.11.16\n"
-            if relative == "environments/uv.version"
-            else (f"fixture lock: {relative}\n")
-        )
+        if relative == "environments/uv.version":
+            content = "0.11.16\n"
+        elif relative == "environments/bootstrap/uv-binary.sha256":
+            content = f"{'f' * 64}\n"
+        elif relative == "environments/python-downloads.json":
+            content = json.dumps(
+                {
+                    "cpython-3.10.18-linux-x86_64-gnu": {
+                        "name": "cpython",
+                        "arch": {"family": "x86_64", "variant": None},
+                        "os": "linux",
+                        "libc": "gnu",
+                        "major": 3,
+                        "minor": 10,
+                        "patch": 18,
+                        "prerelease": "",
+                        "url": (
+                            "https://github.com/astral-sh/"
+                            "python-build-standalone/releases/download/fixture/python.tar.gz"
+                        ),
+                        "sha256": "e" * 64,
+                        "variant": None,
+                        "build": "fixture",
+                    }
+                }
+            )
+        else:
+            content = f"fixture lock: {relative}\n"
         path.write_text(content, encoding="utf-8")
     _write_json(
         root / "weights-lock.json",
@@ -135,13 +367,20 @@ def runtime_evidence(tmp_path: Path) -> RuntimeEvidence:
                     "provider": "https",
                     "required": True,
                     "destination": "downloads/model.bin",
+                    "files": ["model.bin"],
+                    "known_sha256": hashlib.sha256(b"source weights").hexdigest(),
+                    "verify_on_download": True,
                     "url": "https://weights.invalid/model.bin",
+                    "sha256": hashlib.sha256(b"source weights").hexdigest(),
                 },
                 {
                     "id": "model-hf",
                     "provider": "huggingface",
                     "required": False,
                     "destination": "downloads/hf",
+                    "files": ["**/*"],
+                    "known_sha256": None,
+                    "verify_on_download": True,
                     "repo_id": "scaleguard/fixture-model",
                     "revision": "1" * 40,
                 },
@@ -164,46 +403,28 @@ def runtime_evidence(tmp_path: Path) -> RuntimeEvidence:
     )
     commit = _git(root, "rev-parse", "HEAD")
 
-    python_executable = root / ".runtime" / "python" / "python3.10"
-    python_executable.parent.mkdir(parents=True)
-    python_executable.write_text("fixture interpreter\n", encoding="utf-8")
+    base_prefix = root / ".runtime/python/cpython-3.10.18"
+    base_executable = base_prefix / "bin/python3.10"
+    base_executable.parent.mkdir(parents=True)
+    base_executable.write_text("fixture interpreter\n", encoding="utf-8")
+    stdlib_root = base_prefix / "lib/python3.10"
+    stdlib_root.mkdir(parents=True)
+    (stdlib_root / "fixture.py").write_text("FIXTURE = True\n", encoding="utf-8")
     environment_records: dict[str, dict[str, str]] = {}
     for name, lock_paths in ENVIRONMENT_LOCK_PATHS.items():
         path = root / ".runtime" / "receipts" / f"{name}.json"
-        package = f"{name}-fixture"
         status = "passed_with_audited_override" if name == "4kagent" else "passed"
         _write_json(
             path,
-            {
-                "schema_version": 1,
-                "name": name,
-                "status": status,
-                "created_at_utc": _NOW,
-                "python": {
-                    "executable": str(python_executable.resolve()),
-                    "version": "3.10.18",
-                    "implementation": "CPython",
-                    "platform": "Linux-6.8.0-x86_64",
-                },
-                "locks": [
-                    {
-                        "path": str((root / relative).resolve()),
-                        "sha256": sha256(root / relative),
-                        "pinned_packages": 1,
-                    }
-                    for relative in lock_paths
-                ],
-                "expected_packages": {package: "1.0"},
-                "packages": {package: "1.0"},
-                "runtime_imports": [
-                    {"module": module, "symbols": list(symbols)}
-                    for module, symbols in ENVIRONMENT_RUNTIME_IMPORTS[name]
-                ],
-                "audited_overrides": (
-                    list(FOURKAGENT_AUDITED_OVERRIDES) if name == "4kagent" else []
-                ),
-                "issues": [],
-            },
+            _environment_document(
+                root,
+                name=name,
+                lock_paths=lock_paths,
+                status=status,
+                base_prefix=base_prefix,
+                base_executable=base_executable,
+                stdlib_root=stdlib_root,
+            ),
         )
         environment_records[name] = {
             "path": f".runtime/receipts/{name}.json",
@@ -221,6 +442,16 @@ def runtime_evidence(tmp_path: Path) -> RuntimeEvidence:
             "project_commit": commit,
             "python_version": "3.10.18",
             "uv_version": "0.11.16",
+            "uv_binary_sha256": "f" * 64,
+            "python_distribution": {
+                "key": "cpython-3.10.18-linux-x86_64-gnu",
+                "build": "fixture",
+                "url": (
+                    "https://github.com/astral-sh/"
+                    "python-build-standalone/releases/download/fixture/python.tar.gz"
+                ),
+                "archive_sha256": "e" * 64,
+            },
             "platform": {
                 "system": "Linux",
                 "machine": "x86_64",
@@ -264,6 +495,8 @@ def runtime_evidence(tmp_path: Path) -> RuntimeEvidence:
                     "required": True,
                     "destination": "downloads/model.bin",
                     "files": _file_inventory(source_file),
+                    "known_hashes_verified": ["model.bin"],
+                    "verify_on_download": True,
                     "url": "https://weights.invalid/model.bin",
                 },
                 {
@@ -273,6 +506,8 @@ def runtime_evidence(tmp_path: Path) -> RuntimeEvidence:
                     "required": False,
                     "destination": "downloads/hf",
                     "files": _file_inventory(hf_source_file),
+                    "known_hashes_verified": [],
+                    "verify_on_download": True,
                     "repo_id": "scaleguard/fixture-model",
                     "revision": "1" * 40,
                 },
@@ -372,6 +607,7 @@ def _validate(evidence: RuntimeEvidence) -> dict[str, Any]:
         evidence.preflight,
         config_path=evidence.config,
         project_root=evidence.root,
+        require_runtime_profile=False,
     )
 
 
@@ -555,6 +791,32 @@ def test_runtime_preflight_rejects_atomic_replacement_during_a_receipt_snapshot(
     assert replaced is True
 
 
+def test_regular_snapshot_rejects_in_place_mutation_after_the_final_fstat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "evidence.json"
+    evidence.write_bytes(b'{"status":"passed"}\n')
+    identity = evidence.stat()
+    real_fstat = os.fstat
+    observations = 0
+
+    def mutate_after_completed_read(descriptor: int) -> os.stat_result:
+        nonlocal observations
+        current = real_fstat(descriptor)
+        if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
+            observations += 1
+            if observations == 2:
+                evidence.write_bytes(b'{"status":"forged-after-fstat"}\n')
+        return current
+
+    monkeypatch.setattr("scaleguard.provenance.os.fstat", mutate_after_completed_read)
+
+    with pytest.raises(RuntimePreflightError, match="changed while it was being read"):
+        provenance.load_regular_file_snapshot(evidence, "test evidence")
+    assert observations == 2
+
+
 def test_runtime_preflight_rejects_duplicate_receipt_keys(
     runtime_evidence: RuntimeEvidence,
 ) -> None:
@@ -649,7 +911,7 @@ def test_runtime_preflight_wraps_evidence_open_errors(
         ("locks", "locks differs from the bootstrap baseline"),
         ("expected_packages", "expected_packages differs from the bootstrap baseline"),
         ("packages", "packages differs from the bootstrap baseline"),
-        ("runtime_imports", "package audit is inconsistent"),
+        ("runtime_imports", "unexpected runtime import set"),
         ("audited_overrides", "package audit is inconsistent"),
         ("issues", "receipt content mismatch"),
         ("unexpected", "receipt content mismatch"),
@@ -725,6 +987,22 @@ def test_runtime_preflight_rejects_a_stage_start_after_receipt_creation(
         _validate(runtime_evidence)
 
 
+def test_runtime_preflight_rejects_old_environment_receipts_copied_into_a_new_attempt(
+    runtime_evidence: RuntimeEvidence,
+) -> None:
+    preflight = _read_json(runtime_evidence.preflight)
+    preflight["stage_started_at_utc"] = "2020-01-01T00:00:00Z"
+    for name, path in runtime_evidence.runtime_environments.items():
+        receipt = _read_json(path)
+        receipt["created_at_utc"] = "2020-01-02T00:00:00Z"
+        _write_json(path, receipt)
+        preflight["runtime_environments"][name]["sha256"] = sha256(path)
+    _write_json(runtime_evidence.preflight, preflight)
+
+    with pytest.raises(RuntimePreflightError, match="exceeded its maximum evidence window"):
+        _validate(runtime_evidence)
+
+
 @pytest.mark.parametrize(
     ("clock_offset", "accepted"),
     [
@@ -750,6 +1028,7 @@ def test_runtime_preflight_only_applies_age_limits_to_real_run_validation(
                 config_path=runtime_evidence.config,
                 project_root=runtime_evidence.root,
                 require_recent=True,
+                require_runtime_profile=False,
             )["runtime_evidence_verified"]
             is True
         )
@@ -760,6 +1039,7 @@ def test_runtime_preflight_only_applies_age_limits_to_real_run_validation(
                 config_path=runtime_evidence.config,
                 project_root=runtime_evidence.root,
                 require_recent=True,
+                require_runtime_profile=False,
             )
 
 
@@ -830,6 +1110,12 @@ def test_runtime_preflight_rejects_stale_bootstrap_digest(
         ("schema_version", 2, "bootstrap receipt is stale"),
         ("python_version", "3.11.9", "unexpected Python version"),
         ("uv_version", "latest", "unexpected uv version"),
+        ("uv_binary_sha256", "0" * 64, "unexpected uv binary identity"),
+        (
+            "python_distribution",
+            {"key": "unlocked"},
+            "unexpected managed Python distribution",
+        ),
         ("platform", {"system": "Darwin"}, "unexpected platform"),
     ],
 )
@@ -1031,3 +1317,309 @@ def test_runtime_preflight_rechecks_source_artifact_inventory(
 
     with pytest.raises(RuntimePreflightError, match="no longer matches its inventory"):
         _validate(runtime_evidence)
+
+
+def test_runtime_preflight_rejects_rebound_forged_locked_weight(
+    runtime_evidence: RuntimeEvidence,
+) -> None:
+    runtime_evidence.source_file.write_bytes(b"self-consistent forged weights")
+    receipt = _read_json(runtime_evidence.weights_receipt)
+    receipt["artifacts"][0]["files"] = _file_inventory(runtime_evidence.source_file)
+    receipt["artifacts"][0]["known_hashes_verified"] = ["model.bin"]
+    _write_json(runtime_evidence.weights_receipt, receipt)
+    _rebind_weight_chain(runtime_evidence)
+
+    with pytest.raises(RuntimePreflightError, match="locked SHA-256"):
+        _validate(runtime_evidence)
+
+
+def test_runtime_preflight_rejects_forged_known_hash_verification_claim(
+    runtime_evidence: RuntimeEvidence,
+) -> None:
+    receipt = _read_json(runtime_evidence.weights_receipt)
+    receipt["artifacts"][0]["known_hashes_verified"] = []
+    _write_json(runtime_evidence.weights_receipt, receipt)
+    _rebind_weight_chain(runtime_evidence)
+
+    with pytest.raises(RuntimePreflightError, match="hash verification disagrees"):
+        _validate(runtime_evidence)
+
+
+@pytest.mark.parametrize(
+    ("provider_fields", "message"),
+    [
+        (
+            {
+                "provider": "https",
+                "url": "https://weights.invalid/model.bin",
+                "sha256": None,
+                "known_sha256": None,
+            },
+            "immutable HTTPS identity",
+        ),
+        (
+            {
+                "provider": "https",
+                "url": "https://weights.invalid/model.bin?mutable=1",
+                "sha256": "a" * 64,
+                "known_sha256": "a" * 64,
+            },
+            "immutable HTTPS identity",
+        ),
+        (
+            {
+                "provider": "huggingface",
+                "repo_id": "scaleguard/model",
+                "revision": "main",
+                "known_sha256": None,
+            },
+            "immutable Hugging Face identity",
+        ),
+    ],
+)
+def test_locked_weight_artifact_requires_immutable_provider_identity(
+    provider_fields: dict[str, object],
+    message: str,
+) -> None:
+    artifact: dict[str, object] = {
+        "id": "fixture",
+        "required": True,
+        "destination": "models/model.bin",
+        "files": ["model.bin"],
+        "verify_on_download": True,
+        **provider_fields,
+    }
+
+    with pytest.raises(RuntimePreflightError, match=message):
+        provenance._locked_weight_artifacts(
+            {
+                "schema_version": 1,
+                "artifacts": [artifact],
+            }
+        )
+
+
+def _create_profile_files(
+    tmp_path: Path,
+) -> tuple[Path, Path, dict[str, str], dict[str, dict[str, str]]]:
+    root = tmp_path / "profile-project"
+    config_path = root / "configs/runtime/autodl-2x4090.yaml"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_bytes((_PROJECT_ROOT / "configs/runtime/autodl-2x4090.yaml").read_bytes())
+
+    for relative in (
+        "third_party/checkouts/4KAgent",
+        "third_party/checkouts/Chain-of-Zoom",
+        "third_party/dependencies/DepictQA",
+    ):
+        (root / relative).mkdir(parents=True)
+    for relative in (
+        "third_party/overlays/4kagent/run_native_restoration.py",
+        "third_party/overlays/4kagent/serve_depictqa_eval.py",
+        "third_party/overlays/chain-of-zoom/coz_session_worker.py",
+    ):
+        overlay = root / relative
+        overlay.parent.mkdir(parents=True, exist_ok=True)
+        overlay.write_text("# profile fixture\n", encoding="utf-8")
+
+    directory_assets = (
+        "weights/models/stabilityai/stable-diffusion-3-medium-diffusers",
+        "weights/models/Qwen/Qwen2.5-VL-3B-Instruct",
+        "weights/4kagent/models/Qwen2.5-VL-7B-Instruct",
+        "weights/4kagent/runtime/toolbox-root",
+        "weights/4kagent/hpsv2",
+        "weights/4kagent/depictqa",
+        "weights/chain-of-zoom/ckpt/VLM_LoRA/checkpoint-10000",
+    )
+    for relative in directory_assets:
+        (root / relative).mkdir(parents=True, exist_ok=True)
+    for relative in (
+        "weights/chain-of-zoom/ckpt/SR_LoRA/model_20001.pkl",
+        "weights/chain-of-zoom/ckpt/SR_VAE/vae_encoder_20001.pt",
+        "weights/metrics/pyiqa/musiq_koniq_ckpt-e95806b9.pth",
+    ):
+        asset = root / relative
+        asset.parent.mkdir(parents=True, exist_ok=True)
+        asset.write_bytes(b"profile fixture\n")
+
+    environment_bindings: dict[str, dict[str, str]] = {}
+    for name, relative in {
+        "scaleguard": ".venv/bin/python",
+        "4kagent": ".runtime/envs/4kagent/bin/python",
+        "depictqa": ".runtime/envs/depictqa/bin/python",
+        "coz": ".runtime/envs/coz/bin/python",
+    }.items():
+        executable = root / relative
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_text("#!/bin/sh\n", encoding="utf-8")
+        environment_bindings[name] = {"executable": str(executable)}
+
+    assets = {
+        "coz_sd3": str(root / "weights/models/stabilityai/stable-diffusion-3-medium-diffusers"),
+        "coz_qwen": str(root / "weights/models/Qwen/Qwen2.5-VL-3B-Instruct"),
+        "fourkagent_qwen": str(root / "weights/4kagent/models/Qwen2.5-VL-7B-Instruct"),
+        "coz_sr_lora": str(root / "weights/chain-of-zoom/ckpt/SR_LoRA/model_20001.pkl"),
+        "coz_vae": str(root / "weights/chain-of-zoom/ckpt/SR_VAE/vae_encoder_20001.pt"),
+        "coz_vlm_lora": str(root / "weights/chain-of-zoom/ckpt/VLM_LoRA/checkpoint-10000"),
+        "fourkagent_hps": str(root / "weights/4kagent/hpsv2"),
+        "fourkagent_toolbox": str(root / "weights/4kagent/runtime/toolbox-root"),
+        "depictqa_root": str(root / "weights/4kagent/depictqa"),
+        "quality_musiq": str(root / "weights/metrics/pyiqa/musiq_koniq_ckpt-e95806b9.pth"),
+    }
+    return root, config_path, assets, environment_bindings
+
+
+def test_runtime_profile_binding_normalizes_every_audited_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, config_path, assets, environments = _create_profile_files(tmp_path)
+    upstream_lock = {
+        "schema_version": 1,
+        "repositories": {
+            "fourkagent": {
+                "checkout": "third_party/checkouts/4KAgent",
+                "commit": "1" * 40,
+                "tree": "2" * 40,
+            },
+            "chain_of_zoom": {
+                "checkout": "third_party/checkouts/Chain-of-Zoom",
+                "commit": "3" * 40,
+                "tree": "4" * 40,
+            },
+        },
+    }
+    dependency_lock = {
+        "schema_version": 1,
+        "dependencies": {
+            "depictqa": {
+                "checkout": "third_party/dependencies/DepictQA",
+                "commit": "5" * 40,
+                "tree": "6" * 40,
+                "role": "4kagent_transitive_perception_service",
+                "parent": "fourkagent",
+            }
+        },
+    }
+    monkeypatch.setattr(
+        provenance,
+        "_require_verified_upstreams",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        provenance,
+        "_environment_binding",
+        lambda *_args, **_kwargs: environments,
+    )
+    monkeypatch.setattr(
+        provenance,
+        "_required_runtime_paths",
+        lambda **_kwargs: assets,
+    )
+
+    binding, config = provenance._runtime_profile_binding(
+        config_payload=config_path.read_bytes(),
+        config_path=config_path,
+        project_root=root,
+        weights_root=root / "weights",
+        weights_lock={"schema_version": 1, "artifacts": []},
+        upstream_lock=upstream_lock,
+        dependency_lock=dependency_lock,
+        runtime_environments={},
+        materialized_paths={},
+        lock_digests={
+            "upstream-lock.yaml": "7" * 64,
+            "runtime-dependencies.yaml": "8" * 64,
+        },
+        require_current_scaleguard=False,
+    )
+
+    assert set(binding["checkouts"]) == {
+        "fourkagent",
+        "chain_of_zoom",
+        "depictqa",
+    }
+    assert set(binding["upstreams"]) == {
+        "fourkagent",
+        "chain_of_zoom",
+        "depictqa",
+    }
+    assert config.fourkagent.checkout == root / "third_party/checkouts/4KAgent"
+    assert config.fourkagent.python_executable == environments["4kagent"]["executable"]
+    assert config.fourkagent.perception_model_path == assets["fourkagent_qwen"]
+    assert config.coz.checkout == root / "third_party/checkouts/Chain-of-Zoom"
+    assert config.coz.python_executable == environments["coz"]["executable"]
+    assert config.coz.vlm_lora_path == Path(assets["coz_vlm_lora"])
+    assert config.metrics.quality_model_path == Path(assets["quality_musiq"])
+
+
+def test_runtime_environment_binding_captures_python_byte_identity(
+    runtime_evidence: RuntimeEvidence,
+) -> None:
+    receipts = {
+        name: _read_json(path) for name, path in runtime_evidence.runtime_environments.items()
+    }
+
+    bindings = provenance._environment_binding(
+        receipts,
+        project_root=runtime_evidence.root,
+        require_current_scaleguard=False,
+    )
+
+    assert set(bindings) == set(ENVIRONMENT_LOCK_PATHS)
+    for binding in bindings.values():
+        assert binding["installation_file_count"] > 0
+        assert len(binding["installation_merkle_root"]) == 64
+        assert len(binding["interpreter_sha256"]) == 64
+        assert len(binding["base_stdlib_merkle_root"]) == 64
+
+
+def test_required_runtime_paths_cover_every_locked_runtime_asset(
+    tmp_path: Path,
+) -> None:
+    weights_root = tmp_path / "weights"
+    artifact_paths: dict[str, str] = {}
+    locked_artifacts: list[dict[str, object]] = []
+    for _role, (artifact_id, relative) in provenance._RUNTIME_WEIGHT_ARTIFACTS.items():
+        path = weights_root / relative
+        if path.suffix:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"locked fixture\n")
+        else:
+            path.mkdir(parents=True, exist_ok=True)
+        artifact_paths[artifact_id] = str(path)
+        locked_artifacts.append(
+            {
+                "id": artifact_id,
+                "provider": "manual",
+                "required": True,
+                "destination": relative,
+                "files": [path.name] if path.is_file() else ["**/*"],
+                "known_sha256": None,
+                "verify_on_download": True,
+            }
+        )
+    quality_checkpoint = weights_root / "metrics/pyiqa/musiq_koniq_ckpt-e95806b9.pth"
+    quality_checkpoint.write_bytes(b"quality fixture\n")
+    layout_paths: dict[str, str] = {}
+    for _role, (layout_id, relative) in provenance._RUNTIME_WEIGHT_LAYOUTS.items():
+        path = weights_root / relative
+        path.mkdir(parents=True, exist_ok=True)
+        layout_paths[layout_id] = str(path)
+
+    paths = provenance._required_runtime_paths(
+        weights_root=weights_root,
+        weights_lock={
+            "schema_version": 1,
+            "artifacts": locked_artifacts,
+        },
+        materialized_paths={
+            "artifacts": artifact_paths,
+            "layouts": layout_paths,
+        },
+    )
+
+    assert paths["quality_musiq"] == str(quality_checkpoint)
+    assert paths["coz_vlm_lora"].endswith("VLM_LoRA/checkpoint-10000")
+    assert paths["depictqa_root"] == str(weights_root / "4kagent/depictqa")
+    assert paths["fourkagent_toolbox"] == str(weights_root / "4kagent/runtime/toolbox-root")

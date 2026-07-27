@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-import signal
 import socket
 import subprocess
 import time
@@ -13,7 +11,11 @@ from types import TracebackType
 from typing import Any, TextIO
 
 from scaleguard.errors import WorkerError
-from scaleguard.runtime.process import minimal_subprocess_environment, redact_argv
+from scaleguard.runtime.process import (
+    minimal_subprocess_environment,
+    redact_argv,
+    terminate_process_group,
+)
 
 
 def tcp_ready(host: str, port: int, *, timeout_seconds: float = 0.25) -> bool:
@@ -115,19 +117,8 @@ class ManagedService:
 
     def stop(self) -> None:
         process = self.process
-        if process is not None and process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.wait(timeout=5)
+        if process is not None:
+            terminate_process_group(process)
         if process is not None:
             self.returncode = process.poll()
         self.stopped_at = time.monotonic()

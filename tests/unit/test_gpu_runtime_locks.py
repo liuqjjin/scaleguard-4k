@@ -57,3 +57,19 @@ def test_bootstrap_and_gpu_preflight_match_the_cuda_lock() -> None:
     assert bootstrap.count("https://download.pytorch.org/whl/cu126") == 3
     assert "download.pytorch.org/whl/cu118" not in bootstrap
     assert 'sg_min_driver="${SCALEGUARD_MIN_NVIDIA_DRIVER:-560.28.03}"' in gpu_check
+
+
+def test_bootstrap_reinstalls_from_committed_uv_and_python_identities() -> None:
+    bootstrap = ROOT.joinpath("scripts/bootstrap/autodl.sh").read_text(encoding="utf-8")
+    python_downloads = ROOT.joinpath("environments/python-downloads.json").read_text(
+        encoding="utf-8"
+    )
+
+    assert "command -v uv" not in bootstrap
+    assert 'python3 -I -m venv --clear "${sg_bootstrap_uv_env}"' in bootstrap
+    assert "environments/bootstrap/uv-binary.sha256" in bootstrap
+    assert 'export UV_PYTHON_DOWNLOADS_JSON_URL="${sg_repo_root}/' in bootstrap
+    assert '"${sg_uv}" python install \\\n' in bootstrap
+    assert bootstrap.count("--reinstall") >= 4
+    assert "cpython-3.10.18-linux-x86_64-gnu" in python_downloads
+    assert "7b1d02e28b0d36c4b0de044aaf8099cb0395ac3d6826c96ddd158241fcdc6f06" in (python_downloads)

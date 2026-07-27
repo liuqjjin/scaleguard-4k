@@ -20,6 +20,7 @@ def _manifest(
     make_image: Callable[..., Path],
     *,
     target_factor: int = 4,
+    measurement_enabled: bool = False,
 ) -> Path:
     config = PipelineConfig(
         runtime=RuntimeConfig(run_root=tmp_path / "runs"),
@@ -27,6 +28,7 @@ def _manifest(
             min_quality_gain=-10.0,
             max_scale_nrmse=10.0,
             max_scale_edge_mae=10.0,
+            measurement_enabled=measurement_enabled,
         ),
         controller=ControllerConfig(
             target_factor=target_factor,
@@ -101,11 +103,27 @@ def _runtime_manifest(
     payload["provenance"].update(
         {
             "runtime_evidence_verified": True,
+            "runtime_profile_bound": True,
             "runtime_preflight_receipt": str(tmp_path / "runtime-preflight.json"),
             "runtime_preflight_sha256": "a" * 64,
+            "bootstrap_receipt_sha256": "b" * 64,
+            "runtime_environment_receipt_sha256": {
+                "scaleguard": "1" * 64,
+                "4kagent": "2" * 64,
+                "depictqa": "3" * 64,
+                "coz": "4" * 64,
+            },
+            "materialization_receipt_sha256": "5" * 64,
+            "materialization_marker_sha256": "6" * 64,
+            "source_weights_receipt_sha256": "7" * 64,
+            "weights_root": str(tmp_path / "weights"),
+            "project_commit": "8" * 40,
             "project_root": str(tmp_path),
             "runtime_config_path": str(tmp_path / "runtime.yaml"),
             "runtime_config_sha256": "c" * 64,
+            "runtime_stage_started_at": "2026-07-27T00:00:00+00:00",
+            "runtime_execution_binding": {"schema_version": 1},
+            "runtime_execution_binding_sha256": "d" * 64,
         }
     )
     _rewrite(path, payload)
@@ -115,17 +133,37 @@ def _runtime_manifest(
 def _mock_runtime_dependencies(
     monkeypatch: pytest.MonkeyPatch,
     config: dict[str, Any],
+    provenance: dict[str, Any],
     *,
     digest: str = "a" * 64,
     config_digest: str = "c" * 64,
     current_config_digest: str | None = None,
 ) -> None:
+    fields = {
+        "runtime_evidence_verified",
+        "runtime_profile_bound",
+        "runtime_preflight_receipt",
+        "runtime_preflight_sha256",
+        "bootstrap_receipt_sha256",
+        "runtime_environment_receipt_sha256",
+        "materialization_receipt_sha256",
+        "materialization_marker_sha256",
+        "source_weights_receipt_sha256",
+        "weights_root",
+        "project_commit",
+        "project_root",
+        "runtime_config_path",
+        "runtime_config_sha256",
+        "runtime_stage_started_at",
+        "runtime_execution_binding",
+        "runtime_execution_binding_sha256",
+    }
+    validated = {field: provenance[field] for field in fields}
+    validated["runtime_preflight_sha256"] = digest
+    validated["runtime_config_sha256"] = config_digest
     monkeypatch.setattr(
         "scaleguard.provenance.validate_runtime_preflight",
-        lambda *_args, **_kwargs: {
-            "runtime_preflight_sha256": digest,
-            "runtime_config_sha256": config_digest,
-        },
+        lambda *_args, **_kwargs: validated,
     )
     monkeypatch.setattr(
         "scaleguard.provenance.load_regular_file_snapshot",
@@ -137,6 +175,10 @@ def _mock_runtime_dependencies(
     monkeypatch.setattr(
         "scaleguard.config.parse_config",
         lambda _document, **_kwargs: SimpleNamespace(as_dict=lambda: config),
+    )
+    monkeypatch.setattr(
+        "scaleguard.provenance.bind_runtime_config",
+        lambda parsed, **_kwargs: parsed,
     )
 
 
@@ -151,6 +193,55 @@ def test_validator_reloads_every_artifact_and_accepts_a_consistent_run(
     assert manifest["run_id"] == "validated-run"
     assert manifest["achieved_factor"] == 4
     assert manifest["target_reached"] is True
+
+
+def test_validator_rejects_continue_at_the_final_planned_scale(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+) -> None:
+    path = _manifest(tmp_path, make_image)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["steps"][0]["decision"] = "continue"
+    _rewrite(path, payload)
+
+    with pytest.raises(ManifestValidationError, match="final planned scale decision"):
+        validate_run_manifest(path)
+
+
+def test_validator_binds_measurement_records_to_the_configured_forward_model(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+) -> None:
+    path = _manifest(tmp_path, make_image, measurement_enabled=True)
+    validate_run_manifest(path)
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["steps"][0]["metrics"]["measurement_nrmse"] = None
+    payload["steps"][0]["metrics"]["measurement_model"] = None
+    _rewrite(path, payload)
+    with pytest.raises(ManifestValidationError, match="measurement_nrmse must be numeric"):
+        validate_run_manifest(path)
+
+    path = _manifest(tmp_path / "wrong-model", make_image, measurement_enabled=True)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["final_metrics"]["metrics"]["measurement_model"] = "forged"
+    _rewrite(path, payload)
+    with pytest.raises(ManifestValidationError, match="disagrees with config"):
+        validate_run_manifest(path)
+
+
+def test_validator_rejects_measurement_evidence_when_disabled(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+) -> None:
+    path = _manifest(tmp_path, make_image)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["final_metrics"]["metrics"]["measurement_nrmse"] = 0.01
+    payload["final_metrics"]["metrics"]["measurement_model"] = "resize"
+    _rewrite(path, payload)
+
+    with pytest.raises(ManifestValidationError, match="measurement consistency is disabled"):
+        validate_run_manifest(path)
 
 
 def test_validator_accepts_rfc3339_z_timestamps_at_every_manifest_level(
@@ -365,7 +456,11 @@ def test_validator_accepts_verified_runtime_completion_evidence(
         backend=backend,
         completion_level=completion_level,
     )
-    _mock_runtime_dependencies(monkeypatch, payload["config"])
+    _mock_runtime_dependencies(
+        monkeypatch,
+        payload["config"],
+        payload["provenance"],
+    )
 
     manifest = validate_run_manifest(path)
 
@@ -380,7 +475,10 @@ def test_validator_rejects_unverified_runtime_completion(
     payload["provenance"]["runtime_evidence_verified"] = False
     _rewrite(path, payload)
 
-    with pytest.raises(ManifestValidationError, match="requires verified runtime preflight"):
+    with pytest.raises(
+        ManifestValidationError,
+        match="requires verified and profile-bound runtime provenance",
+    ):
         validate_run_manifest(path)
 
 
@@ -431,9 +529,14 @@ def test_validator_rejects_runtime_preflight_digest_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path, payload = _runtime_manifest(tmp_path, make_image)
-    _mock_runtime_dependencies(monkeypatch, payload["config"], digest="b" * 64)
+    _mock_runtime_dependencies(
+        monkeypatch,
+        payload["config"],
+        payload["provenance"],
+        digest="b" * 64,
+    )
 
-    with pytest.raises(ManifestValidationError, match="digest disagrees"):
+    with pytest.raises(ManifestValidationError, match="runtime provenance disagrees"):
         validate_run_manifest(path)
 
 
@@ -446,6 +549,7 @@ def test_validator_rejects_runtime_config_digest_mismatch(
     _mock_runtime_dependencies(
         monkeypatch,
         payload["config"],
+        payload["provenance"],
         current_config_digest="d" * 64,
     )
 
@@ -458,8 +562,12 @@ def test_validator_rejects_runtime_config_mismatch(
     make_image: Callable[..., Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    path, _payload = _runtime_manifest(tmp_path, make_image)
-    _mock_runtime_dependencies(monkeypatch, {"controller": {"target_factor": 8}})
+    path, payload = _runtime_manifest(tmp_path, make_image)
+    _mock_runtime_dependencies(
+        monkeypatch,
+        {"controller": {"target_factor": 8}},
+        payload["provenance"],
+    )
 
     with pytest.raises(ManifestValidationError, match="differs from its preflighted config"):
         validate_run_manifest(path)
@@ -488,7 +596,11 @@ def test_validator_rejects_missing_4kagent_process_evidence(
     else:
         payload["restoration_process"]["returncode"] = value
     _rewrite(path, payload)
-    _mock_runtime_dependencies(monkeypatch, payload["config"])
+    _mock_runtime_dependencies(
+        monkeypatch,
+        payload["config"],
+        payload["provenance"],
+    )
 
     with pytest.raises(ManifestValidationError, match="requires 4KAgent upstream process evidence"):
         validate_run_manifest(path)
@@ -502,7 +614,11 @@ def test_validator_rejects_unknown_coz_worker_evidence(
     path, payload = _runtime_manifest(tmp_path, make_image)
     payload["steps"][0]["worker_metadata"]["backend"] = "third_runtime"
     _rewrite(path, payload)
-    _mock_runtime_dependencies(monkeypatch, payload["config"])
+    _mock_runtime_dependencies(
+        monkeypatch,
+        payload["config"],
+        payload["provenance"],
+    )
 
     with pytest.raises(ManifestValidationError, match="requires Chain-of-Zoom worker evidence"):
         validate_run_manifest(path)
@@ -537,7 +653,11 @@ def test_validator_rejects_missing_coz_process_evidence(
     else:
         payload[process_field] = None
     _rewrite(path, payload)
-    _mock_runtime_dependencies(monkeypatch, payload["config"])
+    _mock_runtime_dependencies(
+        monkeypatch,
+        payload["config"],
+        payload["provenance"],
+    )
 
     with pytest.raises(ManifestValidationError, match=message):
         validate_run_manifest(path)
@@ -551,7 +671,11 @@ def test_validator_rejects_coz_candidate_hash_mismatch(
     path, payload = _runtime_manifest(tmp_path, make_image)
     payload["steps"][0]["worker_metadata"]["candidate_sha256"] = "0" * 64
     _rewrite(path, payload)
-    _mock_runtime_dependencies(monkeypatch, payload["config"])
+    _mock_runtime_dependencies(
+        monkeypatch,
+        payload["config"],
+        payload["provenance"],
+    )
 
     with pytest.raises(ManifestValidationError, match="candidate hash disagrees"):
         validate_run_manifest(path)

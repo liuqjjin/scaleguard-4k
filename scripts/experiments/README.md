@@ -1,13 +1,30 @@
 # Evaluation utilities
 
-These programs only consume completed ScaleGuard manifests. They never invoke a
-restoration model, synthesize missing measurements, or turn mock runs into
-research evidence.
+The metric, calibration, and summary programs only consume completed ScaleGuard
+manifests. They never synthesize missing measurements or turn mock runs into
+research evidence. `run_ablation.py` is the separate executable orchestration
+entry point.
+
+Plan or execute the paired four-group suite:
+
+```bash
+.venv/bin/python -I scripts/experiments/run_ablation.py \
+  --base-config configs/runtime/autodl-2x4090.yaml \
+  --input /authorized-data/evaluation/image-001.png \
+  --seed 20250727 \
+  --output-dir /root/autodl-tmp/scaleguard-4k/ablation/suite-001 \
+  --plan-only
+```
+
+Remove `--plan-only` to execute. Every job goes through the fixed AutoDL
+experiment wrapper and receives a fresh runtime preflight. The output directory
+must be new or empty; failures remain in the atomic `suite-receipt.json` and do
+not suppress later jobs.
 
 Measure one or more aligned manifest/reference pairs:
 
 ```bash
-uv run --locked python scripts/experiments/evaluate_metrics.py \
+uv run --locked python -I scripts/experiments/evaluate_metrics.py \
   --manifest runs/one/manifest.json \
   --reference data/references/one.png \
   --manifest runs/two/manifest.json \
@@ -36,7 +53,7 @@ image-002-scaleguard,1,false
 Then produce a deterministic receipt:
 
 ```bash
-uv run --locked python scripts/experiments/calibrate_gates.py \
+uv run --locked python -I scripts/experiments/calibrate_gates.py \
   --runs runs/calibration \
   --labels labels.csv \
   --output artifacts/calibration/receipt.json \
@@ -47,21 +64,32 @@ The default minimum is 20 acceptable, non-mock steps. Fewer samples still
 produce an auditable `insufficient_data` receipt and exit with status 1; they do
 not produce a valid calibration claim. Every labeled candidate and trusted
 state must still exist and match the SHA256 recorded by its manifest.
+Runtime use and paired-summary review independently bind the exact receipt
+path, size, SHA-256, semantics, backend, forward-model identity, and thresholds.
 
 Build a paired ablation table:
 
 ```bash
-uv run --locked python scripts/experiments/summarize_ablation.py \
-  --a-only runs/ablation/a-only \
-  --b-only runs/ablation/b-only \
-  --ab-fixed runs/ablation/ab-fixed \
-  --scaleguard runs/ablation/scaleguard \
+uv run --locked python -I scripts/experiments/summarize_ablation.py \
+  --a-only /root/autodl-tmp/scaleguard-4k/ablation/suite-001/jobs/a-only \
+  --b-only /root/autodl-tmp/scaleguard-4k/ablation/suite-001/jobs/b-only \
+  --ab-fixed /root/autodl-tmp/scaleguard-4k/ablation/suite-001/jobs/ab-fixed \
+  --scaleguard /root/autodl-tmp/scaleguard-4k/ablation/suite-001/jobs/scaleguard \
+  --suite-receipt /root/autodl-tmp/scaleguard-4k/ablation/suite-001/suite-receipt.json \
   --output-csv artifacts/ablation/paired.csv \
   --output-json artifacts/ablation/paired.json \
   --artifact-root "$PWD"
 ```
 
-Rows are paired by the verified input-image SHA256. Missing groups and mock runs
-remain in the outputs with explicit issue flags. The utility copies only
-observed per-run metrics and deliberately computes no aggregate headline
-numbers.
+Rows are paired by the suite's deterministic experiment sample ID, which binds
+the full verified input-image SHA-256 and seed. Missing groups and mock runs
+remain in the outputs with explicit issue flags. A pair is never
+research-eligible without an independently revalidated passed suite receipt
+whose exact manifest paths, hashes, and hardware identities match the supplied
+runs. It also revalidates every configured calibration receipt from one byte
+snapshot; measurement evidence is required only for measurement-enabled runs.
+The reader requires the suite's recorded clean project commit to remain
+checked out and its original raw evidence paths to remain available. Omitting
+the receipt still produces a diagnostic summary, but every pair is marked
+`research_eligible: false`. The utility copies only observed per-run metrics
+and deliberately computes no aggregate headline numbers.

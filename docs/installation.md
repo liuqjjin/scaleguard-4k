@@ -28,7 +28,7 @@ with an unlocked resolve when preparing release evidence.
 Create and run a deterministic CPU fixture:
 
 ```bash
-uv run --locked python examples/make_fixture.py /tmp/scaleguard-input.jpg
+uv run --locked python -I examples/make_fixture.py /tmp/scaleguard-input.jpg
 uv run --locked scaleguard run \
   --config configs/runtime/cpu-mock.yaml \
   --input /tmp/scaleguard-input.jpg \
@@ -58,7 +58,7 @@ The main repository does not vendor upstream source. Materialize only the two
 locked core checkouts:
 
 ```bash
-uv run --locked python scripts/upstream/materialize.py \
+uv run --locked python -I scripts/upstream/materialize.py \
   upstream-lock.yaml \
   --mapping repositories \
   --project-root "$PWD"
@@ -79,7 +79,7 @@ The selected 4KAgent runtime also needs its pinned DepictQA perception
 dependency:
 
 ```bash
-uv run --locked python scripts/upstream/materialize.py \
+uv run --locked python -I scripts/upstream/materialize.py \
   runtime-dependencies.yaml \
   --mapping dependencies \
   --project-root "$PWD"
@@ -115,21 +115,23 @@ development:
 
 The installed uv identity is still exactly 0.11.16, as recorded in
 `environments/uv.version`, but the user does not need to preinstall it. The
-hook uses an exact matching `uv` from `PATH` when available. Otherwise it
-creates `.runtime/bootstrap-uv` with system `python3 -m venv` and installs the
-hash-pinned wheel from `environments/bootstrap/uv.lock` using
-`--require-hashes`, `--only-binary`, and `--no-deps`.
+hook always clears `.runtime/bootstrap-uv` and installs the hash-pinned Linux
+wheel from `environments/bootstrap/uv.lock`; it does not trust a same-version
+binary found on `PATH`. The installed executable must match
+`environments/bootstrap/uv-binary.sha256`.
 
-The provisioned uv installs Python 3.10.18, synchronizes the ScaleGuard
-`.venv` from `uv.lock` with the metric extra, and creates the three runtime
-environments above. It materializes both source locks before installation:
+The provisioned uv reinstalls the exact Python 3.10.18 Linux build declared in
+`environments/python-downloads.json`, whose archive URL, build, and SHA-256 are
+committed. It reinstalls the ScaleGuard `.venv` from `uv.lock` with the metric
+extra and synchronizes the three runtime environments above with
+`--reinstall`. It materializes both source locks before installation:
 `upstream-lock.yaml` with the `repositories` mapping and
 `runtime-dependencies.yaml` with the `dependencies` mapping.
 
 Each runtime environment is synchronized with `--require-hashes` from its
-resolved lock under `environments/`. Successful bootstrap writes per-environment
-package, Python, lock-hash, and dependency-audit receipts plus an aggregate
-receipt:
+resolved lock under `environments/`. Successful bootstrap writes
+per-environment package files, interpreter, standard-library, import-origin,
+lock-hash, and dependency-audit receipts plus an aggregate receipt:
 
 ```text
 .runtime/receipts/
@@ -147,6 +149,11 @@ Smoke and integration do not trust these historical bytes alone: immediately
 before model execution they rerun the same four audits into the attempt
 directory and bind an exact baseline comparison into a schema-v2 runtime
 preflight receipt.
+
+These checks detect and reject ordinary in-host drift. They do not defend
+against a malicious administrator who can replace the repository,
+interpreters, loader, and unsigned evidence together; see
+[ADR 0009](adr/0009-bind-runtime-bytes-at-each-real-attempt.md).
 
 The aggregate `bootstrap.json` is written as `running` before provisioning and
 is replaced with `passed` only after every lock, checkout, environment, and
@@ -208,7 +215,7 @@ locally measured SHA-256 but does not call it publisher-authenticated.
 Weight acquisition and materialization are handled by:
 
 ```bash
-bash scripts/autodl/download_weights.sh
+scripts/autodl/download_weights.sh
 ```
 
 Public downloads are pinned and hashed. Optional artifacts are skipped unless
@@ -249,8 +256,8 @@ read -rsp 'OpenAI API key: ' OPENAI_API_KEY && printf '\n'
 export OPENAI_API_KEY
 export CUDA_VISIBLE_DEVICES=0,1
 
-bash scripts/autodl/check_gpu.sh
-bash scripts/autodl/bootstrap.sh
+scripts/autodl/check_gpu.sh
+scripts/autodl/bootstrap.sh
 
 mkdir -p weights/4kagent/depictqa/delta
 # In an authorized browser, obtain the upstream manual object:
@@ -258,7 +265,7 @@ mkdir -p weights/4kagent/depictqa/delta
 # Upload it to the exact path below, then require a non-empty file:
 test -s weights/4kagent/depictqa/delta/degra_eval.pt
 
-bash scripts/autodl/download_weights.sh
+scripts/autodl/download_weights.sh
 ```
 
 The publisher supplies no digest for that manual object. ScaleGuard records
@@ -271,11 +278,11 @@ credentials before any child process.
 Run the smoke and integration wrappers only with authorized images:
 
 ```bash
-bash scripts/autodl/run_smoke.sh \
+scripts/autodl/run_smoke.sh \
   --config configs/runtime/autodl-2x4090.yaml \
   --input /authorized-data/smoke.png
 
-bash scripts/autodl/run_integration.sh \
+scripts/autodl/run_integration.sh \
   --config configs/runtime/autodl-2x4090.yaml \
   --input /authorized-data/integration.png
 ```

@@ -95,6 +95,8 @@ def _write_validated_receipt(
             temporary,
             config_path=config,
             project_root=PROJECT_ROOT,
+            require_recent=True,
+            reaudit_environments=False,
         )
         expected_digest = validation.get("runtime_preflight_sha256")
         flags = os.O_RDONLY

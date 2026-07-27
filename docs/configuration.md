@@ -45,9 +45,11 @@ runtime:
   process_timeout_seconds: 3600  # Positive deadline for each worker process.
   keep_temporary_files: false    # Reserved cleanup-policy flag; evidence is retained.
   gpu_poll_interval_seconds: 0.5 # Positive NVIDIA memory sampling interval.
+  experiment_group: null         # Reserved four-group ablation identifier.
+  experiment_sample_id: null     # Safe paired input/seed identifier; set with group.
 
 fourkagent:
-  mode: fake                     # fake | command | upstream
+  mode: fake                     # fake | command | upstream | identity
   checkout: null                 # 4KAgent checkout; required for upstream mode.
   python_executable: python      # Interpreter name or project-relative/absolute path.
   profile: FastGen4K_P           # Upstream 4KAgent profile.
@@ -107,6 +109,7 @@ controller:
   target_factor: 4                # 1 | 2 | 4 | 8 | 16
   max_coz_steps: 2                # 0..2; 16x requires persistent CoZ.
   color_strategy: adain           # none | adain
+  acceptance_policy: trusted      # trusted | fixed
   accept_unvalidated_quality_proxy: false
 ```
 
@@ -120,6 +123,13 @@ A non-mock run rejects it unless
 `controller.accept_unvalidated_quality_proxy` is explicitly enabled for
 calibration work. Real integrated gating with PyIQA is constrained to CPU so it
 does not interfere with either upstream GPU lifecycle.
+
+`identity` restoration and `fixed` acceptance are not general runtime escape
+hatches. They are accepted only when `experiment_group` and
+`experiment_sample_id` select one of the exact A-only, B-only, or AB-fixed
+contracts. `ScaleGuard` always uses upstream 4KAgent, persistent CoZ, and the
+`trusted` policy. See
+[ADR 0010](adr/0010-make-ablation-modes-explicit-and-executable.md).
 
 ## Observation models
 
@@ -136,7 +146,15 @@ only the keys for the selected model:
 
 The stable model name and parameters are recorded in each manifest. They are
 evaluated as an independent observation-consistency gate, not folded into an
-opaque aggregate score.
+opaque aggregate score. A finite `measurement_nrmse` and the factory-derived
+canonical forward-model identity are mandatory when the gate is enabled and
+must both be absent when disabled.
+
+When `calibration_receipt` is non-null, controller construction verifies that
+receipt against the complete metrics configuration before any worker starts.
+The manifest retains its resolved path, byte length, SHA-256, and verified
+semantic result. A copied threshold value without that matching receipt is not
+trusted evidence.
 
 ## Command-mode templates
 

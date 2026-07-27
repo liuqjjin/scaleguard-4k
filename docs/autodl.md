@@ -15,10 +15,12 @@ Provision a Linux instance with:
 - Git and Python 3.10 or newer;
 - an authorized smoke image and integration image.
 
-The project hook uses a matching system `uv` when available. Otherwise it
-bootstraps the exact version in `environments/uv.version` from the
-hash-locked wheel in `environments/bootstrap/uv.lock`; no unpinned installer is
-used.
+The project hook never trusts `uv` from `PATH`. It clears its private bootstrap
+environment, installs the exact version in `environments/uv.version` from the
+hash-locked wheel in `environments/bootstrap/uv.lock`, verifies the installed
+executable against `environments/bootstrap/uv-binary.sha256`, and reinstalls
+the managed CPython archive pinned by `environments/python-downloads.json`.
+No unpinned installer or same-version host binary is evidence-valid.
 
 Accept the Stable Diffusion 3 model terms on Hugging Face before connecting to
 the instance. Enter the token interactively:
@@ -75,9 +77,17 @@ a clean main-project worktree, so the recorded commit cannot conceal local code
 or configuration changes. Runtime environments, checkouts, caches, weights and
 artifacts must remain under the ignored paths supplied by the repository.
 
+Invoke these public scripts directly. They require privileged Bash startup,
+clear imported functions and startup hooks, disable tracing, and reject an
+ambient repository-root override that does not resolve to the tree containing
+the script. Do not use ordinary `bash scripts/autodl/...`; if an explicit Bash
+is required, use `/bin/bash -p`. Each entry also creates a fresh private HOME
+below `.runtime/isolated-homes`, disables account and system Git configuration,
+and ignores user-level pip, uv, and Python startup configuration.
+
 ```bash
-bash scripts/autodl/check_gpu.sh
-bash scripts/autodl/bootstrap.sh
+scripts/autodl/check_gpu.sh
+scripts/autodl/bootstrap.sh
 ```
 
 The preflight defaults are deliberately strict: at least two GPUs, a name
@@ -143,7 +153,7 @@ Weight acquisition is separate from environment setup because Stable Diffusion
 only with another reviewed manifest:
 
 ```bash
-bash scripts/autodl/download_weights.sh
+scripts/autodl/download_weights.sh
 ```
 
 The manifest has `schema_version: 1` and a non-empty `artifacts` array.
@@ -196,7 +206,7 @@ the obtained file to the exact destination:
 ```bash
 mkdir -p weights/4kagent/depictqa/delta
 test -s weights/4kagent/depictqa/delta/degra_eval.pt
-bash scripts/autodl/download_weights.sh
+scripts/autodl/download_weights.sh
 ```
 
 The upstream guide publishes no digest for that Google Drive object. Preserve
@@ -237,11 +247,11 @@ Smoke and integration use the same public CLI contract but separate inputs,
 configs, artifact directories and evidence:
 
 ```bash
-bash scripts/autodl/run_smoke.sh \
+scripts/autodl/run_smoke.sh \
   --config configs/runtime/autodl-2x4090.yaml \
   --input /authorized-data/smoke.png
 
-bash scripts/autodl/run_integration.sh \
+scripts/autodl/run_integration.sh \
   --config configs/runtime/autodl-2x4090.yaml \
   --input /authorized-data/integration.png
 ```
@@ -287,6 +297,19 @@ receives that variable's real value. GPU probes, upstream verification,
 environment re-audit, materialization verification, evidence extraction, and
 post-run checks receive no account credentials.
 
+All AutoDL bootstrap, smoke, and integration CLI calls are pinned to the
+lexical project entry `.venv/bin/python -I -m scaleguard.cli`. The wrappers do
+not search `PATH` and reject `SCALEGUARD_CLI` or `SCALEGUARD_PYTHON` overrides.
+Before issuing an evidence command they verify that `sys.executable` is that
+lexical venv entry, `sys.prefix` is the project `.venv`, and
+`scaleguard.cli` resolves to the tracked `src/scaleguard/cli.py`. Rerun
+`scripts/autodl/bootstrap.sh` if this attestation fails.
+
+Model commands, managed services, and persistent CoZ workers own fresh process
+groups. A returned leader cannot leave an ordinary same-group helper running:
+the wrapper waits only a short shutdown grace and then uses bounded TERM/KILL
+cleanup. Configured upstream commands must not daemonize through `setsid`.
+
 The per-attempt receipts live under
 `runtime-environments/{scaleguard,4kagent,depictqa,coz}.json`. Preflight rejects
 missing, stale, relocated, or symlinked receipts and any difference from the
@@ -324,7 +347,7 @@ artifacts/autodl/
 Collect an allowlisted diagnostics bundle after either success or failure:
 
 ```bash
-bash scripts/autodl/collect_diagnostics.sh
+scripts/autodl/collect_diagnostics.sh
 for checksum in artifacts/autodl/diagnostics/*/*.tar.gz.sha256; do
   (cd "$(dirname "$checksum")" && sha256sum -c "$(basename "$checksum")")
 done
@@ -342,6 +365,9 @@ sanitizer through a private file descriptor. Exact values, common token forms,
 repository roots and cache roots are redacted. Direct `--input`/`--output`
 paths are derived from execution receipts, and both text content and
 archive-relative path names receive a final exact-value and pattern scan.
+The 4KAgent overlay records only image byte count and SHA-256 in its chat log;
+it does not put the source bytes there. Any copied text that nevertheless
+contains a parameterized base64 image data URL is excluded from the archive.
 Automated redaction is not infallible:
 follow [external_gate/REDACTION.md](../external_gate/REDACTION.md) and inspect
 the archive before transfer.
@@ -353,7 +379,7 @@ After setting only authorized input paths and credential environment variables:
 ```bash
 export SCALEGUARD_SMOKE_INPUT=/authorized-data/smoke.png
 export SCALEGUARD_INTEGRATION_INPUT=/authorized-data/integration.png
-bash external_gate/commands.sh
+external_gate/commands.sh
 unset HF_TOKEN OPENAI_API_KEY
 ```
 

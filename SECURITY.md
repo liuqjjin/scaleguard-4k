@@ -70,6 +70,16 @@ execution, or a false evidence/identity claim.
   download receives only Hugging Face auth, doctor receives a non-secret
   presence marker, and only model execution receives the configured scheduler
   key.
+- Execute public AutoDL entry points directly. They require privileged Bash
+  startup, clear imported functions and startup hooks, disable tracing, use a
+  fixed system path, and derive the repository root from their own checked-out
+  location. An ambient `SCALEGUARD_REPO_ROOT` cannot redirect credential-bearing
+  stages to another tree. If an explicit interpreter is unavoidable, use
+  `/bin/bash -p`; ordinary `bash script` invocation is rejected.
+- Each entry creates a fresh, owned `0700` HOME below the non-symlinked
+  project runtime directory and disables user/system Git, pip, uv, and Python
+  startup configuration before invoking tools. Do not reuse those temporary
+  homes as persistent account state.
 
 ### Source and models
 
@@ -81,6 +91,10 @@ execution, or a false evidence/identity claim.
   Receipt readers bind strict JSON and hashes to one regular-file snapshot.
   Receipt writers use private exclusive temporary files and publish a
   validated inode without clobbering a concurrently created target.
+- Bootstrap must reconstruct uv from its hash-pinned wheel, verify the
+  committed executable digest, and reinstall the committed managed-Python
+  archive and package locks. Do not replace this with a version-only `PATH`
+  check.
 - Remember that a valid hash proves identity, not safety.
 - Upstream Python/model loading is not sandboxed; use an isolated account or
   disposable host with least privilege and no unrelated secrets.
@@ -97,15 +111,30 @@ execution, or a false evidence/identity claim.
   lock change. New advisories are release blockers until fixed or bounded by a
   reviewed ADR.
 
+The byte-identity checks are designed for reproducibility and ordinary
+in-host drift. They do not establish a secure-boot chain against a malicious
+administrator who controls the repository, interpreters, loader, and unsigned
+receipts together. Use an externally verified read-only image or independent
+verifier for that threat model; see
+[ADR 0009](docs/adr/0009-bind-runtime-bytes-at-each-real-attempt.md).
+
 ### Services and processes
 
 - Keep DepictQA bound to loopback.
 - Do not expose worker protocols to a public interface.
 - Preserve timeouts and process-group termination.
+- Worker, service, and persistent-session leaders start a new session. Normal
+  leader exit, startup failure, protocol timeout, and context-manager close all
+  require their owned process group to quiesce or be terminated with bounded
+  TERM/KILL escalation. Upstream commands must not deliberately escape that
+  ownership with a second `setsid`.
 - Refuse to take ownership of an already occupied service port.
 - Keep ScaleGuard, 4KAgent, DepictQA, and CoZ environments separate.
 
 ### Images and outputs
+
+Input images and parsed evidence are inspected from one regular-file byte
+snapshot so recorded metadata and SHA-256 refer to the same bytes.
 
 Input images, VLM prompts, outputs, and logs may contain personal, medical,
 location, or proprietary information. Use authorized data, private storage,
@@ -120,7 +149,11 @@ other consequential decision.
 `collect_diagnostics.sh` privatizes credential values before system probes,
 passes exact values only to its sanitizer over a private file descriptor,
 copies an allowlist of bounded text, and performs exact-value plus
-secret-pattern scans. This is defense in depth, not a guarantee. Follow
+secret-pattern scans. The 4KAgent overlay replaces logging-side image encoding
+with only the source byte count and SHA-256; the model-request encoder remains
+unchanged. As a second boundary, the collector rejects any text containing a
+parameterized base64 image data URL instead of trying to redact the image.
+This is defense in depth, not a guarantee. Follow
 [external_gate/REDACTION.md](external_gate/REDACTION.md),
 inspect every archive manually, and share only the reviewed archive plus its
 SHA-256.

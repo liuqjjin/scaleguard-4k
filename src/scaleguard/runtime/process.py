@@ -12,17 +12,27 @@ import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, BinaryIO
 
 from scaleguard.contracts import ProcessEvidence
 from scaleguard.errors import WorkerError, WorkerTimeoutError
 
-_SECRET_FLAG = re.compile(r"(?i)(token|api[-_]?key|password|secret)")
+_SECRET_FLAG = re.compile(r"(?i)(token|api[-_]?key|password|credential|secret)")
 _SECRET_VALUE = re.compile(r"^(?:hf_|sk-)[A-Za-z0-9_-]{8,}$")
+_DRAIN_SHUTDOWN_SECONDS = 1.0
+_POST_LEADER_GROUP_GRACE_SECONDS = 0.2
 _SAFE_ENVIRONMENT_NAMES = frozenset(
     {
         "COMSPEC",
         "HOME",
         "LANG",
+        "LC_ALL",
+        "LC_COLLATE",
+        "LC_CTYPE",
+        "LC_MESSAGES",
+        "LC_MONETARY",
+        "LC_NUMERIC",
+        "LC_TIME",
         "LD_LIBRARY_PATH",
         "LOGNAME",
         "NO_PROXY",
@@ -47,13 +57,74 @@ def minimal_subprocess_environment(
     """Return a small runtime environment without ambient credentials."""
 
     environment = {
-        name: value
-        for name, value in os.environ.items()
-        if name in _SAFE_ENVIRONMENT_NAMES or name.startswith("LC_")
+        name: value for name, value in os.environ.items() if name in _SAFE_ENVIRONMENT_NAMES
     }
     if overrides:
         environment.update(overrides)
     return environment
+
+
+def project_executable(project_root: Path, executable: str) -> str:
+    """Make an explicit project-relative command absolute without resolving symlinks."""
+
+    path = Path(executable)
+    if not path.is_absolute() and "/" not in executable:
+        return executable
+    candidate = path if path.is_absolute() else project_root / path
+    return os.path.abspath(os.fspath(candidate))
+
+
+def process_group_exists(process_group: int) -> bool:
+    """Return whether an owned POSIX process group still has members."""
+
+    try:
+        os.killpg(process_group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def terminate_process_group(
+    process: subprocess.Popen[Any],
+    *,
+    term_timeout_seconds: float = 1.0,
+    kill_timeout_seconds: float = 1.0,
+) -> None:
+    """Terminate an owned session even when its original leader has exited."""
+
+    process_group = process.pid
+
+    try:
+        os.killpg(process_group, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    deadline = time.monotonic() + term_timeout_seconds
+    while process_group_exists(process_group) and time.monotonic() < deadline:
+        if process.poll() is None:
+            try:
+                process.wait(timeout=min(0.05, max(0.0, deadline - time.monotonic())))
+            except subprocess.TimeoutExpired:
+                pass
+        else:
+            time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+    if process_group_exists(process_group):
+        try:
+            os.killpg(process_group, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+    kill_deadline = time.monotonic() + kill_timeout_seconds
+    while process_group_exists(process_group) and time.monotonic() < kill_deadline:
+        if process.poll() is None:
+            try:
+                process.wait(timeout=min(0.05, max(0.0, kill_deadline - time.monotonic())))
+            except subprocess.TimeoutExpired:
+                pass
+        else:
+            time.sleep(min(0.02, max(0.0, kill_deadline - time.monotonic())))
+    if process_group_exists(process_group):
+        raise WorkerError(f"owned process group {process_group} did not exit after SIGKILL")
 
 
 def redact_argv(argv: Sequence[str]) -> tuple[str, ...]:
@@ -72,6 +143,75 @@ def redact_argv(argv: Sequence[str]) -> tuple[str, ...]:
         if token.startswith("-") and _SECRET_FLAG.search(token):
             hide_next = True
     return tuple(redacted)
+
+
+def _secret_replacements(
+    environment: Mapping[str, str],
+) -> tuple[tuple[bytes, bytes], ...]:
+    replacements: list[tuple[bytes, bytes]] = []
+    for name, value in environment.items():
+        if not value or not _SECRET_FLAG.search(name):
+            continue
+        encoded = value.encode("utf-8")
+        if not encoded:
+            continue
+        safe_name = re.sub(r"[^A-Za-z0-9_]", "_", name)
+        replacements.append((encoded, f"[REDACTED:{safe_name}]".encode("ascii")))
+    replacements.sort(key=lambda item: len(item[0]), reverse=True)
+    return tuple(replacements)
+
+
+def _redact_available(
+    payload: bytes,
+    replacements: Sequence[tuple[bytes, bytes]],
+    *,
+    final: bool,
+) -> tuple[bytes, bytes]:
+    if not replacements:
+        return payload, b""
+    maximum = max(len(secret) for secret, _replacement in replacements)
+    safe_start_limit = len(payload) if final else max(0, len(payload) - maximum + 1)
+    if safe_start_limit == 0:
+        return b"", payload
+
+    output = bytearray()
+    cursor = 0
+    while cursor < safe_start_limit:
+        matches = [
+            (index, -len(secret), secret, replacement)
+            for secret, replacement in replacements
+            if (index := payload.find(secret, cursor)) >= 0 and index < safe_start_limit
+        ]
+        if not matches:
+            break
+        index, _negative_length, secret, replacement = min(matches)
+        output.extend(payload[cursor:index])
+        output.extend(replacement)
+        cursor = index + len(secret)
+    if cursor < safe_start_limit:
+        output.extend(payload[cursor:safe_start_limit])
+    consumed = max(cursor, safe_start_limit)
+    return bytes(output), payload[consumed:]
+
+
+def _copy_redacted(
+    source: BinaryIO,
+    destination: BinaryIO,
+    replacements: Sequence[tuple[bytes, bytes]],
+) -> None:
+    pending = b""
+    for chunk in iter(lambda: source.read(64 * 1024), b""):
+        emitted, pending = _redact_available(
+            pending + chunk,
+            replacements,
+            final=False,
+        )
+        destination.write(emitted)
+        destination.flush()
+    emitted, pending = _redact_available(pending, replacements, final=True)
+    destination.write(emitted)
+    destination.write(pending)
+    destination.flush()
 
 
 class _GpuSampler:
@@ -143,12 +283,17 @@ class ProcessRunner:
         process_env = minimal_subprocess_environment(env)
         sampler = _GpuSampler(self.gpu_poll_interval_seconds)
         started = time.monotonic()
-        process: subprocess.Popen[str]
+        process: subprocess.Popen[bytes]
         returncode: int
         timed_out: subprocess.TimeoutExpired | None = None
+        drain_errors: list[BaseException] = []
+        drain_threads: list[threading.Thread] = []
+        forced_pipe_close = threading.Event()
+        terminate_group = False
+        replacements = _secret_replacements(process_env)
         with (
-            stdout_path.open("w", encoding="utf-8") as stdout,
-            stderr_path.open("w", encoding="utf-8") as stderr,
+            stdout_path.open("wb") as stdout,
+            stderr_path.open("wb") as stderr,
         ):
             try:
                 process = subprocess.Popen(
@@ -156,27 +301,115 @@ class ProcessRunner:
                     cwd=cwd,
                     env=process_env,
                     stdin=subprocess.DEVNULL,
-                    stdout=stdout,
-                    stderr=stderr,
-                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=False,
                     start_new_session=True,
                 )
             except OSError as error:
                 raise WorkerError(
                     f"cannot start {label} command {redact_argv(argv)!r} in {cwd}: {error}"
                 ) from error
+            assert process.stdout is not None
+            assert process.stderr is not None
+
+            def drain(source: BinaryIO, destination: BinaryIO) -> None:
+                try:
+                    _copy_redacted(source, destination, replacements)
+                except BaseException as error:
+                    if not forced_pipe_close.is_set():
+                        drain_errors.append(error)
+                finally:
+                    try:
+                        source.close()
+                    except OSError as error:
+                        if not forced_pipe_close.is_set():
+                            drain_errors.append(error)
+
+            drain_threads = [
+                threading.Thread(
+                    target=drain,
+                    args=(process.stdout, stdout),
+                    name=f"{label}-stdout-redactor",
+                    daemon=True,
+                ),
+                threading.Thread(
+                    target=drain,
+                    args=(process.stderr, stderr),
+                    name=f"{label}-stderr-redactor",
+                    daemon=True,
+                ),
+            ]
+            for thread in drain_threads:
+                thread.start()
             try:
                 sampler.start()
-                returncode = process.wait(timeout=self.timeout_seconds)
+                remaining = max(0.0, started + self.timeout_seconds - time.monotonic())
+                returncode = process.wait(timeout=remaining)
             except subprocess.TimeoutExpired as error:
                 timed_out = error
-                self._terminate_preserving_exception(process)
+                terminate_group = True
                 returncode = -signal.SIGTERM
             except BaseException:
-                self._terminate_preserving_exception(process)
+                terminate_group = True
                 raise
             finally:
+                if not terminate_group:
+                    run_deadline = started + self.timeout_seconds
+                    post_leader_deadline = min(
+                        run_deadline,
+                        time.monotonic() + _POST_LEADER_GROUP_GRACE_SECONDS,
+                    )
+                    self._wait_for_process_group_exit(
+                        process.pid,
+                        deadline=post_leader_deadline,
+                    )
+                    if process_group_exists(process.pid):
+                        terminate_group = True
+                        if time.monotonic() >= run_deadline:
+                            timed_out = subprocess.TimeoutExpired(
+                                list(argv),
+                                self.timeout_seconds,
+                            )
+                            returncode = -signal.SIGTERM
+                    else:
+                        self._join_threads(
+                            drain_threads,
+                            deadline=min(
+                                run_deadline,
+                                time.monotonic() + _DRAIN_SHUTDOWN_SECONDS,
+                            ),
+                        )
+                    if any(thread.is_alive() for thread in drain_threads):
+                        timed_out = subprocess.TimeoutExpired(
+                            list(argv),
+                            self.timeout_seconds,
+                        )
+                        terminate_group = True
+                        returncode = -signal.SIGTERM
+                if terminate_group:
+                    self._terminate_preserving_exception(process)
+                    self._join_threads(
+                        drain_threads,
+                        deadline=time.monotonic() + _DRAIN_SHUTDOWN_SECONDS,
+                    )
+                if any(thread.is_alive() for thread in drain_threads):
+                    self._signal_process_group(process.pid, signal.SIGKILL)
+                    forced_pipe_close.set()
+                    self._close_process_pipes(process)
+                    self._join_threads(
+                        drain_threads,
+                        deadline=time.monotonic() + _DRAIN_SHUTDOWN_SECONDS,
+                    )
                 peaks = sampler.stop()
+        if process_group_exists(process.pid):
+            raise WorkerError(f"cannot stop owned {label} process group {process.pid}")
+        if any(thread.is_alive() for thread in drain_threads):
+            raise WorkerError(f"cannot stop {label} process log drains after termination")
+        if drain_errors:
+            raise WorkerError(
+                f"cannot preserve redacted {label} process logs: {type(drain_errors[0]).__name__}"
+            ) from drain_errors[0]
         evidence = ProcessEvidence(
             argv=redact_argv(argv),
             cwd=str(cwd.resolve()),
@@ -198,26 +431,46 @@ class ProcessRunner:
         return evidence
 
     @classmethod
-    def _terminate_preserving_exception(cls, process: subprocess.Popen[str]) -> None:
+    def _terminate_preserving_exception(cls, process: subprocess.Popen[bytes]) -> None:
         try:
             cls._terminate(process)
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError, WorkerError):
             pass
 
     @staticmethod
-    def _terminate(process: subprocess.Popen[str]) -> None:
+    def _join_threads(
+        threads: Sequence[threading.Thread],
+        *,
+        deadline: float,
+    ) -> None:
+        for thread in threads:
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+
+    @staticmethod
+    def _wait_for_process_group_exit(process_group: int, *, deadline: float) -> None:
+        while process_group_exists(process_group) and time.monotonic() < deadline:
+            time.sleep(min(0.02, max(0.0, deadline - time.monotonic())))
+
+    @staticmethod
+    def _signal_process_group(pid: int, signal_number: int) -> None:
         try:
-            os.killpg(process.pid, signal.SIGTERM)
+            os.killpg(pid, signal_number)
         except ProcessLookupError:
-            return
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
+            pass
+
+    @staticmethod
+    def _close_process_pipes(process: subprocess.Popen[bytes]) -> None:
+        for source in (process.stdout, process.stderr):
+            if source is None:
+                continue
             try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
+                os.close(source.fileno())
+            except (OSError, ValueError):
                 pass
-            process.wait(timeout=5)
+
+    @staticmethod
+    def _terminate(process: subprocess.Popen[bytes]) -> None:
+        terminate_process_group(process)
 
 
 def format_command(template: Sequence[str], values: Mapping[str, str]) -> tuple[str, ...]:

@@ -1,5 +1,39 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -Eeuo pipefail
+
+while IFS= read -r sg_imported_function; do
+    builtin unset -f -- "${sg_imported_function}"
+done < <(builtin compgen -A function)
+unset sg_imported_function
+
+if [[ "${SCALEGUARD_INTERNAL_SANITIZED_BOOTSTRAP:-}" != "1" ]]; then
+    printf '%s\n' \
+        "error: this internal bootstrap hook must be invoked by scripts/autodl/bootstrap.sh" \
+        >&2
+    exit 2
+fi
+unset SCALEGUARD_INTERNAL_SANITIZED_BOOTSTRAP
+
+unset \
+    BASH_ENV \
+    ENV \
+    PYTHONBREAKPOINT \
+    PYTHONHOME \
+    PYTHONINSPECT \
+    PYTHONPATH \
+    PYTHONSTARTUP \
+    LD_PRELOAD \
+    DYLD_INSERT_LIBRARIES \
+    DYLD_LIBRARY_PATH \
+    NETRC \
+    PIP_INDEX_URL \
+    PIP_EXTRA_INDEX_URL \
+    UV_INDEX \
+    UV_EXTRA_INDEX_URL
+export PIP_CONFIG_FILE="/dev/null"
+export PYTHONNOUSERSITE="1"
+export PYTHONDONTWRITEBYTECODE="1"
+export UV_NO_CONFIG="1"
 
 if [[ $# -ne 0 ]]; then
     printf 'error: scripts/bootstrap/autodl.sh accepts no arguments\n' >&2
@@ -28,7 +62,7 @@ sg_receipt_root="${sg_runtime_root}/receipts"
 sg_bootstrap_uv_env="${sg_runtime_root}/bootstrap-uv"
 sg_project_env="${sg_repo_root}/.venv"
 
-python3 - "${sg_repo_root}" <<'PY'
+python3 -I - "${sg_repo_root}" <<'PY'
 from __future__ import annotations
 
 import pathlib
@@ -66,7 +100,7 @@ sg_bootstrap_receipt="${sg_receipt_root}/bootstrap.json"
 sg_write_stage_receipt() {
     local sg_status="$1"
     local sg_return_code="$2"
-    python3 - \
+    python3 -I - \
         "${sg_bootstrap_receipt}" \
         "${sg_status}" \
         "${sg_return_code}" <<'PY'
@@ -141,29 +175,39 @@ if (( sg_glibc_major < 2 || (sg_glibc_major == 2 && sg_glibc_minor < 28) )); the
 fi
 
 sg_expected_uv="$(tr -d '[:space:]' < environments/uv.version)"
-sg_uv=""
-if command -v uv >/dev/null 2>&1; then
-    sg_candidate_uv="$(command -v uv)"
-    sg_candidate_version="$("${sg_candidate_uv}" --version | awk '{print $2}')"
-    if [[ "${sg_candidate_version}" == "${sg_expected_uv}" ]]; then
-        sg_uv="${sg_candidate_uv}"
-    fi
-fi
-if [[ -z "${sg_uv}" ]]; then
-    if [[ ! -x "${sg_bootstrap_uv_env}/bin/python" ]]; then
-        python3 -m venv --clear "${sg_bootstrap_uv_env}"
-    fi
-    "${sg_bootstrap_uv_env}/bin/python" -m pip install \
-        --disable-pip-version-check \
-        --no-deps \
-        --only-binary=:all: \
-        --require-hashes \
-        -r environments/bootstrap/uv.lock
-    sg_uv="${sg_bootstrap_uv_env}/bin/uv"
-fi
+sg_expected_uv_binary_sha="$(
+    tr -d '[:space:]' < environments/bootstrap/uv-binary.sha256
+)"
+[[ "${sg_expected_uv_binary_sha}" =~ ^[0-9a-f]{64}$ ]] \
+    || sg_die "invalid pinned uv binary SHA-256"
+python3 -I -m venv --clear "${sg_bootstrap_uv_env}"
+"${sg_bootstrap_uv_env}/bin/python" -I -m pip install \
+    --disable-pip-version-check \
+    --force-reinstall \
+    --no-deps \
+    --only-binary=:all: \
+    --require-hashes \
+    -r environments/bootstrap/uv.lock
+sg_uv="${sg_bootstrap_uv_env}/bin/uv"
 sg_actual_uv="$("${sg_uv}" --version | awk '{print $2}')"
 [[ "${sg_actual_uv}" == "${sg_expected_uv}" ]] \
     || sg_die "could not provision uv ${sg_expected_uv}; found ${sg_actual_uv}"
+sg_actual_uv_binary_sha="$(
+    python3 -I - "${sg_uv}" <<'PY'
+import hashlib
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+digest = hashlib.sha256()
+with path.open("rb") as handle:
+    for block in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(block)
+print(digest.hexdigest())
+PY
+)"
+[[ "${sg_actual_uv_binary_sha}" == "${sg_expected_uv_binary_sha}" ]] \
+    || sg_die "the installed uv binary differs from its committed Linux wheel identity"
 
 if [[ -n "${UV_PROJECT_ENVIRONMENT:-}" \
     && "${UV_PROJECT_ENVIRONMENT}" != "${sg_project_env}" \
@@ -175,6 +219,7 @@ export UV_PROJECT_ENVIRONMENT="${sg_project_env}"
 unset VIRTUAL_ENV
 
 export UV_PYTHON_INSTALL_DIR="${sg_python_install_root}"
+export UV_PYTHON_DOWNLOADS_JSON_URL="${sg_repo_root}/environments/python-downloads.json"
 export UV_LINK_MODE="copy"
 if [[ -z "${UV_CACHE_DIR:-}" ]]; then
     if [[ -n "${XDG_CACHE_HOME:-}" ]]; then
@@ -184,30 +229,36 @@ if [[ -z "${UV_CACHE_DIR:-}" ]]; then
     fi
 fi
 
-"${sg_uv}" python install "${sg_python_version}"
+"${sg_uv}" python install \
+    --no-config \
+    --managed-python \
+    --reinstall \
+    "${sg_python_version}"
 "${sg_uv}" sync \
     --locked \
     --extra metrics \
     --managed-python \
-    --python "${sg_python_version}"
+    --no-config \
+    --python "${sg_python_version}" \
+    --reinstall
 
 sg_assert_python() {
     local sg_python="$1"
     local sg_label="$2"
     local sg_actual
     [[ -x "${sg_python}" ]] || sg_die "${sg_label} Python is missing: ${sg_python}"
-    sg_actual="$("${sg_python}" -c 'import platform; print(platform.python_version())')"
+    sg_actual="$("${sg_python}" -I -c 'import platform; print(platform.python_version())')"
     [[ "${sg_actual}" == "${sg_python_version}" ]] \
         || sg_die "${sg_label} requires Python ${sg_python_version}; found ${sg_actual}"
 }
 
 sg_assert_python "${sg_repo_root}/.venv/bin/python" "ScaleGuard"
 
-"${sg_repo_root}/.venv/bin/python" scripts/upstream/materialize.py \
+"${sg_repo_root}/.venv/bin/python" -I scripts/upstream/materialize.py \
     upstream-lock.yaml \
     --mapping repositories \
     --project-root "${sg_repo_root}"
-"${sg_repo_root}/.venv/bin/python" scripts/upstream/materialize.py \
+"${sg_repo_root}/.venv/bin/python" -I scripts/upstream/materialize.py \
     runtime-dependencies.yaml \
     --mapping dependencies \
     --project-root "${sg_repo_root}"
@@ -218,7 +269,7 @@ sg_prepare_env() {
     local sg_python="${sg_env}/bin/python"
     if [[ -x "${sg_python}" ]]; then
         local sg_existing_version
-        sg_existing_version="$("${sg_python}" -c 'import platform; print(platform.python_version())')"
+        sg_existing_version="$("${sg_python}" -I -c 'import platform; print(platform.python_version())')"
         if [[ "${sg_existing_version}" != "${sg_python_version}" ]]; then
             "${sg_uv}" venv \
                 --clear \
@@ -245,7 +296,9 @@ sg_sync_env() {
         "${sg_uv}" pip sync
         --python "${sg_python}"
         --require-hashes
+        --reinstall
         --index-strategy unsafe-best-match
+        --no-config
     )
     if [[ -n "${sg_index}" ]]; then
         sg_sync+=(--index "${sg_index}")
@@ -265,6 +318,8 @@ sg_sync_env \
 "${sg_uv}" pip install \
     --python "${sg_env_root}/4kagent/bin/python" \
     --no-deps \
+    --no-config \
+    --reinstall \
     --require-hashes \
     -r environments/4kagent/pyiqa.override.lock \
     -r environments/4kagent/hpsv2.override.lock
@@ -308,31 +363,33 @@ sg_audit_script="${sg_repo_root}/scripts/bootstrap/audit_environment.py"
     --output "${sg_receipt_root}/coz.json" \
     --expected-python "${sg_python_version}"
 
-"${sg_repo_root}/.venv/bin/python" scripts/upstream/materialize.py \
+"${sg_repo_root}/.venv/bin/python" -I scripts/upstream/materialize.py \
     upstream-lock.yaml \
     --mapping repositories \
     --project-root "${sg_repo_root}" \
     --verify-only
-"${sg_repo_root}/.venv/bin/python" scripts/upstream/materialize.py \
+"${sg_repo_root}/.venv/bin/python" -I scripts/upstream/materialize.py \
     runtime-dependencies.yaml \
     --mapping dependencies \
     --project-root "${sg_repo_root}" \
     --verify-only
 
-"${sg_repo_root}/.venv/bin/python" - \
+"${sg_repo_root}/.venv/bin/python" -I - \
     "${sg_receipt_root}" \
     "${sg_expected_uv}" \
+    "${sg_actual_uv_binary_sha}" \
     "${sg_glibc_version}" \
     "${sg_repo_root}/src" <<'PY'
 from __future__ import annotations
 
 import datetime as dt
+import json
 import pathlib
 import subprocess
 import sys
 from typing import Any
 
-sys.path.insert(0, str(pathlib.Path(sys.argv[4]).resolve()))
+sys.path.insert(0, str(pathlib.Path(sys.argv[5]).resolve()))
 
 from scaleguard.evaluation.evidence import write_json_atomic
 from scaleguard.provenance import load_evidence_snapshot, sha256
@@ -340,8 +397,13 @@ from scaleguard.provenance import load_evidence_snapshot, sha256
 
 receipt_root = pathlib.Path(sys.argv[1]).resolve()
 uv_version = sys.argv[2]
-glibc_version = sys.argv[3]
+uv_binary_sha256 = sys.argv[3]
+glibc_version = sys.argv[4]
 project_root = pathlib.Path.cwd().resolve()
+python_downloads = json.loads(
+    (project_root / "environments/python-downloads.json").read_text(encoding="utf-8")
+)
+python_distribution = python_downloads["cpython-3.10.18-linux-x86_64-gnu"]
 environment_receipts: dict[str, Any] = {}
 for name in ("scaleguard", "4kagent", "depictqa", "coz"):
     path = receipt_root / f"{name}.json"
@@ -369,7 +431,9 @@ lock_paths = (
     pathlib.Path("upstream-lock.yaml"),
     pathlib.Path("runtime-dependencies.yaml"),
     pathlib.Path("environments/uv.version"),
+    pathlib.Path("environments/python-downloads.json"),
     pathlib.Path("environments/bootstrap/uv.lock"),
+    pathlib.Path("environments/bootstrap/uv-binary.sha256"),
     pathlib.Path("environments/4kagent/requirements.lock"),
     pathlib.Path("environments/4kagent/requirements.resolved.lock"),
     pathlib.Path("environments/4kagent/pyiqa.override.lock"),
@@ -386,6 +450,13 @@ document = {
     "project_commit": commit,
     "python_version": "3.10.18",
     "uv_version": uv_version,
+    "uv_binary_sha256": uv_binary_sha256,
+    "python_distribution": {
+        "key": "cpython-3.10.18-linux-x86_64-gnu",
+        "build": python_distribution["build"],
+        "url": python_distribution["url"],
+        "archive_sha256": python_distribution["sha256"],
+    },
     "platform": {"system": "Linux", "machine": "x86_64", "glibc": glibc_version},
     "locks": {
         str(path): sha256(project_root / path)

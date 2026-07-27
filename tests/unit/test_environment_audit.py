@@ -25,11 +25,33 @@ audit_dependencies: Any = _AUDIT.audit_dependencies
 pinned_requirements: Any = _AUDIT.pinned_requirements
 exact_pin: Any = _AUDIT.exact_pin
 audit_4kagent_entrypoints: Any = _AUDIT.audit_4kagent_entrypoints
+installation_file_inventory: Any = _AUDIT.installation_file_inventory
+runtime_import_origin: Any = _AUDIT.runtime_import_origin
+runtime_installation_identity: Any = _AUDIT.runtime_installation_identity
+validate_python_identity: Any = _AUDIT.validate_python_identity
 write_atomic: Any = _AUDIT.write_atomic
 
 
 def _package(name: str, version: str, *requirements: str) -> InstalledPackage:
     return InstalledPackage(name=name, version=version, requirements=requirements)
+
+
+class FakeDistribution:
+    def __init__(
+        self,
+        site_packages: Path,
+        files: list[Path],
+        *,
+        name: str = "example",
+        version: str = "1.0",
+    ) -> None:
+        self.site_packages = site_packages
+        self.files = files
+        self.metadata = {"Name": name}
+        self.version = version
+
+    def locate_file(self, path: Path) -> Path:
+        return self.site_packages / path
 
 
 def test_environment_receipt_writer_uses_a_private_exclusive_temporary_file(
@@ -206,6 +228,372 @@ def test_exact_pin_rejects_ranges_and_markers() -> None:
             exact_pin(value)
 
 
+def test_environment_identity_requires_the_fixed_venv_but_preserves_python_symlink(
+    tmp_path: Path,
+) -> None:
+    prefix = tmp_path / ".venv"
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / "pyvenv.cfg").write_text("home = /base\n", encoding="utf-8")
+    base_prefix = tmp_path / ".runtime/python/base"
+    base_executable = base_prefix / "bin/python"
+    base_executable.parent.mkdir(parents=True)
+    base_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable = prefix / "bin/python"
+    executable.symlink_to(base_executable)
+    identity = {
+        "executable": str(executable),
+        "executable_realpath": str(base_executable),
+        "prefix": str(prefix),
+        "base_prefix": str(base_prefix),
+        "version": "3.10.18",
+        "implementation": "CPython",
+        "platform": "test-platform",
+    }
+
+    validate_python_identity("scaleguard", tmp_path, identity)
+    wrong_identity = {**identity, "prefix": str(tmp_path / "unexpected")}
+    with pytest.raises(RuntimeError, match="expected the fixed environment"):
+        validate_python_identity("scaleguard", tmp_path, wrong_identity)
+
+
+def test_environment_audit_main_fails_closed_on_the_wrong_venv_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lock = tmp_path / "requirements.lock"
+    lock.write_text("", encoding="utf-8")
+    output = tmp_path / "receipt.json"
+    wrong_prefix = tmp_path / "unexpected"
+    identity = {
+        "executable": str(wrong_prefix / "bin/python"),
+        "executable_realpath": str(tmp_path / "base/bin/python"),
+        "prefix": str(wrong_prefix),
+        "base_prefix": str(tmp_path / "base"),
+        "version": _AUDIT.platform.python_version(),
+        "implementation": "CPython",
+        "platform": "test-platform",
+    }
+    monkeypatch.setattr(_AUDIT, "current_python_identity", lambda: identity)
+    monkeypatch.setattr(_AUDIT, "installed_packages", dict)
+    monkeypatch.setattr(
+        _AUDIT,
+        "_installation_file_inventory",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("identity rejected")),
+    )
+    monkeypatch.setattr(_AUDIT, "audit_dependencies", lambda *_args, **_kwargs: ([], []))
+    monkeypatch.setattr(_AUDIT, "audit_runtime_imports", lambda *_args, **_kwargs: ([], []))
+    monkeypatch.setattr(
+        _AUDIT.sys,
+        "argv",
+        [
+            "audit_environment.py",
+            "--name",
+            "scaleguard",
+            "--project-root",
+            str(tmp_path),
+            "--lock",
+            str(lock),
+            "--output",
+            str(output),
+            "--expected-python",
+            identity["version"],
+        ],
+    )
+
+    assert _AUDIT.main() == 1
+    receipt = json.loads(output.read_text(encoding="utf-8"))
+    assert receipt["schema_version"] == 2
+    assert receipt["status"] == "failed"
+    assert any(
+        issue["requirement"] == "scaleguard virtual environment identity"
+        for issue in receipt["issues"]
+    )
+
+
+def test_installation_merkle_changes_when_an_installed_source_is_modified(
+    tmp_path: Path,
+) -> None:
+    environment = tmp_path / "environment"
+    (environment / "bin").mkdir(parents=True)
+    site_packages = environment / "lib/python3.10/site-packages"
+    package = site_packages / "example.py"
+    record = site_packages / "example-1.0.dist-info/RECORD"
+    record.parent.mkdir(parents=True)
+    package.write_text("VALUE = 1\n", encoding="utf-8")
+    record.write_text("example.py,,\nexample-1.0.dist-info/RECORD,,\n", encoding="utf-8")
+    distribution = FakeDistribution(
+        site_packages,
+        [Path("example.py"), Path("example-1.0.dist-info/RECORD")],
+    )
+
+    before = installation_file_inventory([distribution], environment_prefix=environment)
+    package.write_text("VALUE = 2\n", encoding="utf-8")
+    after = installation_file_inventory([distribution], environment_prefix=environment)
+
+    assert before["algorithm"] == "sha256-merkle-v1"
+    assert before["environment_root"] == str(environment)
+    assert before["distribution_count"] == 1
+    assert before["file_count"] == 2
+    assert before["merkle_root"] != after["merkle_root"]
+    assert before["distributions"][0]["merkle_root"] != after["distributions"][0]["merkle_root"]
+
+
+def test_installation_inventory_rejects_record_escape_and_symlink(
+    tmp_path: Path,
+) -> None:
+    environment = tmp_path / "environment"
+    (environment / "bin").mkdir(parents=True)
+    site_packages = environment / "lib/python3.10/site-packages"
+    record = site_packages / "example-1.0.dist-info/RECORD"
+    record.parent.mkdir(parents=True)
+    record.write_text("example-1.0.dist-info/RECORD,,\n", encoding="utf-8")
+    outside = tmp_path / "outside.py"
+    outside.write_text("VALUE = 1\n", encoding="utf-8")
+
+    escaping = FakeDistribution(
+        site_packages,
+        [Path("../../../../outside.py"), Path("example-1.0.dist-info/RECORD")],
+    )
+    with pytest.raises(RuntimeError, match="escapes its environment"):
+        installation_file_inventory([escaping], environment_prefix=environment)
+
+    target = site_packages / "target.py"
+    target.write_text("VALUE = 1\n", encoding="utf-8")
+    linked = site_packages / "example.py"
+    linked.symlink_to(target)
+    symlinked = FakeDistribution(
+        site_packages,
+        [Path("example.py"), Path("example-1.0.dist-info/RECORD")],
+    )
+    with pytest.raises(RuntimeError, match="symbolic link"):
+        installation_file_inventory([symlinked], environment_prefix=environment)
+
+
+def test_installation_boundary_rejects_unowned_imports_and_executables(
+    tmp_path: Path,
+) -> None:
+    environment = tmp_path / "environment"
+    scripts = environment / "bin"
+    scripts.mkdir(parents=True)
+    site_packages = environment / "lib/python3.10/site-packages"
+    package = site_packages / "example.py"
+    record = site_packages / "example-1.0.dist-info/RECORD"
+    record.parent.mkdir(parents=True)
+    package.write_text("VALUE = 1\n", encoding="utf-8")
+    record.write_text("example.py,,\nexample-1.0.dist-info/RECORD,,\n", encoding="utf-8")
+    distribution = FakeDistribution(
+        site_packages,
+        [Path("example.py"), Path("example-1.0.dist-info/RECORD")],
+    )
+
+    for name in ("rogue.pth", "rogue.py", "rogue.pyc", "plugin.json"):
+        rogue_file = site_packages / name
+        rogue_file.write_text("unowned\n", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="unowned site-packages"):
+            installation_file_inventory([distribution], environment_prefix=environment)
+        rogue_file.unlink()
+
+    rogue_executable = scripts / "rogue"
+    rogue_executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    rogue_executable.chmod(0o755)
+    with pytest.raises(RuntimeError, match="unowned executable"):
+        installation_file_inventory([distribution], environment_prefix=environment)
+
+
+def test_runtime_installation_identity_changes_when_the_interpreter_is_modified(
+    tmp_path: Path,
+) -> None:
+    base_prefix = tmp_path / ".runtime/python/cpython-3.10"
+    base_executable = base_prefix / "bin/python3.10"
+    stdlib = base_prefix / "lib/python3.10"
+    base_executable.parent.mkdir(parents=True)
+    stdlib.mkdir(parents=True)
+    base_executable.write_bytes(b"python-runtime-v1")
+    (stdlib / "os.py").write_text("name = 'posix'\n", encoding="utf-8")
+    prefix = tmp_path / ".venv"
+    (prefix / "bin").mkdir(parents=True)
+    configuration = prefix / "pyvenv.cfg"
+    configuration.write_text(f"home = {base_executable.parent}\n", encoding="utf-8")
+    executable = prefix / "bin/python"
+    executable.symlink_to(base_executable)
+    identity = {
+        "executable": str(executable),
+        "executable_realpath": str(base_executable),
+        "prefix": str(prefix),
+        "base_prefix": str(base_prefix),
+        "version": "3.10.18",
+        "implementation": "CPython",
+        "platform": "test-platform",
+    }
+
+    before = runtime_installation_identity(
+        tmp_path,
+        identity,
+        name="scaleguard",
+        base_executable=base_executable,
+        stdlib_root=stdlib,
+    )
+    base_executable.write_bytes(b"python-runtime-v2")
+    after = runtime_installation_identity(
+        tmp_path,
+        identity,
+        name="scaleguard",
+        base_executable=base_executable,
+        stdlib_root=stdlib,
+    )
+
+    assert before["interpreter"]["sha256"] != after["interpreter"]["sha256"]
+    assert before["merkle_root"] != after["merkle_root"]
+    configuration.unlink()
+    forged_configuration = tmp_path / "forged-pyvenv.cfg"
+    forged_configuration.write_text("home = /forged\n", encoding="utf-8")
+    configuration.symlink_to(forged_configuration)
+    with pytest.raises(RuntimeError, match="virtual environment marker is missing or unsafe"):
+        runtime_installation_identity(
+            tmp_path,
+            identity,
+            name="scaleguard",
+            base_executable=base_executable,
+            stdlib_root=stdlib,
+        )
+
+
+def test_runtime_installation_identity_accepts_only_managed_uv_aliases(
+    tmp_path: Path,
+) -> None:
+    managed_root = tmp_path / ".runtime/python"
+    base_prefix = managed_root / "cpython-3.10.18-linux-x86_64-gnu"
+    base_executable = base_prefix / "bin/python3.10"
+    stdlib = base_prefix / "lib/python3.10"
+    base_executable.parent.mkdir(parents=True)
+    stdlib.mkdir(parents=True)
+    base_executable.write_bytes(b"managed-python")
+    (stdlib / "os.py").write_text("name = 'posix'\n", encoding="utf-8")
+    alias_prefix = managed_root / "cpython-3.10"
+    alias_prefix.symlink_to(base_prefix.name, target_is_directory=True)
+    alias_executable = alias_prefix / "bin/python3.10"
+
+    prefix = tmp_path / ".venv"
+    (prefix / "bin").mkdir(parents=True)
+    (prefix / "pyvenv.cfg").write_text(
+        f"home = {base_executable.parent}\n",
+        encoding="utf-8",
+    )
+    executable = prefix / "bin/python"
+    executable.symlink_to(alias_executable)
+    identity = {
+        "executable": str(executable),
+        "executable_realpath": str(base_executable),
+        "prefix": str(prefix),
+        "base_prefix": str(base_prefix),
+        "version": "3.10.18",
+        "implementation": "CPython",
+        "platform": "test-platform",
+    }
+
+    result = runtime_installation_identity(
+        tmp_path,
+        identity,
+        name="scaleguard",
+        base_executable=alias_executable,
+        stdlib_root=stdlib,
+    )
+
+    assert result["base_runtime"]["executable"] == str(alias_executable)
+    assert result["base_runtime"]["executable_realpath"] == str(base_executable)
+    assert result["base_runtime"]["executable_alias_count"] == 1
+    assert result["base_runtime"]["executable_aliases"] == [
+        {
+            "path": "cpython-3.10",
+            "target": base_prefix.name,
+            "resolved": str(base_prefix),
+        }
+    ]
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    escaped_alias = managed_root / "escaped"
+    escaped_alias.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(RuntimeError, match="alias target escapes"):
+        runtime_installation_identity(
+            tmp_path,
+            identity,
+            name="scaleguard",
+            base_executable=escaped_alias / "python",
+            stdlib_root=stdlib,
+        )
+
+
+def test_runtime_import_origin_is_bound_to_its_environment_or_checkout(
+    tmp_path: Path,
+) -> None:
+    environment = tmp_path / "environment"
+    checkout = tmp_path / "checkout"
+    environment_module = environment / "lib/python3.10/site-packages/transformers.py"
+    checkout_module = checkout / "pipeline/the4kagent_pipeline.py"
+    unexpected_module = tmp_path / "unexpected.py"
+    for path in (environment_module, checkout_module, unexpected_module):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("VALUE = 1\n", encoding="utf-8")
+
+    transformers = ModuleType("transformers")
+    transformers.__spec__ = importlib.util.spec_from_file_location(
+        "transformers",
+        environment_module,
+    )
+    pipeline = ModuleType("pipeline.the4kagent_pipeline")
+    pipeline.__spec__ = importlib.util.spec_from_file_location(
+        "pipeline.the4kagent_pipeline",
+        checkout_module,
+    )
+    unexpected = ModuleType("transformers")
+    unexpected.__spec__ = importlib.util.spec_from_file_location(
+        "transformers",
+        unexpected_module,
+    )
+
+    assert runtime_import_origin(
+        "4kagent",
+        "transformers",
+        transformers,
+        environment_root=environment,
+        checkout_root=checkout,
+        owned_environment_files=frozenset({environment_module}),
+    ) == str(environment_module)
+    assert runtime_import_origin(
+        "4kagent",
+        "pipeline.the4kagent_pipeline",
+        pipeline,
+        environment_root=environment,
+        checkout_root=checkout,
+    ) == str(checkout_module)
+    with pytest.raises(RuntimeError, match="outside its expected root"):
+        runtime_import_origin(
+            "4kagent",
+            "transformers",
+            unexpected,
+            environment_root=environment,
+            checkout_root=checkout,
+        )
+
+    unowned_environment_module = environment / "lib/python3.10/site-packages/unowned.py"
+    unowned_environment_module.write_text("VALUE = 1\n", encoding="utf-8")
+    unowned = ModuleType("transformers")
+    unowned.__spec__ = importlib.util.spec_from_file_location(
+        "transformers",
+        unowned_environment_module,
+    )
+    with pytest.raises(RuntimeError, match="not owned"):
+        runtime_import_origin(
+            "4kagent",
+            "transformers",
+            unowned,
+            environment_root=environment,
+            checkout_root=checkout,
+            owned_environment_files=frozenset({environment_module}),
+        )
+
+
 def test_4kagent_entrypoint_audit_uses_a_minimal_offline_environment(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -233,7 +621,11 @@ def test_4kagent_entrypoint_audit_uses_a_minimal_offline_environment(
 
     assert issues == []
     assert checks == [
-        {"module": f"entrypoint:{relative}", "symbols": ["--help"]}
+        {
+            "module": f"entrypoint:{relative}",
+            "symbols": ["--help"],
+            "origin": str((tmp_path / relative).resolve()),
+        }
         for relative in _AUDIT._4KAGENT_ENTRYPOINTS
     ]
     assert len(calls) == len(_AUDIT._4KAGENT_ENTRYPOINTS)

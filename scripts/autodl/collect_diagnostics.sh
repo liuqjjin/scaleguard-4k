@@ -1,4 +1,14 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
+# shellcheck shell=bash
+if [[ $- != *p* ]]; then
+    printf '%s\n' "error: invoke this AutoDL entry directly; an explicit Bash must use -p" >&2
+    exit 2
+fi
+while IFS= read -r sg_imported_function; do
+    builtin unset -f -- "${sg_imported_function}"
+done < <(builtin compgen -A function)
+builtin unset sg_imported_function
+builtin set +x +v
 # shellcheck source-path=SCRIPTDIR
 set -Eeuo pipefail
 
@@ -11,7 +21,9 @@ if [[ "${sg_here}" != /* ]]; then
     sg_here="${PWD}/${sg_here}"
 fi
 # shellcheck source=_common.sh
+# shellcheck disable=SC1091
 source "${sg_here}/_common.sh"
+# shellcheck disable=SC2154
 sg_here="${sg_script_dir}"
 
 sg_resolve_autodl_scheduler_envs
@@ -55,19 +67,19 @@ sg_source="$(sg_from_repo "${sg_source}")"
 command -v python3 >/dev/null 2>&1 || sg_die "python3 is required"
 command -v tar >/dev/null 2>&1 || sg_die "tar is required"
 sg_source="$(
-    python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' \
+    python3 -I -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' \
         "${sg_source}"
 )"
 sg_artifact_root_resolved="$(
-    python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' \
+    python3 -I -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' \
         "${SG_ARTIFACT_ROOT}"
 )"
 sg_repo_root_resolved="$(
-    python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' \
+    python3 -I -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' \
         "${SG_REPO_ROOT}"
 )"
 sg_cache_root_resolved="$(
-    python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' \
+    python3 -I -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' \
         "${SG_CACHE_ROOT}"
 )"
 case "${sg_artifact_root_resolved}" in
@@ -135,9 +147,9 @@ else
     printf '%s\n' "nvcc not found" > "${sg_system_dir}/nvcc.txt"
 fi
 
-python3 --version > "${sg_system_dir}/python.txt" 2>&1 || true
+python3 -I --version > "${sg_system_dir}/python.txt" 2>&1 || true
 if [[ -x "${SG_REPO_ROOT}/.venv/bin/python" ]]; then
-    "${SG_REPO_ROOT}/.venv/bin/python" -m pip freeze \
+    "${SG_REPO_ROOT}/.venv/bin/python" -I -m pip freeze \
         > "${sg_system_dir}/pip-freeze.txt" 2>&1 || true
 fi
 if command -v conda >/dev/null 2>&1; then
@@ -186,7 +198,7 @@ sg_sanitize_bounded() {
     if [[ "${sg_copy_bytes}" -lt 0 ]]; then
         sg_copy_bytes=0
     fi
-    python3 "${sg_here}/_sanitize_diagnostics.py" \
+    python3 -I "${sg_here}/_sanitize_diagnostics.py" \
         "${sg_scan_source}" \
         "${sg_scan_destination}" \
         "${SG_REPO_ROOT}" \
@@ -208,7 +220,7 @@ while IFS= read -r -d '' sg_cli_result; do
         break
     fi
     sg_model_run="$(
-        python3 - "${sg_cli_result}" "${SG_REPO_ROOT}" "${SG_REPO_ROOT}/src" \
+        python3 -I - "${sg_cli_result}" "${SG_REPO_ROOT}" "${SG_REPO_ROOT}/src" \
             2>> "${SG_RUN_DIR}/model-run-scan-warnings.txt" <<'PY'
 import pathlib
 import sys
@@ -263,7 +275,7 @@ sg_assert_staging_bounds() {
 
 sg_assert_staging_bounds
 
-python3 - "${sg_stage_dir}/diagnostics.json" "$(sg_timestamp)" <<'PY'
+python3 -I - "${sg_stage_dir}/diagnostics.json" "$(sg_timestamp)" <<'PY'
 import json
 import pathlib
 import sys
@@ -295,7 +307,7 @@ sg_assert_staging_bounds
 sg_secret_hits="${SG_RUN_DIR}/secret-scan.txt"
 sg_secret_scan_error="${SG_RUN_DIR}/secret-scan-error.txt"
 sg_path_scan_rc=0
-python3 - "${sg_stage_dir}" 3< <(sg_write_private_secret_stream) \
+python3 -I - "${sg_stage_dir}" 3< <(sg_write_private_secret_stream) \
     2> "${sg_secret_scan_error}" <<'PY' \
     || sg_path_scan_rc=$?
 import os
@@ -355,7 +367,7 @@ fi
 if [[ "${sg_secret_scan_rc}" -eq 0 ]]; then
     printf '%s\n' "Secret-like material remained after automatic redaction." \
         > "${sg_secret_hits}"
-    python3 - "${SG_RUN_DIR}/diagnostics-failure.json" "$(sg_timestamp)" <<'PY'
+    python3 -I - "${SG_RUN_DIR}/diagnostics-failure.json" "$(sg_timestamp)" <<'PY'
 import json
 import pathlib
 import sys

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
+import scaleguard.images as images
 from scaleguard.errors import ArtifactError
 from scaleguard.images import discover_single_output, inspect_image, normalize_to_png
 
@@ -81,3 +83,25 @@ def test_image_inspection_and_normalization_reject_missing_or_invalid_inputs(
         inspect_image(invalid, mock=False, stage="input")
     with pytest.raises(ArtifactError, match="cannot normalize image"):
         normalize_to_png(invalid, tmp_path / "normalized.png")
+
+
+def test_image_inspection_uses_one_byte_snapshot_for_metadata_and_hash(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = make_image(tmp_path / "first.png", size=(11, 7))
+    current = make_image(tmp_path / "current.png", size=(19, 13))
+    snapshot = first.read_bytes()
+    digest = hashlib.sha256(snapshot).hexdigest()
+
+    monkeypatch.setattr(
+        images,
+        "load_regular_file_snapshot",
+        lambda _path, _label: (snapshot, digest),
+    )
+
+    artifact = inspect_image(current, mock=False, stage="race")
+
+    assert (artifact.width, artifact.height) == (11, 7)
+    assert artifact.sha256 == digest

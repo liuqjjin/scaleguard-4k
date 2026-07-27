@@ -3,6 +3,7 @@
 from scaleguard.evaluation.calibration import (
     CalibrationParameters,
     calibrate_from_manifests,
+    verify_calibration_document,
     verify_calibration_receipt,
 )
 from scaleguard.evaluation.metrics import (
@@ -26,5 +27,6 @@ __all__ = [
     "psnr_rgb",
     "ssim_rgb",
     "summarize_paired_manifests",
+    "verify_calibration_document",
     "verify_calibration_receipt",
 ]

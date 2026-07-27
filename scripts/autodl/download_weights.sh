@@ -1,4 +1,14 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
+# shellcheck shell=bash
+if [[ $- != *p* ]]; then
+    printf '%s\n' "error: invoke this AutoDL entry directly; an explicit Bash must use -p" >&2
+    exit 2
+fi
+while IFS= read -r sg_imported_function; do
+    builtin unset -f -- "${sg_imported_function}"
+done < <(builtin compgen -A function)
+builtin unset sg_imported_function
+builtin set +x +v
 # shellcheck source-path=SCRIPTDIR
 set -Eeuo pipefail
 
@@ -11,7 +21,9 @@ if [[ "${sg_here}" != /* ]]; then
     sg_here="${PWD}/${sg_here}"
 fi
 # shellcheck source=_common.sh
+# shellcheck disable=SC1091
 source "${sg_here}/_common.sh"
+# shellcheck disable=SC2154
 sg_here="${sg_script_dir}"
 
 sg_resolve_autodl_scheduler_envs
@@ -98,7 +110,7 @@ sg_git_commit="$(git -C "${SG_REPO_ROOT}" rev-parse HEAD 2>/dev/null)" \
 
 sg_download_rc=0
 sg_download_command=(
-    "${sg_project_python}" "${sg_here}/_download_weights.py"
+    "${sg_project_python}" -I "${sg_here}/_download_weights.py"
     "${SG_RUN_DIR}/weights-manifest.json"
     "${sg_weight_root}"
     "${SG_RUN_DIR}/weights-receipt.json"
@@ -127,7 +139,7 @@ if [[ "${sg_download_rc}" -eq 0 ]]; then
         sg_download_rc=66
     elif sg_run_logged \
         "${sg_log}" \
-        "${sg_project_python}" "${sg_materializer}" \
+        "${sg_project_python}" -I "${sg_materializer}" \
         --weights-root "${sg_weight_root}" \
         --receipt "${SG_RUN_DIR}/weights-receipt.json" \
         --output "${sg_materialization_receipt}"
@@ -166,7 +178,7 @@ if [[ "${sg_download_rc}" -ne 0 ]]; then
             sg_failure_status="external_gate"
         fi
     fi
-    "${sg_project_python}" - \
+    "${sg_project_python}" -I - \
         "${SG_RUN_DIR}/weights-failure.json" \
         "$(sg_timestamp)" \
         "${sg_failure_status}" <<'PY'
@@ -188,7 +200,7 @@ pathlib.Path(sys.argv[1]).write_text(
     encoding="utf-8",
 )
 PY
-    "${sg_project_python}" --version > "${SG_RUN_DIR}/python-version.txt" 2>&1 || true
+    "${sg_project_python}" -I --version > "${SG_RUN_DIR}/python-version.txt" 2>&1 || true
     sg_write_file_inventory "${SG_RUN_DIR}" "${SG_RUN_DIR}/files.json"
     if [[ "${sg_failure_status}" == "external_gate" ]]; then
         printf 'error: required manual weight access is an external gate; inspect %s\n' \
@@ -199,7 +211,7 @@ PY
     exit "${sg_download_rc}"
 fi
 
-"${sg_project_python}" --version > "${SG_RUN_DIR}/python-version.txt" 2>&1
+"${sg_project_python}" -I --version > "${SG_RUN_DIR}/python-version.txt" 2>&1
 if command -v hf >/dev/null 2>&1; then
     hf --version > "${SG_RUN_DIR}/huggingface-cli-version.txt" 2>&1 || true
 elif command -v huggingface-cli >/dev/null 2>&1; then

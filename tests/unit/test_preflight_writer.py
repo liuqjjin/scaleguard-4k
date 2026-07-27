@@ -47,6 +47,8 @@ def test_preflight_writer_does_not_follow_fixed_temporary_or_output_symlinks(
         *,
         config_path: Path | None,
         project_root: Path,
+        require_recent: bool,
+        reaudit_environments: bool,
     ) -> dict[str, object]:
         assert receipt_path.parent == tmp_path
         assert receipt_path != fixed_temporary
@@ -56,6 +58,8 @@ def test_preflight_writer_does_not_follow_fixed_temporary_or_output_symlinks(
         assert json.loads(receipt_path.read_text(encoding="utf-8")) == document
         assert config_path == config
         assert project_root == _WRITER.PROJECT_ROOT
+        assert require_recent is True
+        assert reaudit_environments is False
         validated.append(receipt_path)
         return {
             "runtime_evidence_verified": True,

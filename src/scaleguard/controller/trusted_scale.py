@@ -26,7 +26,8 @@ from scaleguard.contracts import (
     utc_now,
 )
 from scaleguard.controller.policy import build_scale_plan
-from scaleguard.evaluation.calibration import verify_calibration_receipt
+from scaleguard.errors import ScaleGuardError
+from scaleguard.evaluation.calibration import verify_calibration_document
 from scaleguard.images import assert_scale, inspect_image, normalize_to_png
 from scaleguard.imaging.forward_models import (
     ForwardModel,
@@ -39,7 +40,9 @@ from scaleguard.metrics.quality import (
     build_quality_evaluator,
 )
 from scaleguard.metrics.scale import evaluate_scale_consistency
+from scaleguard.provenance import load_regular_file_snapshot
 from scaleguard.runtime.gpu_lifecycle import GpuLifecycle, GpuPhase, PhaseEvent
+from scaleguard.strict_json import loads_object
 
 
 class TrustedScaleController:
@@ -79,16 +82,27 @@ class TrustedScaleController:
             )
         self.calibration_valid = False
         self.calibration_reasons: list[str] = ["calibration_receipt_not_configured"]
+        self.calibration_receipt_path: str | None = None
+        self.calibration_receipt_size_bytes: int | None = None
+        self.calibration_receipt_sha256: str | None = None
         receipt = config.metrics.calibration_receipt
         if receipt is not None:
             resolved_receipt = (
                 receipt if receipt.is_absolute() else self.project_root / receipt
             ).resolve()
+            self.calibration_receipt_path = str(resolved_receipt)
             try:
-                self.calibration_valid, self.calibration_reasons = verify_calibration_receipt(
-                    resolved_receipt, config
+                payload, digest = load_regular_file_snapshot(
+                    resolved_receipt,
+                    "quality calibration receipt",
                 )
-            except (OSError, ValueError) as error:
+                document = loads_object(payload)
+                self.calibration_receipt_size_bytes = len(payload)
+                self.calibration_receipt_sha256 = digest
+                self.calibration_valid, self.calibration_reasons = verify_calibration_document(
+                    document, config
+                )
+            except (OSError, ValueError, ScaleGuardError) as error:
                 self.calibration_reasons = [
                     f"calibration_receipt_unreadable:{type(error).__name__}"
                 ]
@@ -122,11 +136,9 @@ class TrustedScaleController:
                 "quality_backend_is_proxy": self.quality.is_proxy,
                 "quality_thresholds_calibrated": self.calibration_valid,
                 "quality_calibration_reasons": self.calibration_reasons,
-                "quality_calibration_receipt": (
-                    str(self.config.metrics.calibration_receipt)
-                    if self.config.metrics.calibration_receipt is not None
-                    else None
-                ),
+                "quality_calibration_receipt": self.calibration_receipt_path,
+                "quality_calibration_receipt_size_bytes": (self.calibration_receipt_size_bytes),
+                "quality_calibration_receipt_sha256": self.calibration_receipt_sha256,
             },
             input_image=input_artifact,
             requested_factor=self.config.controller.target_factor,
@@ -138,7 +150,12 @@ class TrustedScaleController:
         try:
             self._assert_output_outside_run(output, run_dir)
             restored_path = run_dir / "states" / "scale_00_restored.png"
-            with lifecycle.enter(GpuPhase.RESTORATION, self.config.fourkagent.tool_gpu):
+            restoration_devices = (
+                "none"
+                if self.restoration.name == "scaleguard_identity_observation"
+                else self.config.fourkagent.tool_gpu
+            )
+            with lifecycle.enter(GpuPhase.RESTORATION, restoration_devices):
                 restored_result = self.restoration.restore(
                     normalized_input,
                     restored_path,
@@ -319,6 +336,7 @@ class TrustedScaleController:
             final_metrics: MetricRecord | None = None
             final_reason = ""
             final_label = ""
+            final_gates_passed = False
             selected_scale = 0.0
             for attempt_index, (label, candidate_path, candidate_scale) in enumerate(
                 attempts,
@@ -334,15 +352,24 @@ class TrustedScaleController:
                     observation=normalized_input,
                     work_dir=run_dir / "metrics" / "final" / f"attempt_{attempt_index:02d}",
                 )
-                accepted, reason = self._final_gate(
+                gates_passed, gate_reason = self._final_gate(
                     metrics,
                     require_quality=candidate_scale > plan.bridge_factor,
+                )
+                fixed_policy = self.config.controller.acceptance_policy == "fixed"
+                accepted = gates_passed or fixed_policy
+                reason = (
+                    "fixed ablation policy accepted the candidate; observed gates: " + gate_reason
+                    if fixed_policy
+                    else gate_reason
                 )
                 recorder.event(
                     "final_candidate_evaluated",
                     label=label,
                     scale=candidate_scale,
                     accepted=accepted,
+                    gates_passed=gates_passed,
+                    acceptance_policy=self.config.controller.acceptance_policy,
                     reason=reason,
                     metrics=self._metric_payload(metrics),
                 )
@@ -351,6 +378,7 @@ class TrustedScaleController:
                     final_metrics = metrics
                     final_reason = reason
                     final_label = label
+                    final_gates_passed = gates_passed
                     selected_scale = candidate_scale
                     break
             if final_metrics is None:
@@ -376,7 +404,9 @@ class TrustedScaleController:
                 "after_color_alignment": final_label == "adain",
                 "selected_state": final_label,
                 "selected_scale": selected_scale,
-                "gate_passed": True,
+                "gate_passed": final_gates_passed,
+                "accepted_by_policy": True,
+                "acceptance_policy": self.config.controller.acceptance_policy,
                 "gate_reason": final_reason,
                 "metrics": self._metric_payload(final_metrics),
             }
@@ -395,6 +425,8 @@ class TrustedScaleController:
                 and restored_result.process is not None
                 and restored_result.metadata.get("backend") == "4kagent_upstream"
                 and self.provenance.get("runtime_evidence_verified") is True
+                and self.provenance.get("runtime_profile_bound") is True
+                and self.config.controller.acceptance_policy == "trusted"
             )
             if not mock and session_boundary_valid and official_runtime:
                 recorded_candidates = [
@@ -531,6 +563,16 @@ class TrustedScaleController:
         step_index: int,
         total_steps: int,
     ) -> tuple[Decision, bool, str]:
+        if self.config.controller.acceptance_policy == "fixed":
+            decision = Decision.STOP if step_index >= total_steps else Decision.CONTINUE
+            return (
+                decision,
+                True,
+                (
+                    "fixed ablation policy accepted the candidate; "
+                    "gates were recorded but not enforced"
+                ),
+            )
         thresholds = self.config.metrics
         if metrics.scale_nrmse > thresholds.max_scale_nrmse:
             return (

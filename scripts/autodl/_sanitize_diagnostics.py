@@ -128,6 +128,22 @@ def redact(text: str, replacements: list[tuple[str, str]]) -> str:
     return text
 
 
+def contains_inline_image_data(text: str) -> bool:
+    """Return true for an image data URL before its encoded bytes are copied."""
+
+    lowered = text.casefold()
+    marker = "data:image/"
+    start = lowered.find(marker)
+    while start >= 0:
+        header_end = lowered.find(",", start + len(marker))
+        if header_end < 0:
+            return False
+        if ";base64" in lowered[start:header_end]:
+            return True
+        start = lowered.find(marker, start + len(marker))
+    return False
+
+
 def read_private_replacements(secret_fd: int) -> list[tuple[str, str]]:
     with os.fdopen(secret_fd, "rb", closefd=True) as handle:
         payload = handle.read(1024 * 1024 + 1)
@@ -285,6 +301,9 @@ def main() -> int:
         except (UnicodeDecodeError, OSError) as exc:
             record_skip(f"{relative.as_posix()}: not readable text ({exc})")
             continue
+        if contains_inline_image_data(text):
+            record_skip(f"{relative.as_posix()}: contains embedded image data")
+            continue
         target = destination / "runs" / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(redact(text, replacements), encoding="utf-8")
@@ -309,6 +328,9 @@ def main() -> int:
         try:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
+            path.unlink()
+            continue
+        if contains_inline_image_data(text):
             path.unlink()
             continue
         path.write_text(redact(text, replacements), encoding="utf-8")

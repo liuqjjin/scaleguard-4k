@@ -14,6 +14,14 @@ from scaleguard.strict_yaml import StrictYAMLError
 from scaleguard.strict_yaml import loads as load_strict_yaml
 
 _CREDENTIAL_ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*_(?:API_KEY|TOKEN|CREDENTIAL|SECRET)")
+_EXPERIMENT_SAMPLE_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}")
+EXPERIMENT_GROUP_SEMANTICS = {
+    "A-only": ("upstream", "persistent", 1, 0, "fixed"),
+    "B-only": ("identity", "persistent", 4, 1, "fixed"),
+    "AB-fixed": ("upstream", "persistent", 4, 1, "fixed"),
+    "ScaleGuard": ("upstream", "persistent", 4, 1, "trusted"),
+}
+EXPERIMENT_GROUPS = tuple(EXPERIMENT_GROUP_SEMANTICS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +30,8 @@ class RuntimeConfig:
     process_timeout_seconds: float = 3600.0
     keep_temporary_files: bool = False
     gpu_poll_interval_seconds: float = 0.5
+    experiment_group: str | None = None
+    experiment_sample_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +96,7 @@ class ControllerConfig:
     target_factor: int = 4
     max_coz_steps: int = 2
     color_strategy: str = "adain"
+    acceptance_policy: str = "trusted"
     accept_unvalidated_quality_proxy: bool = False
 
 
@@ -197,8 +208,8 @@ def _local_model_location(value: str) -> bool:
 
 def validate_config(config: PipelineConfig) -> None:
     _validate_types(config)
-    if config.fourkagent.mode not in {"fake", "command", "upstream"}:
-        raise ConfigurationError("fourkagent.mode must be fake, command, or upstream")
+    if config.fourkagent.mode not in {"fake", "command", "upstream", "identity"}:
+        raise ConfigurationError("fourkagent.mode must be fake, command, upstream, or identity")
     if config.coz.mode not in {"fake", "command", "upstream", "persistent"}:
         raise ConfigurationError("coz.mode must be fake, command, upstream, or persistent")
     if config.controller.target_factor not in {1, 2, 4, 8, 16}:
@@ -207,6 +218,8 @@ def validate_config(config: PipelineConfig) -> None:
         raise ConfigurationError("controller.max_coz_steps must be between 0 and 2")
     if config.controller.color_strategy not in {"none", "adain"}:
         raise ConfigurationError("controller.color_strategy must be none or adain")
+    if config.controller.acceptance_policy not in {"trusted", "fixed"}:
+        raise ConfigurationError("controller.acceptance_policy must be trusted or fixed")
     if config.metrics.quality_backend not in {"gradient_proxy", "pyiqa"}:
         raise ConfigurationError("metrics.quality_backend is not available")
     if config.metrics.quality_backend == "pyiqa" and not config.metrics.quality_metric:
@@ -226,6 +239,47 @@ def validate_config(config: PipelineConfig) -> None:
     if config.fourkagent.depictqa_command and config.fourkagent.depictqa_cwd is None:
         raise ConfigurationError(
             "fourkagent.depictqa_cwd is required when depictqa_command is configured"
+        )
+    group = config.runtime.experiment_group
+    sample_id = config.runtime.experiment_sample_id
+    if (group is None) != (sample_id is None):
+        raise ConfigurationError(
+            "runtime.experiment_group and runtime.experiment_sample_id must be set together"
+        )
+    if group is not None:
+        if group not in EXPERIMENT_GROUP_SEMANTICS:
+            raise ConfigurationError("runtime.experiment_group is not a declared ablation group")
+        if sample_id is None or _EXPERIMENT_SAMPLE_ID.fullmatch(sample_id) is None:
+            raise ConfigurationError(
+                "runtime.experiment_sample_id must be one safe lowercase identifier"
+            )
+        (
+            expected_mode,
+            expected_coz_mode,
+            expected_target,
+            expected_steps,
+            expected_policy,
+        ) = EXPERIMENT_GROUP_SEMANTICS[group]
+        observed = (
+            config.fourkagent.mode,
+            config.coz.mode,
+            config.controller.target_factor,
+            config.controller.max_coz_steps,
+            config.controller.acceptance_policy,
+        )
+        if observed != (
+            expected_mode,
+            expected_coz_mode,
+            expected_target,
+            expected_steps,
+            expected_policy,
+        ):
+            raise ConfigurationError(
+                f"{group} does not match its fixed restoration/scale/acceptance semantics"
+            )
+    elif config.fourkagent.mode == "identity" or config.controller.acceptance_policy == "fixed":
+        raise ConfigurationError(
+            "identity restoration and fixed acceptance are reserved for declared ablations"
         )
     if _CREDENTIAL_ENV_NAME.fullmatch(config.fourkagent.api_key_env) is None:
         raise ConfigurationError(
@@ -393,9 +447,16 @@ def _validate_types(config: PipelineConfig) -> None:
         ("metrics.quality_device", config.metrics.quality_device),
         ("metrics.measurement_model", config.metrics.measurement_model),
         ("controller.color_strategy", config.controller.color_strategy),
+        ("controller.acceptance_policy", config.controller.acceptance_policy),
     ]
     for name, value in text_fields:
         text(value, name)
+    for name, value in (
+        ("runtime.experiment_group", config.runtime.experiment_group),
+        ("runtime.experiment_sample_id", config.runtime.experiment_sample_id),
+    ):
+        if value is not None:
+            text(value, name)
     path_fields: list[tuple[str, Any]] = [
         ("fourkagent.checkout", config.fourkagent.checkout),
         ("fourkagent.depictqa_cwd", config.fourkagent.depictqa_cwd),

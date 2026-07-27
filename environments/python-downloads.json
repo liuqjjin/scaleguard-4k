@@ -1,0 +1,19 @@
+{
+  "cpython-3.10.18-linux-x86_64-gnu": {
+    "arch": {
+      "family": "x86_64",
+      "variant": null
+    },
+    "build": "20251007",
+    "libc": "gnu",
+    "major": 3,
+    "minor": 10,
+    "name": "cpython",
+    "os": "linux",
+    "patch": 18,
+    "prerelease": "",
+    "sha256": "7b1d02e28b0d36c4b0de044aaf8099cb0395ac3d6826c96ddd158241fcdc6f06",
+    "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20251007/cpython-3.10.18%2B20251007-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+    "variant": null
+  }
+}

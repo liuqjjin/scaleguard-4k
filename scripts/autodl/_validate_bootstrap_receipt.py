@@ -13,8 +13,9 @@ import sys
 from typing import Any
 
 from scaleguard.provenance import (
-    ENVIRONMENT_RUNTIME_IMPORTS,
-    FOURKAGENT_AUDITED_OVERRIDES,
+    RuntimePreflightError,
+    load_regular_file_snapshot,
+    validate_environment_receipt,
 )
 from scaleguard.strict_json import StrictJSONError, loads_object
 
@@ -28,7 +29,9 @@ EXPECTED_LOCKS = (
     "upstream-lock.yaml",
     "runtime-dependencies.yaml",
     "environments/uv.version",
+    "environments/python-downloads.json",
     "environments/bootstrap/uv.lock",
+    "environments/bootstrap/uv-binary.sha256",
     "environments/4kagent/requirements.lock",
     "environments/4kagent/requirements.resolved.lock",
     "environments/4kagent/pyiqa.override.lock",
@@ -39,6 +42,7 @@ EXPECTED_LOCKS = (
     "environments/coz/requirements.resolved.lock",
 )
 EXPECTED_ENVIRONMENTS = ("scaleguard", "4kagent", "depictqa", "coz")
+EXPECTED_PYTHON_DISTRIBUTION = "cpython-3.10.18-linux-x86_64-gnu"
 
 
 def sha256_bytes(payload: bytes) -> str:
@@ -115,6 +119,55 @@ def main() -> int:
     expected_uv = (project_root / "environments" / "uv.version").read_text(encoding="utf-8").strip()
     if aggregate.get("uv_version") != expected_uv:
         raise ReceiptError("aggregate environment receipt has an unexpected uv version")
+    expected_uv_binary = (
+        (project_root / "environments/bootstrap/uv-binary.sha256")
+        .read_text(encoding="utf-8")
+        .strip()
+    )
+    if (
+        re.fullmatch(r"[0-9a-f]{64}", expected_uv_binary) is None
+        or aggregate.get("uv_binary_sha256") != expected_uv_binary
+    ):
+        raise ReceiptError("aggregate environment receipt has an unexpected uv binary identity")
+    _python_download_bytes, python_downloads = load_snapshot(
+        project_root / "environments/python-downloads.json",
+        "managed Python distribution lock",
+    )
+    if set(python_downloads) != {EXPECTED_PYTHON_DISTRIBUTION}:
+        raise ReceiptError("managed Python distribution lock has an unexpected build set")
+    python_distribution = python_downloads[EXPECTED_PYTHON_DISTRIBUTION]
+    if not isinstance(python_distribution, dict):
+        raise ReceiptError("managed Python distribution lock is invalid")
+    expected_python_distribution = {
+        "key": EXPECTED_PYTHON_DISTRIBUTION,
+        "build": python_distribution.get("build"),
+        "url": python_distribution.get("url"),
+        "archive_sha256": python_distribution.get("sha256"),
+    }
+    if (
+        python_distribution.get("name") != "cpython"
+        or python_distribution.get("major") != 3
+        or python_distribution.get("minor") != 10
+        or python_distribution.get("patch") != 18
+        or python_distribution.get("os") != "linux"
+        or python_distribution.get("arch") != {"family": "x86_64", "variant": None}
+        or python_distribution.get("libc") != "gnu"
+        or not isinstance(expected_python_distribution["build"], str)
+        or not isinstance(expected_python_distribution["url"], str)
+        or not str(expected_python_distribution["url"]).startswith(
+            "https://github.com/astral-sh/python-build-standalone/releases/download/"
+        )
+        or not isinstance(expected_python_distribution["archive_sha256"], str)
+        or re.fullmatch(
+            r"[0-9a-f]{64}",
+            str(expected_python_distribution["archive_sha256"]),
+        )
+        is None
+        or aggregate.get("python_distribution") != expected_python_distribution
+    ):
+        raise ReceiptError(
+            "aggregate environment receipt has an unexpected managed Python distribution"
+        )
     platform = aggregate.get("platform")
     if (
         not isinstance(platform, dict)
@@ -158,23 +211,26 @@ def main() -> int:
         receipt_path = (project_root / relative_path).resolve()
         if not receipt_path.is_relative_to(receipt_root):
             raise ReceiptError(f"environment receipt escapes its runtime root: {name}")
-        payload, receipt = load_snapshot(receipt_path, f"{name} receipt")
-        if sha256_bytes(payload) != expected_digest:
-            raise ReceiptError(f"environment receipt hash mismatch: {name}")
+        try:
+            _validated_path, receipt, validated_digest = validate_environment_receipt(
+                name,
+                record,
+                project_root=project_root,
+                expected_path=receipt_path,
+                context=f"bootstrap environment {name}",
+            )
+            payload, copied_digest = load_regular_file_snapshot(
+                receipt_path,
+                f"{name} receipt",
+            )
+        except RuntimePreflightError as exc:
+            raise ReceiptError(f"environment receipt content mismatch: {name}: {exc}") from exc
         if (
-            receipt.get("schema_version") != 1
-            or receipt.get("name") != name
-            or receipt.get("status") != observed_status
-            or receipt.get("issues") != []
-            or receipt.get("runtime_imports")
-            != [
-                {"module": module, "symbols": list(symbols)}
-                for module, symbols in ENVIRONMENT_RUNTIME_IMPORTS[name]
-            ]
-            or receipt.get("audited_overrides")
-            != (list(FOURKAGENT_AUDITED_OVERRIDES) if name == "4kagent" else [])
+            validated_digest != expected_digest
+            or copied_digest != expected_digest
+            or sha256_bytes(payload) != expected_digest
         ):
-            raise ReceiptError(f"environment receipt content mismatch: {name}")
+            raise ReceiptError(f"environment receipt hash mismatch: {name}")
         if timestamp(receipt.get("created_at_utc"), f"{name} created_at_utc") < not_before:
             raise ReceiptError(f"environment receipt predates this bootstrap attempt: {name}")
         copied = destination / f"{name}.json"

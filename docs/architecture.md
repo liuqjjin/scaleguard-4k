@@ -120,7 +120,10 @@ When an observation model is enabled, ScaleGuard also maps the candidate into
 observation space and records `measurement_nrmse`. Implemented, explicitly
 configured forward models are resize, Gaussian-PSF plus resize, JPEG plus
 resize, Poisson–Gaussian plus resize, and uniform haze plus resize. These are
-controlled experimental operators, not estimated camera physics.
+controlled experimental operators, not estimated camera physics. The manifest
+requires both the finite measurement and the factory-derived canonical model
+identity exactly when this gate is enabled; it requires both to be absent when
+the gate is disabled.
 
 The decision order is deliberately not an opaque weighted sum:
 
@@ -145,6 +148,13 @@ phases retain redacted arguments, working directory, exit code, duration,
 stdout, stderr, and sampled GPU memory when `nvidia-smi` is available.
 Persistent CoZ instead retains its protocol log, stderr, worker-reported device
 inventory, and PyTorch peak-allocation metadata.
+
+Each external leader owns a fresh POSIX session. A short post-leader grace
+permits ordinary shutdown; any remaining group members are terminated with
+bounded TERM/KILL escalation before control returns. CoZ protocol reads have a
+single absolute deadline and a 1 MiB response ceiling, including the
+partial-line case. Deliberate `setsid` escape is outside this ownership model
+and is forbidden for configured workers.
 
 The GPU lifecycle ledger prevents overlapping heavyweight phases within the
 controller and records acquire/release intent:
@@ -191,11 +201,18 @@ see [results status](results/STATUS.md).
 - Every real attempt re-audits all four current runtime environments and binds
   their complete distribution maps and offline import probes to a fresh
   schema-v2 preflight receipt before model execution.
+- Bootstrap itself is reconstructed from a committed uv wheel/executable
+  identity and a committed Python archive identity, and reinstalls locked
+  package bytes. See
+  [ADR 0009](adr/0009-bind-runtime-bytes-at-each-real-attempt.md).
 - Model downloads and manual gates are recorded through `weights-lock.json`;
   a locally measured digest does not authenticate a publisher that supplied no
   digest.
 - Calibration receipts bind labels, manifests, artifact hashes, metric
-  identity, thresholds, bootstrap settings, and sample counts.
+  identity, thresholds, bootstrap settings, and sample counts. Controller
+  construction and paired-summary review independently verify the exact
+  receipt path, bytes, and semantics; see
+  [ADR 0011](adr/0011-bind-calibration-and-conditional-observation-evidence.md).
 - No token, API key, weight, upstream checkout, or private dataset belongs in
   Git.
 

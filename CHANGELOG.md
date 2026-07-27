@@ -21,6 +21,10 @@ and intends to use semantic versioning after its first public release.
   failures, mock provenance, and GPU phase events.
 - Hash-bound gate calibration receipts and paired, non-imputed ablation
   summaries.
+- Executable, fail-continuing A-only, B-only, AB-fixed, and ScaleGuard suites
+  with exact input/seed pairing, raw attempt retention, hardware identity
+  checks, and an independently revalidated suite receipt required for research
+  eligibility.
 - Strict YAML configuration, CLI, doctor, upstream verification, and manifest
   validation.
 - Locked source identities for 4KAgent and Chain-of-Zoom; DepictQA is pinned as
@@ -33,6 +37,11 @@ and intends to use semantic versioning after its first public release.
   dependency checks, offline imports, and 4KAgent tool-entrypoint probes to
   schema-v2 preflight evidence, with single-open regular-file snapshots and
   private atomic no-clobber receipt publication.
+- Byte-pinned Linux bootstrap identities for the private uv executable and
+  managed CPython archive, plus reinstall-only construction of every declared
+  runtime environment.
+- Runtime-bound calibration receipts and conditional observation-model
+  evidence, including independent paired-summary verification.
 - CPU unit, contract, integration, and evaluation tests plus locked CI.
 - Architecture, installation, reproduction, evaluation, limitation,
   development, security, contribution, citation, notice, and status material.
@@ -52,12 +61,22 @@ and intends to use semantic versioning after its first public release.
 - Added fail-closed, process-local compatibility shims for the pinned
   inference sources plus offline symbol-import receipts for every runtime
   environment.
+- Made the four ablation modes executable and explicit: B-only uses an
+  observation-preserving identity restoration boundary, fixed groups disclose
+  their fixed acceptance policy, and only ScaleGuard uses the trusted
+  controller.
 
 ### Security
 
 - Added argument redaction, shell-free process templates, timeouts,
   process-group termination, service-port ownership checks, safe model-archive
   materialization, receipt hashing, and allowlisted diagnostic collection.
+- Hardened public AutoDL startup against shell-function/startup poisoning and
+  ambient repository redirection; isolated every stage in a fresh HOME with
+  user/system tool configuration disabled; bounded every owned process group
+  after leader exit and bounded partial CoZ protocol responses.
+- Prevented 4KAgent diagnostic logs from embedding source-image bytes and made
+  diagnostic collection reject parameterized base64 image data URLs.
 - Security-updated every GPU environment to PyTorch 2.10.0 with official CUDA
   12.6 wheels and rejected older runtimes at the overlay boundary for
   CVE-2026-24747. Enforced the CUDA 12.6 minimum NVIDIA driver separately.

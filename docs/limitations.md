@@ -142,10 +142,11 @@ MUSIQ, and CLIPIQA execution are implemented. The learned metrics are optional
 PyIQA adapters: they require explicit local weights, block implicit network
 access, and have no project-generated scores yet.
 
-The declared ablation file is still protocol-only. The repository does not yet
+The declared ablation protocol and four-group evidence orchestrator are
+executable, but no authorized suite has been run. The repository does not yet
 provide aggregate statistical or systems reporting, an authorized dataset
-split, a completed four-group study, or human-preference evidence. A metric
-receipt demonstrates execution and provenance, not research validity.
+split, a completed four-group study, or human-preference evidence. A suite or
+metric receipt demonstrates execution and provenance, not research validity.
 
 A valid receipt needs at least the configured number of acceptable real
 samples, but that minimum is not a guarantee of statistical power or population

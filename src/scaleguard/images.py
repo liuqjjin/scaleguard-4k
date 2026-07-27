@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import shutil
 from pathlib import Path
 
 from PIL import Image
 
 from scaleguard.contracts import ImageArtifact
-from scaleguard.errors import ArtifactError
+from scaleguard.errors import ArtifactError, ScaleGuardError
+from scaleguard.provenance import load_regular_file_snapshot
 
 SUPPORTED_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".bmp"}
 
@@ -25,21 +27,24 @@ def file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
 def inspect_image(path: Path, *, mock: bool, stage: str) -> ImageArtifact:
     """Validate an image eagerly and return immutable provenance."""
 
-    if not path.is_file():
-        raise ArtifactError(f"{stage} image does not exist: {path}")
     try:
-        with Image.open(path) as image:
+        payload, digest = load_regular_file_snapshot(path, f"{stage} image")
+        with Image.open(io.BytesIO(payload)) as image:
             image.verify()
-        with Image.open(path) as image:
+        with Image.open(io.BytesIO(payload)) as image:
             width, height = image.size
             media_type = Image.MIME.get(image.format or "", "application/octet-stream")
+    except ScaleGuardError as error:
+        if not path.exists():
+            raise ArtifactError(f"{stage} image does not exist: {path}") from error
+        raise ArtifactError(f"{stage} artifact is unsafe: {path}: {error}") from error
     except (OSError, ValueError) as error:
         raise ArtifactError(f"{stage} artifact is not a readable image: {path}: {error}") from error
     if width <= 0 or height <= 0:
         raise ArtifactError(f"{stage} image has invalid dimensions {width}x{height}: {path}")
     return ImageArtifact(
         path=path.resolve(),
-        sha256=file_sha256(path),
+        sha256=digest,
         width=width,
         height=height,
         media_type=media_type,

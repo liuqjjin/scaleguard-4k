@@ -28,7 +28,11 @@ from scaleguard.evaluation.metrics import (
 from scaleguard.evaluation.summary import EXPERIMENT_GROUPS, summarize_paired_manifests
 from scaleguard.factory import build_backends
 from scaleguard.manifest import validate_run_manifest
-from scaleguard.provenance import load_regular_file_snapshot, validate_runtime_preflight
+from scaleguard.provenance import (
+    bind_runtime_config,
+    load_regular_file_snapshot,
+    validate_runtime_preflight,
+)
 from scaleguard.upstream import verify_upstreams
 
 
@@ -317,6 +321,12 @@ def _parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help="base for relative artifacts; enables use outside a checkout",
     )
+    summarize.add_argument(
+        "--suite-receipt",
+        type=Path,
+        metavar="RECEIPT",
+        help=("validated ablation suite receipt required for research-eligible paired results"),
+    )
 
     metrics = evaluation_subparsers.add_parser(
         "metrics",
@@ -427,7 +437,15 @@ def _run_command(args: argparse.Namespace, project_root: Path) -> int:
             raise ScaleGuardError(
                 "runtime config snapshot digest disagrees with the validated preflight"
             )
-        config = parse_config(config_payload, source=args.config)
+        parsed_config = parse_config(config_payload, source=args.config)
+        binding = validated.get("runtime_execution_binding")
+        if validated.get("runtime_profile_bound") is not True or not isinstance(binding, dict):
+            raise ScaleGuardError("runtime preflight did not bind the audited execution profile")
+        config = bind_runtime_config(
+            parsed_config,
+            project_root=project_root,
+            binding=binding,
+        )
         provenance.update(validated)
     else:
         config = _override_target(load_config(args.config), args.target_factor)
@@ -569,6 +587,7 @@ def _evaluation_command(
             args.output_csv,
             args.output_json,
             artifact_root=artifact_root,
+            suite_receipt=args.suite_receipt,
         )
         print(
             json.dumps(

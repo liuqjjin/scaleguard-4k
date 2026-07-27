@@ -13,14 +13,18 @@ claim boundary is [results/STATUS.md](results/STATUS.md).
   upstreams. Keep AgenticIR as lineage only and DepictQA as a pinned 4KAgent
   transitive runtime dependency.
 - Review version, date, and public metadata in `pyproject.toml`, `CHANGELOG.md`,
-  `CITATION.cff`, `NOTICE`, `SECURITY.md`, and this status document.
+  `CITATION.cff`, `NOTICE`, `SECURITY.md`, and this status document. Keep the
+  package version identical in `src/scaleguard/_version.py` and in the
+  environment expectations in `src/scaleguard/provenance.py`,
+  `scripts/autodl/_common.sh`, and `scripts/bootstrap/autodl.sh`.
 - Before a public numbered release, create or select the canonical GitHub
   repository, then add its exact URLs to `pyproject.toml` and `CITATION.cff`.
   The current workspace has no configured remote, so maintainers must not
   invent an owner, issue tracker, source URL, or release URL in metadata.
 - Verify that `uv.lock`, `upstream-lock.yaml`, `runtime-dependencies.yaml`,
-  `weights-lock.json`, patches, overlays, and environment locks are part of the
-  candidate revision.
+  `weights-lock.json`, `environments/python-downloads.json`,
+  `environments/bootstrap/uv-binary.sha256`, patches, overlays, and environment
+  locks are part of the candidate revision.
 - Ensure that credentials, datasets, model weights, upstream checkouts, local
   environments, run outputs, receipts, diagnostics, and private absolute paths
   are absent from the candidate.
@@ -41,7 +45,7 @@ uv run --locked mypy src/scaleguard
 
 pycache="$(mktemp -d)"
 PYTHONPYCACHEPREFIX="$pycache" \
-  uv run --locked python -m compileall -q \
+  uv run --locked python -I -m compileall -q \
     src scripts examples tests third_party/overlays
 
 find scripts external_gate -type f -name '*.sh' -print0 | xargs -0 shellcheck
@@ -51,7 +55,7 @@ CUDA_VISIBLE_DEVICES="" \
 HF_HUB_OFFLINE=1 \
 TRANSFORMERS_OFFLINE=1 \
 SCALEGUARD_TEST_MODE=cpu \
-  uv run --locked python -m pytest \
+  uv run --locked python -I -m pytest \
     --cov=scaleguard --cov-report=term-missing -q
 
 bash scripts/run_cpu_demo.sh

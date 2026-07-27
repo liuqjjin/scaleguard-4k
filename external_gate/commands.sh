@@ -1,4 +1,14 @@
-#!/usr/bin/env bash
+#!/bin/bash -p
+# shellcheck shell=bash
+if [[ $- != *p* ]]; then
+    printf '%s\n' "error: invoke this gate directly; an explicit Bash must use -p" >&2
+    exit 2
+fi
+while IFS= read -r sg_imported_function; do
+    builtin unset -f -- "${sg_imported_function}"
+done < <(builtin compgen -A function)
+builtin unset sg_imported_function
+builtin set +x +v
 set -Eeuo pipefail
 
 sg_gate_source="${BASH_SOURCE[0]}"
@@ -11,16 +21,16 @@ if [[ "${sg_gate_dir}" != /* ]]; then
 fi
 cd -- "${sg_gate_dir}/.."
 sg_repo_root="${PWD}"
-export SCALEGUARD_REPO_ROOT="${sg_repo_root}"
 cd "${sg_repo_root}"
 # shellcheck source=scripts/autodl/_common.sh
+# shellcheck disable=SC1091
 source "${sg_repo_root}/scripts/autodl/_common.sh"
 
 sg_collect_on_failure() {
     local sg_gate_rc=$?
     if [[ "${sg_gate_rc}" -ne 0 ]]; then
         set +e
-        "${BASH}" scripts/autodl/collect_diagnostics.sh
+        scripts/autodl/collect_diagnostics.sh
         set -e
     fi
     trap - EXIT
@@ -38,8 +48,8 @@ export SCALEGUARD_WEIGHTS_MANIFEST="${SCALEGUARD_WEIGHTS_MANIFEST:-${sg_repo_roo
 export HF_HOME="${HF_HOME:-${SCALEGUARD_CACHE_ROOT}/huggingface}"
 sg_resolve_autodl_scheduler_envs
 
-sg_run_sanitized bash scripts/autodl/check_gpu.sh
-sg_run_sanitized bash scripts/autodl/bootstrap.sh
+sg_run_sanitized scripts/autodl/check_gpu.sh
+sg_run_sanitized scripts/autodl/bootstrap.sh
 [[ -f "${SCALEGUARD_WEIGHTS_MANIFEST}" ]] || {
     printf 'error: weight manifest not found: %s\n' "${SCALEGUARD_WEIGHTS_MANIFEST}" >&2
     exit 1
@@ -55,7 +65,7 @@ then
     exit 1
 fi
 sg_run_with_download_credentials \
-    bash scripts/autodl/download_weights.sh --manifest "${SCALEGUARD_WEIGHTS_MANIFEST}"
+    scripts/autodl/download_weights.sh --manifest "${SCALEGUARD_WEIGHTS_MANIFEST}"
 if [[ -z "${!SG_AUTODL_SMOKE_SCHEDULER_ENV:-}" ]]; then
     printf 'error: enter %s with hidden shell input before model execution\n' \
         "${SG_AUTODL_SMOKE_SCHEDULER_ENV}" >&2
@@ -68,11 +78,11 @@ if [[ -z "${!SG_AUTODL_INTEGRATION_SCHEDULER_ENV:-}" ]]; then
 fi
 sg_run_with_scheduler_credential \
     "${SG_AUTODL_SMOKE_SCHEDULER_ENV}" \
-    bash scripts/autodl/run_smoke.sh --input "${SCALEGUARD_SMOKE_INPUT}"
+    scripts/autodl/run_smoke.sh --input "${SCALEGUARD_SMOKE_INPUT}"
 sg_run_with_scheduler_credential \
     "${SG_AUTODL_INTEGRATION_SCHEDULER_ENV}" \
-    bash scripts/autodl/run_integration.sh --input "${SCALEGUARD_INTEGRATION_INPUT}"
-"${BASH}" scripts/autodl/collect_diagnostics.sh
+    scripts/autodl/run_integration.sh --input "${SCALEGUARD_INTEGRATION_INPUT}"
+scripts/autodl/collect_diagnostics.sh
 
 printf '%s\n' "Gate commands completed. Review every manifest and the diagnostics archive;"
 printf '%s\n' "do not infer a reproduction level from this wrapper's exit code alone."

@@ -48,13 +48,13 @@ cd -- "${demo_root}"
 
 printf '[1/5] Generate deterministic fixture\n'
 uv run --locked --project "${project_root}" \
-  python "${project_root}/examples/make_fixture.py" "${input_path}"
+  python -I "${project_root}/examples/make_fixture.py" "${input_path}"
 
 printf '[2/5] Validate CPU/mock configuration and isolate its run root\n'
 uv run --locked --project "${project_root}" \
   scaleguard config validate "${config_path}"
 uv run --locked --project "${project_root}" \
-  python - "${config_path}" "${runtime_config_path}" "${demo_root}/runs" <<'PY'
+  python -I - "${config_path}" "${runtime_config_path}" "${demo_root}/runs" <<'PY'
 from __future__ import annotations
 
 import sys
@@ -87,7 +87,7 @@ uv run --locked --project "${project_root}" \
 
 printf '[5/5] Verify evidence labels and final artifact hash\n'
 uv run --locked --project "${project_root}" \
-  python - "${manifest_path}" "${output_path}" "${project_root}/src" <<'PY'
+  python -I - "${manifest_path}" "${output_path}" "${project_root}/src" <<'PY'
 from __future__ import annotations
 
 import hashlib

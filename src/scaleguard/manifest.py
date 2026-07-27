@@ -8,9 +8,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from scaleguard.config import EXPERIMENT_GROUP_SEMANTICS
 from scaleguard.contracts import CompletionLevel, Decision, RunStatus
 from scaleguard.errors import ArtifactError, ConfigurationError, ScaleGuardError
 from scaleguard.images import inspect_image
+from scaleguard.imaging.forward_models import build_forward_model
 from scaleguard.strict_json import StrictJSONError, loads
 
 _SUPPORTED_FACTORS = {1, 2, 4, 8, 16}
@@ -138,7 +140,13 @@ def _artifact(
     }
 
 
-def _metric_record(value: object, context: str) -> dict[str, Any]:
+def _metric_record(
+    value: object,
+    context: str,
+    *,
+    measurement_enabled: bool,
+    measurement_model: str,
+) -> dict[str, Any]:
     raw = _object(value, context)
     for key in (
         "quality_baseline",
@@ -150,11 +158,17 @@ def _metric_record(value: object, context: str) -> dict[str, Any]:
         _number(raw, key, context)
     _text(raw, "quality_backend", context)
     measurement = raw.get("measurement_nrmse")
-    if measurement is not None:
+    observed_measurement_model = raw.get("measurement_model")
+    if measurement_enabled:
         _number(raw, "measurement_nrmse", context)
-        _text(raw, "measurement_model", context)
-    elif raw.get("measurement_model") is not None:
-        raise ManifestValidationError(f"{context}.measurement_model requires measurement_nrmse")
+        if _text(raw, "measurement_model", context) != measurement_model:
+            raise ManifestValidationError(
+                f"{context}.measurement_model disagrees with config.metrics.measurement_model"
+            )
+    elif measurement is not None or observed_measurement_model is not None:
+        raise ManifestValidationError(
+            f"{context} records measurement evidence while measurement consistency is disabled"
+        )
     expected_gain = _number(raw, "quality_candidate", context) - _number(
         raw, "quality_baseline", context
     )
@@ -284,11 +298,54 @@ def validate_run_manifest(
     config = _object(manifest["config"], "manifest.config")
     provenance = _object(manifest["provenance"], "manifest.provenance")
     metric_config = _object(config.get("metrics"), "manifest.config.metrics")
+    runtime_config = _object(config.get("runtime"), "manifest.config.runtime")
     fourkagent_config = _object(
         config.get("fourkagent"),
         "manifest.config.fourkagent",
     )
     coz_config = _object(config.get("coz"), "manifest.config.coz")
+    controller_config = _object(
+        config.get("controller"),
+        "manifest.config.controller",
+    )
+    acceptance_policy = _text(
+        controller_config,
+        "acceptance_policy",
+        "manifest.config.controller",
+    )
+    if acceptance_policy not in {"trusted", "fixed"}:
+        raise ManifestValidationError("manifest config has an invalid acceptance policy")
+    experiment_group = runtime_config.get("experiment_group")
+    experiment_sample_id = runtime_config.get("experiment_sample_id")
+    if (experiment_group is None) != (experiment_sample_id is None):
+        raise ManifestValidationError("manifest experiment identifiers are incomplete")
+    if experiment_group is not None:
+        if experiment_group not in EXPERIMENT_GROUP_SEMANTICS:
+            raise ManifestValidationError("manifest experiment group is not declared")
+        if not isinstance(experiment_sample_id, str) or not _safe_run_id(experiment_sample_id):
+            raise ManifestValidationError("manifest experiment sample id is unsafe")
+        expected = EXPERIMENT_GROUP_SEMANTICS[experiment_group]
+        observed = (
+            fourkagent_config.get("mode"),
+            coz_config.get("mode"),
+            controller_config.get("target_factor"),
+            controller_config.get("max_coz_steps"),
+            acceptance_policy,
+        )
+        if observed != expected:
+            raise ManifestValidationError(
+                f"manifest {experiment_group} config violates its fixed experiment semantics"
+            )
+    if acceptance_policy == "fixed" and experiment_group not in {
+        "A-only",
+        "B-only",
+        "AB-fixed",
+    }:
+        raise ManifestValidationError(
+            "fixed acceptance is reserved for declared component/fixed ablations"
+        )
+    if fourkagent_config.get("mode") == "identity" and experiment_group != "B-only":
+        raise ManifestValidationError("identity restoration is reserved for the B-only manifest")
     configured_mock = fourkagent_config.get("mode") == "fake" or coz_config.get("mode") == "fake"
     if mock != configured_mock:
         raise ManifestValidationError("manifest.mock disagrees with configured backend modes")
@@ -301,11 +358,33 @@ def validate_run_manifest(
             "max_measurement_nrmse",
         )
     }
+    measurement_enabled = _boolean(
+        metric_config,
+        "measurement_enabled",
+        "manifest.config.metrics",
+    )
+    measurement_model_selector = _text(
+        metric_config,
+        "measurement_model",
+        "manifest.config.metrics",
+    )
+    measurement_parameters = _object(
+        metric_config.get("measurement_parameters"),
+        "manifest.config.metrics.measurement_parameters",
+    )
+    try:
+        measurement_model = build_forward_model(
+            measurement_model_selector,
+            measurement_parameters,
+        ).name
+    except ConfigurationError as error:
+        raise ManifestValidationError(
+            f"manifest.config.metrics has an invalid measurement model: {error}"
+        ) from error
     requested = _integer(manifest, "requested_factor", "manifest")
     if requested not in _SUPPORTED_FACTORS:
         raise ManifestValidationError("manifest.requested_factor is unsupported")
-    controller_config = config.get("controller")
-    if isinstance(controller_config, dict) and controller_config.get("target_factor") != requested:
+    if controller_config.get("target_factor") != requested:
         raise ManifestValidationError(
             "manifest.requested_factor disagrees with config.controller.target_factor"
         )
@@ -422,7 +501,12 @@ def validate_run_manifest(
                 raise ManifestValidationError(f"{context}.candidate dimensions are not exactly 4x")
         metrics_value = step.get("metrics")
         metrics = (
-            _metric_record(metrics_value, f"{context}.metrics")
+            _metric_record(
+                metrics_value,
+                f"{context}.metrics",
+                measurement_enabled=measurement_enabled,
+                measurement_model=measurement_model,
+            )
             if metrics_value is not None
             else None
         )
@@ -442,6 +526,10 @@ def validate_run_manifest(
             raise ManifestValidationError(f"{context} has metrics without a candidate")
         if decision is Decision.CONTINUE and not accepted:
             raise ManifestValidationError(f"{context} continue decision must be accepted")
+        if decision is Decision.CONTINUE and position == expected_steps:
+            raise ManifestValidationError(
+                f"{context} final planned scale decision must stop or rollback"
+            )
         if decision is Decision.ROLLBACK and accepted:
             raise ManifestValidationError(f"{context} rollback decision cannot be accepted")
         gates_passed = (
@@ -449,18 +537,27 @@ def validate_run_manifest(
             if metrics is not None
             else False
         )
-        if accepted and not gates_passed:
+        if accepted and not gates_passed and acceptance_policy == "trusted":
             raise ManifestValidationError(f"{context} accepted metrics that fail configured gates")
         if (
             metrics is not None
             and not accepted
-            and gates_passed
-            and decision is not Decision.ROLLBACK
+            and (
+                acceptance_policy == "fixed" or (gates_passed and decision is not Decision.ROLLBACK)
+            )
         ):
-            raise ManifestValidationError(f"{context} rejected metrics that pass configured gates")
+            raise ManifestValidationError(
+                f"{context} rejected metrics contrary to its acceptance policy"
+            )
+        reason = _text(step, "reason", context)
+        if (
+            acceptance_policy == "fixed"
+            and metrics is not None
+            and not reason.startswith("fixed ablation policy accepted")
+        ):
+            raise ManifestValidationError(f"{context} does not disclose fixed acceptance")
         if decision is not Decision.CONTINUE:
             terminated = True
-        _text(step, "reason", context)
         step_started = _timestamp(step.get("started_at"), f"{context}.started_at")
         step_finished = _timestamp(step.get("finished_at"), f"{context}.finished_at")
         if step_started is None or step_finished is None or step_finished < step_started:
@@ -480,7 +577,23 @@ def validate_run_manifest(
     final_metrics = _object(manifest["final_metrics"], "manifest.final_metrics")
     if final_metrics:
         _boolean(final_metrics, "after_color_alignment", "manifest.final_metrics")
-        _boolean(final_metrics, "gate_passed", "manifest.final_metrics")
+        gate_passed = _boolean(final_metrics, "gate_passed", "manifest.final_metrics")
+        accepted_by_policy = _boolean(
+            final_metrics,
+            "accepted_by_policy",
+            "manifest.final_metrics",
+        )
+        if (
+            _text(
+                final_metrics,
+                "acceptance_policy",
+                "manifest.final_metrics",
+            )
+            != acceptance_policy
+        ):
+            raise ManifestValidationError(
+                "manifest.final_metrics acceptance policy disagrees with config"
+            )
         _text(final_metrics, "gate_reason", "manifest.final_metrics")
         selected_scale = _number(
             final_metrics,
@@ -495,15 +608,22 @@ def validate_run_manifest(
         final_metric_record = _metric_record(
             final_metrics.get("metrics"),
             "manifest.final_metrics.metrics",
+            measurement_enabled=measurement_enabled,
+            measurement_model=measurement_model,
         )
         bridge = _BRIDGE_FACTORS[requested]
-        if not _passes_gates(
+        observed_gate_pass = _passes_gates(
             final_metric_record,
             thresholds,
             require_quality=selected_scale > bridge,
-        ):
+        )
+        if gate_passed != observed_gate_pass:
             raise ManifestValidationError(
-                "manifest.final_metrics claims a pass for metrics outside configured gates"
+                "manifest.final_metrics gate result disagrees with configured gates"
+            )
+        if accepted_by_policy != (observed_gate_pass or acceptance_policy == "fixed"):
+            raise ManifestValidationError(
+                "manifest.final_metrics policy result disagrees with configured acceptance"
             )
 
     events = manifest["events"]
@@ -537,8 +657,8 @@ def validate_run_manifest(
             raise ManifestValidationError(
                 "manifest.final_image dimensions disagree with achieved_factor"
             )
-        if not final_metrics or final_metrics.get("gate_passed") is not True:
-            raise ManifestValidationError("successful manifest requires passed final gates")
+        if not final_metrics or final_metrics.get("accepted_by_policy") is not True:
+            raise ManifestValidationError("successful manifest requires a policy-accepted final")
         if target_reached and (
             len(raw_steps) != expected_steps or accepted_candidates != expected_steps
         ):
@@ -572,43 +692,47 @@ def validate_run_manifest(
             "COMPONENT_REPRODUCED requires a successful non-mock recorded candidate"
         )
     if completion is CompletionLevel.AB_INTEGRATED and (
-        status is not RunStatus.SUCCEEDED or mock or not target_reached or accepted_candidates == 0
+        status is not RunStatus.SUCCEEDED
+        or mock
+        or not target_reached
+        or accepted_candidates == 0
+        or acceptance_policy != "trusted"
     ):
         raise ManifestValidationError(
-            "AB_INTEGRATED requires a successful non-mock target-reaching accepted candidate"
+            "AB_INTEGRATED requires a successful trusted non-mock target-reaching candidate"
         )
     runtime_completion = completion in {
         CompletionLevel.COMPONENT_REPRODUCED,
         CompletionLevel.AB_INTEGRATED,
     }
-    if runtime_completion:
-        if provenance.get("runtime_evidence_verified") is not True:
+    requires_runtime_attestation = coz_config.get("mode") == "persistent" and fourkagent_config.get(
+        "mode"
+    ) in {"upstream", "identity"}
+    if runtime_completion or requires_runtime_attestation:
+        claim = completion.value if runtime_completion else "audited runtime"
+        if (
+            provenance.get("runtime_evidence_verified") is not True
+            or provenance.get("runtime_profile_bound") is not True
+        ):
             raise ManifestValidationError(
-                f"{completion.value} requires verified runtime preflight provenance"
+                f"{claim} requires verified and profile-bound runtime provenance"
             )
         preflight_path = provenance.get("runtime_preflight_receipt")
         project_root = provenance.get("project_root")
         config_path = provenance.get("runtime_config_path")
         config_digest = provenance.get("runtime_config_sha256")
         if not isinstance(preflight_path, str) or not preflight_path:
-            raise ManifestValidationError(
-                f"{completion.value} runtime preflight provenance is incomplete"
-            )
+            raise ManifestValidationError(f"{claim} runtime preflight provenance is incomplete")
         if not isinstance(project_root, str) or not project_root:
-            raise ManifestValidationError(
-                f"{completion.value} runtime preflight provenance is incomplete"
-            )
+            raise ManifestValidationError(f"{claim} runtime preflight provenance is incomplete")
         if not isinstance(config_path, str) or not config_path:
-            raise ManifestValidationError(
-                f"{completion.value} runtime preflight provenance is incomplete"
-            )
+            raise ManifestValidationError(f"{claim} runtime preflight provenance is incomplete")
         if not isinstance(config_digest, str) or not config_digest:
-            raise ManifestValidationError(
-                f"{completion.value} runtime preflight provenance is incomplete"
-            )
+            raise ManifestValidationError(f"{claim} runtime preflight provenance is incomplete")
         from scaleguard.config import parse_config
         from scaleguard.provenance import (
             RuntimePreflightError,
+            bind_runtime_config,
             load_regular_file_snapshot,
             validate_runtime_preflight,
         )
@@ -623,36 +747,57 @@ def validate_run_manifest(
                 Path(config_path),
                 "runtime config",
             )
-            current_config = parse_config(config_payload, source=Path(config_path))
+            parsed_config = parse_config(config_payload, source=Path(config_path))
+            binding = validated_provenance.get("runtime_execution_binding")
+            if not isinstance(binding, dict):
+                raise RuntimePreflightError(
+                    "runtime preflight did not reconstruct an execution binding"
+                )
+            current_config = bind_runtime_config(
+                parsed_config,
+                project_root=Path(project_root),
+                binding=binding,
+            )
         except (ConfigurationError, RuntimePreflightError) as error:
             raise ManifestValidationError(
-                f"{completion.value} runtime preflight is invalid: {error}"
+                f"{claim} runtime preflight is invalid: {error}"
             ) from error
-        if validated_provenance.get("runtime_preflight_sha256") != provenance.get(
-            "runtime_preflight_sha256"
-        ):
+        mismatched_provenance = [
+            field
+            for field, expected in validated_provenance.items()
+            if provenance.get(field) != expected
+        ]
+        if mismatched_provenance:
             raise ManifestValidationError(
-                f"{completion.value} runtime preflight digest disagrees with provenance"
+                f"{claim} runtime provenance disagrees with current evidence: "
+                + ", ".join(sorted(mismatched_provenance))
             )
         if (
             validated_provenance.get("runtime_config_sha256") != config_digest
             or current_config_digest != config_digest
         ):
             raise ManifestValidationError(
-                f"{completion.value} runtime config digest disagrees with provenance"
+                f"{claim} runtime config digest disagrees with provenance"
             )
         if current_config.as_dict() != config:
             raise ManifestValidationError(
-                f"{completion.value} manifest config differs from its preflighted config"
+                f"{claim} manifest config differs from its preflighted config"
             )
-        if (
+        if experiment_group == "B-only":
+            if (
+                restoration_metadata.get("backend") != "scaleguard_identity_observation"
+                or restoration_metadata.get("algorithmic_restoration") is not False
+                or restoration_process is not None
+            ):
+                raise ManifestValidationError(
+                    "B-only requires the non-algorithmic identity observation"
+                )
+        elif (
             restoration_metadata.get("backend") != "4kagent_upstream"
             or restoration_process is None
             or restoration_process.get("returncode") != 0
         ):
-            raise ManifestValidationError(
-                f"{completion.value} requires 4KAgent upstream process evidence"
-            )
+            raise ManifestValidationError(f"{claim} requires 4KAgent upstream process evidence")
         for index, value in enumerate(raw_steps):
             step = _object(value, f"manifest.steps[{index}]")
             candidate_value = step.get("candidate")
@@ -667,9 +812,7 @@ def validate_run_manifest(
                 "chain_of_zoom_subprocess",
                 "chain_of_zoom_persistent",
             }:
-                raise ManifestValidationError(
-                    f"{completion.value} requires Chain-of-Zoom worker evidence"
-                )
+                raise ManifestValidationError(f"{claim} requires Chain-of-Zoom worker evidence")
             step_process = _process(
                 step.get("process"),
                 f"manifest.steps[{index}].process",
@@ -678,20 +821,19 @@ def validate_run_manifest(
                 step_process is None or step_process.get("returncode") != 0
             ):
                 raise ManifestValidationError(
-                    f"{completion.value} one-shot CoZ steps require successful process evidence"
+                    f"{claim} one-shot CoZ steps require successful process evidence"
                 )
             if backend == "chain_of_zoom_persistent" and (
                 scale_session_process is None or scale_session_process.get("returncode") != 0
             ):
                 raise ManifestValidationError(
-                    f"{completion.value} persistent CoZ requires successful "
-                    "session process evidence"
+                    f"{claim} persistent CoZ requires successful session process evidence"
                 )
             if metadata.get("candidate_sha256") != _object(
                 candidate_value,
                 f"manifest.steps[{index}].candidate",
             ).get("sha256"):
                 raise ManifestValidationError(
-                    f"{completion.value} candidate hash disagrees with CoZ worker metadata"
+                    f"{claim} candidate hash disagrees with CoZ worker metadata"
                 )
     return manifest

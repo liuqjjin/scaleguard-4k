@@ -27,6 +27,24 @@ def test_evidence_helpers_reject_missing_files_and_non_object_json(tmp_path: Pat
         load_json_object(document, kind="receipt")
 
 
+def test_json_object_hash_and_parse_share_one_regular_file_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = tmp_path / "receipt.json"
+    document.write_bytes(b'{"status":"passed"}\n')
+    expected = sha256_file(document)
+
+    def reject_second_path_read(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("load_json_object reopened the evidence path")
+
+    monkeypatch.setattr(Path, "read_text", reject_second_path_read)
+    payload, digest = load_json_object(document, kind="receipt")
+
+    assert payload == {"status": "passed"}
+    assert digest == expected
+
+
 def test_atomic_evidence_write_removes_a_failed_temporary_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

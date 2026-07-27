@@ -147,6 +147,25 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _install_redacted_image_logging(base_llm_module: Any) -> None:
+    """Keep upstream chat logs useful without embedding private image bytes."""
+
+    if not callable(getattr(base_llm_module, "encode_img", None)):
+        raise RuntimeError("4KAgent BaseLLM image-logging API does not match the audited contract")
+
+    def summarize_image(image_path: str | os.PathLike[str]) -> str:
+        path = Path(image_path)
+        digest = hashlib.sha256()
+        size = 0
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                size += len(chunk)
+                digest.update(chunk)
+        return f"scaleguard-image-redacted;sha256={digest.hexdigest()};bytes={size}"
+
+    base_llm_module.encode_img = summarize_image
+
+
 def _git_status(checkout: Path) -> str:
     result = subprocess.run(
         ["git", "-C", str(checkout), "status", "--porcelain=v1", "--untracked-files=all"],
@@ -569,10 +588,12 @@ def main() -> int:
     _install_packaging_compatibility()
     _install_torchvision_compatibility()
     import executor.tool as tool_module
+    import llm.base_llm as base_llm_module
     import llm.gpt4 as gpt4_module
     import llm.qwen_vl as qwen_module
     import pipeline.the4kagent_pipeline as pipeline_module
 
+    _install_redacted_image_logging(base_llm_module)
     _install_locked_hpsv2(
         hpsv2_bpe,
         hps_root / "HPS_v2.1_compressed.pt",

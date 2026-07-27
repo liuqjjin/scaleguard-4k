@@ -114,9 +114,10 @@ its validation limits.
 Model acquisition is independent of source checkout materialization. The
 audited model revisions and digests are in `weights-lock.json`; the downloader
 stores them below its selected weight root and writes a content receipt.
-CoZ's small tracked checkpoint files are also present in its checkout. The
-runtime configuration deliberately uses those checkout copies, whose bytes
-must match the same digests recorded in the weight lock.
+CoZ's checkout may contain small tracked checkpoint files, but the audited
+runtime does not select them. Runtime paths are bound to the separately
+materialized weight root, and the preflight verifies those exact files against
+the download and materialization receipts.
 
 Upstream code, embedded tools, model weights, and datasets retain their own
 licenses. The complete Chain-of-Zoom MIT text is retained in

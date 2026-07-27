@@ -15,6 +15,7 @@ import numpy as np
 import numpy.typing as npt
 
 from scaleguard.config import PipelineConfig, load_config
+from scaleguard.errors import ScaleGuardError
 from scaleguard.evaluation.evidence import (
     EvaluationEvidenceError,
     canonical_sha256,
@@ -25,6 +26,7 @@ from scaleguard.evaluation.evidence import (
     sha256_file,
     verify_artifact,
 )
+from scaleguard.imaging.forward_models import build_forward_model
 
 RECEIPT_SCHEMA = "scaleguard.calibration-receipt/v1"
 
@@ -496,10 +498,62 @@ def calibrate_from_manifests(
     return receipt
 
 
-def _expected_quality_backend(config: PipelineConfig) -> str:
-    if config.metrics.quality_backend == "gradient_proxy":
+def _calibration_config_values(
+    config: PipelineConfig | Mapping[str, Any],
+    reasons: list[str],
+) -> dict[str, Any] | None:
+    if isinstance(config, PipelineConfig):
+        return {
+            "quality_backend": config.metrics.quality_backend,
+            "quality_metric": config.metrics.quality_metric,
+            "measurement_enabled": config.metrics.measurement_enabled,
+            "measurement_model": config.metrics.measurement_model,
+            "measurement_parameters": config.metrics.measurement_parameters,
+            "min_quality_gain": config.metrics.min_quality_gain,
+            "max_scale_nrmse": config.metrics.max_scale_nrmse,
+            "max_scale_edge_mae": config.metrics.max_scale_edge_mae,
+            "max_measurement_nrmse": config.metrics.max_measurement_nrmse,
+        }
+    metrics = config.get("metrics")
+    if not isinstance(metrics, Mapping):
+        reasons.append("config_metrics_missing")
+        return None
+    text_fields = ("quality_backend", "quality_metric", "measurement_model")
+    numeric_fields = (
+        "min_quality_gain",
+        "max_scale_nrmse",
+        "max_scale_edge_mae",
+        "max_measurement_nrmse",
+    )
+    invalid = [
+        name
+        for name in text_fields
+        if not isinstance(metrics.get(name), str) or not metrics.get(name)
+    ]
+    invalid.extend(
+        name
+        for name in numeric_fields
+        if isinstance(metrics.get(name), bool)
+        or not isinstance(metrics.get(name), (int, float))
+        or not math.isfinite(float(metrics[name]))
+    )
+    if type(metrics.get("measurement_enabled")) is not bool:
+        invalid.append("measurement_enabled")
+    if not isinstance(metrics.get("measurement_parameters"), dict):
+        invalid.append("measurement_parameters")
+    if invalid:
+        reasons.extend(f"config_metric_invalid:{name}" for name in sorted(set(invalid)))
+        return None
+    return {name: metrics[name] for name in (*text_fields, *numeric_fields)} | {
+        "measurement_enabled": metrics["measurement_enabled"],
+        "measurement_parameters": metrics["measurement_parameters"],
+    }
+
+
+def _expected_quality_backend(config: Mapping[str, Any]) -> str:
+    if config["quality_backend"] == "gradient_proxy":
         return "gradient_proxy_v1"
-    return f"pyiqa:{config.metrics.quality_metric}"
+    return f"pyiqa:{config['quality_metric']}"
 
 
 def _is_sha256(value: Any) -> bool:
@@ -571,15 +625,14 @@ def _validate_threshold_entry(name: str, entry: Mapping[str, Any], reasons: list
         reasons.append(f"bootstrap_ci_invalid:{name}")
 
 
-def verify_calibration_receipt(
-    receipt_path: Path,
-    config: PipelineConfig | Path,
+def verify_calibration_document(
+    receipt: Mapping[str, Any],
+    config: PipelineConfig | Mapping[str, Any],
 ) -> tuple[bool, list[str]]:
-    """Verify receipt integrity, status, backend, and exact configured thresholds."""
+    """Verify one already-snapshotted receipt against exact metric settings."""
 
-    receipt, _ = load_json_object(receipt_path, kind="calibration receipt")
-    loaded_config = load_config(config) if isinstance(config, Path) else config
     reasons: list[str] = []
+    loaded_config = _calibration_config_values(config, reasons)
     if receipt.get("schema_version") != RECEIPT_SCHEMA:
         reasons.append("unsupported_schema")
     declared_digest = receipt.get("receipt_sha256")
@@ -594,10 +647,12 @@ def verify_calibration_receipt(
     backend = receipt.get("metric_backend")
     if not isinstance(backend, dict):
         reasons.append("metric_backend_missing")
+    elif loaded_config is None:
+        pass
     elif backend.get("quality") != _expected_quality_backend(loaded_config):
         reasons.append("quality_backend_mismatch")
     elif backend.get("quality_is_proxy") is not (
-        loaded_config.metrics.quality_backend == "gradient_proxy"
+        loaded_config["quality_backend"] == "gradient_proxy"
     ):
         reasons.append("quality_backend_proxy_flag_mismatch")
 
@@ -605,15 +660,25 @@ def verify_calibration_receipt(
     if not isinstance(raw_thresholds, dict):
         reasons.append("thresholds_missing")
         return False, reasons
+    if loaded_config is None:
+        return False, reasons
     expected = {
-        "min_quality_gain": loaded_config.metrics.min_quality_gain,
-        "max_scale_nrmse": loaded_config.metrics.max_scale_nrmse,
-        "max_scale_edge_mae": loaded_config.metrics.max_scale_edge_mae,
+        "min_quality_gain": loaded_config["min_quality_gain"],
+        "max_scale_nrmse": loaded_config["max_scale_nrmse"],
+        "max_scale_edge_mae": loaded_config["max_scale_edge_mae"],
     }
-    if loaded_config.metrics.measurement_enabled:
-        expected["max_measurement_nrmse"] = loaded_config.metrics.max_measurement_nrmse
+    if loaded_config["measurement_enabled"]:
+        expected["max_measurement_nrmse"] = loaded_config["max_measurement_nrmse"]
+        try:
+            expected_measurement_backend = build_forward_model(
+                loaded_config["measurement_model"],
+                loaded_config["measurement_parameters"],
+            ).name
+        except ScaleGuardError:
+            reasons.append("measurement_config_invalid")
+            expected_measurement_backend = None
         if not isinstance(backend, dict) or backend.get("measurement") != (
-            loaded_config.metrics.measurement_model
+            expected_measurement_backend
         ):
             reasons.append("measurement_backend_mismatch")
     unexpected_thresholds = sorted(set(raw_thresholds) - set(expected))
@@ -639,3 +704,14 @@ def verify_calibration_receipt(
             reasons.append(f"threshold_mismatch:{name}")
         _validate_threshold_entry(name, entry, reasons)
     return not reasons, reasons
+
+
+def verify_calibration_receipt(
+    receipt_path: Path,
+    config: PipelineConfig | Path,
+) -> tuple[bool, list[str]]:
+    """Verify receipt integrity, status, backend, and exact configured thresholds."""
+
+    receipt, _ = load_json_object(receipt_path, kind="calibration receipt")
+    loaded_config = load_config(config) if isinstance(config, Path) else config
+    return verify_calibration_document(receipt, loaded_config)

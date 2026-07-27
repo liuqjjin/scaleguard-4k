@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
 import signal
 import socket
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -97,6 +100,57 @@ def test_managed_service_reports_a_process_that_exits_before_listening(
     assert (tmp_path / "logs" / "early-exit.stderr.log").read_text(
         encoding="utf-8"
     ).strip() == "startup failed"
+
+
+def test_managed_service_reaps_descendants_when_the_leader_exits_during_startup(
+    tmp_path: Path,
+) -> None:
+    port = unused_port()
+    child_pid_path = tmp_path / "child.pid"
+    code = (
+        "import pathlib,subprocess,sys\n"
+        "child = subprocess.Popen("
+        "[sys.executable, '-I', '-c', 'import time; time.sleep(30)'], "
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid))\n"
+        "raise SystemExit(7)\n"
+    )
+    service = ManagedService(
+        (sys.executable, "-I", "-c", code),
+        cwd=tmp_path,
+        log_dir=tmp_path / "logs",
+        host=HOST,
+        port=port,
+        startup_timeout_seconds=2.0,
+        label="orphaning-service",
+    )
+
+    with pytest.raises(WorkerError, match="exited with code 7 before readiness"):
+        service.__enter__()
+
+    child_pid = int(child_pid_path.read_text(encoding="utf-8"))
+    try:
+        deadline = time.monotonic() + 1.0
+        while _process_is_running(child_pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not _process_is_running(child_pid)
+    finally:
+        if _process_is_running(child_pid):
+            os.kill(child_pid, signal.SIGKILL)
+
+
+def _process_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    status = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return status.returncode == 0 and not status.stdout.strip().startswith("Z")
 
 
 def test_managed_service_refuses_to_take_over_an_occupied_port(tmp_path: Path) -> None:

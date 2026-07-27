@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from scaleguard.errors import ScaleGuardError
+from scaleguard.provenance import RuntimePreflightError, load_regular_file_snapshot
 from scaleguard.strict_json import StrictJSONError, loads
 
 
@@ -81,10 +82,10 @@ def write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
 def load_json_object(path: Path, *, kind: str) -> tuple[dict[str, Any], str]:
     """Load a JSON object and return it with the exact input file hash."""
 
-    file_hash = sha256_file(path)
     try:
-        raw = loads(path.read_text(encoding="utf-8"))
-    except (OSError, StrictJSONError) as error:
+        payload, file_hash = load_regular_file_snapshot(path, kind)
+        raw = loads(payload)
+    except (RuntimePreflightError, StrictJSONError) as error:
         raise EvaluationEvidenceError(f"invalid {kind} JSON {path}: {error}") from error
     if not isinstance(raw, dict):
         raise EvaluationEvidenceError(f"{kind} must be a JSON object: {path}")

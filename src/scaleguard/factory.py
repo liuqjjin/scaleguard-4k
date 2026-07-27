@@ -9,6 +9,7 @@ from scaleguard.backends.command import CommandRestorationBackend, CommandScaleB
 from scaleguard.backends.coz import CoZBackend
 from scaleguard.backends.fake import FakeRestorationBackend, FakeScaleBackend
 from scaleguard.backends.fourkagent import FourKAgentBackend
+from scaleguard.backends.identity import IdentityRestorationBackend
 from scaleguard.config import PipelineConfig
 
 
@@ -19,6 +20,8 @@ def build_backends(
 ) -> tuple[RestorationBackend, ScaleBackend]:
     if config.fourkagent.mode == "fake":
         restoration: RestorationBackend = FakeRestorationBackend()
+    elif config.fourkagent.mode == "identity":
+        restoration = IdentityRestorationBackend()
     elif config.fourkagent.mode == "command":
         restoration = CommandRestorationBackend(config.fourkagent, config.runtime)
     else:

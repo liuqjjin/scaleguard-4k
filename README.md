@@ -69,7 +69,7 @@ For the complete development checks:
 uv run --locked ruff check .
 uv run --locked ruff format --check .
 uv run --locked mypy src/scaleguard
-uv run --locked python -m pytest --cov=scaleguard --cov-report=term-missing -q
+uv run --locked python -I -m pytest --cov=scaleguard --cov-report=term-missing -q
 ```
 
 ## Real runtime
@@ -82,9 +82,9 @@ third core project. Do not merge their PyTorch and Transformers stacks.
 On the target machine, after reviewing the installation and AutoDL guides:
 
 ```bash
-bash scripts/autodl/bootstrap.sh
-bash scripts/autodl/download_weights.sh
-bash scripts/autodl/run_smoke.sh \
+scripts/autodl/bootstrap.sh
+scripts/autodl/download_weights.sh
+scripts/autodl/run_smoke.sh \
   --config configs/runtime/autodl-2x4090.yaml \
   --input /path/to/authorized-smoke-image.png
 ```

@@ -37,8 +37,8 @@ src/scaleguard/
   imaging/        declared forward observation models
   metrics/        same-size quality and cross-scale checks
   runtime/        subprocess, service, and GPU-phase lifecycles
-configs/          runtime contracts and protocol-only experiments
-environments/     direct and hash-resolved runtime locks plus uv identity
+configs/          runtime contracts and executable experiment protocol
+environments/     dependency, uv-binary, and managed-Python identities
 third_party/      ScaleGuard overlays, patches, and ignored checkouts
 scripts/          upstream, bootstrap, experiment, and AutoDL entry points
 tests/            unit, contract, integration, and evaluation tests
@@ -82,7 +82,7 @@ Also validate the public mock path when changing CLI, configuration, images,
 controller state, or manifests:
 
 ```bash
-uv run --locked python examples/make_fixture.py /tmp/scaleguard-dev-input.jpg
+uv run --locked python -I examples/make_fixture.py /tmp/scaleguard-dev-input.jpg
 uv run --locked scaleguard run \
   --config configs/runtime/cpu-mock.yaml \
   --input /tmp/scaleguard-dev-input.jpg \
@@ -184,10 +184,11 @@ dependency into a third runtime project.
 
 The AutoDL hook targets Linux `x86_64` with glibc 2.28 or newer and installs
 uv 0.11.16 plus uv-managed Python 3.10.18. Its host prerequisite is a system
-`python3` with `venv`; if `PATH` lacks the exact uv, the hook creates
-`.runtime/bootstrap-uv` from a hash-pinned wheel. It then creates `.venv` plus
-three isolated runtime environments under `.runtime/envs/`: `4kagent`,
-`depictqa`, and `coz`.
+`python3` with `venv`. The hook never trusts a same-version uv from `PATH`: it
+clears `.runtime/bootstrap-uv`, installs the hash-pinned wheel, and checks the
+committed executable SHA-256. It then reinstalls the committed
+Python-build-standalone archive and creates `.venv` plus three isolated runtime
+environments under `.runtime/envs/`: `4kagent`, `depictqa`, and `coz`.
 
 Treat the files under `environments/` as a reviewed set:
 
@@ -195,7 +196,9 @@ Treat the files under `environments/` as a reviewed set:
 - `requirements.resolved.lock` files contain the complete hashed solutions;
 - `uv.version` fixes the resolver/installer identity;
 - `bootstrap/uv.lock` pins the Linux `x86_64` uv wheel used for self-bootstrap;
-  and
+- `bootstrap/uv-binary.sha256` pins the executable extracted from that wheel;
+- `python-downloads.json` pins the uv-managed CPython archive URL, build, and
+  digest; and
 - `4kagent/{pyiqa,hpsv2}.override.lock` contain exact wheel hashes for the
   audited upstream inference exceptions.
 
@@ -214,8 +217,9 @@ adapters in
 them into a general monkey-patch layer or install DepictQA's training-only
 DeepSpeed path.
 
-After a lock change, run the environment-audit unit tests and exercise
-`scripts/bootstrap/autodl.sh` on the declared platform. Review
+After a lock change, run the environment-audit unit tests and exercise the
+public privileged entry `scripts/autodl/bootstrap.sh` on the declared platform.
+Do not invoke the source-only `scripts/bootstrap/autodl.sh` directly. Review
 `.runtime/receipts/bootstrap.json` and all four environment receipts. A
 successful receipt validates installation identity only; it does not promote
 the project evidence level or prove GPU model behavior.

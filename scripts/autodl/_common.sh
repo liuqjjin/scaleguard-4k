@@ -2,6 +2,12 @@
 
 # Shared, source-only helpers for the AutoDL entry points.
 
+set +x +v
+while IFS= read -r sg_imported_function; do
+    builtin unset -f -- "${sg_imported_function}"
+done < <(builtin compgen -A function)
+unset sg_imported_function
+
 sg_die() {
     printf 'error: %s\n' "$*" >&2
     exit 1
@@ -23,14 +29,25 @@ sg_common_saved_pwd="${PWD}"
 cd -- "${sg_script_dir}"
 sg_script_dir="${PWD}"
 cd -- "${sg_common_saved_pwd}"
-SG_REPO_ROOT="${SCALEGUARD_REPO_ROOT:-${sg_script_dir}/../..}"
-if [[ "${SG_REPO_ROOT}" != /* ]]; then
-    SG_REPO_ROOT="${sg_common_saved_pwd}/${SG_REPO_ROOT}"
-fi
-cd -- "${SG_REPO_ROOT}"
+cd -- "${sg_script_dir}/../.."
 SG_REPO_ROOT="${PWD}"
 cd -- "${sg_common_saved_pwd}"
-unset sg_common_source sg_common_saved_pwd
+if [[ -n "${SCALEGUARD_REPO_ROOT:-}" ]]; then
+    sg_requested_repo_root="${SCALEGUARD_REPO_ROOT}"
+    if [[ "${sg_requested_repo_root}" != /* ]]; then
+        sg_requested_repo_root="${sg_common_saved_pwd}/${sg_requested_repo_root}"
+    fi
+    [[ -d "${sg_requested_repo_root}" ]] \
+        || sg_die "SCALEGUARD_REPO_ROOT is not a directory: ${sg_requested_repo_root}"
+    cd -- "${sg_requested_repo_root}"
+    sg_requested_repo_root="${PWD}"
+    cd -- "${sg_common_saved_pwd}"
+    [[ "${sg_requested_repo_root}" == "${SG_REPO_ROOT}" ]] \
+        || sg_die \
+            "SCALEGUARD_REPO_ROOT must match the repository containing _common.sh"
+fi
+unset SCALEGUARD_REPO_ROOT
+unset sg_common_source sg_common_saved_pwd sg_requested_repo_root
 SG_ARTIFACT_ROOT="${SCALEGUARD_ARTIFACT_ROOT:-${SG_REPO_ROOT}/artifacts/autodl}"
 if [[ "${SG_ARTIFACT_ROOT}" != /* ]]; then
     SG_ARTIFACT_ROOT="${SG_REPO_ROOT}/${SG_ARTIFACT_ROOT}"
@@ -74,6 +91,140 @@ SG_COMMON_SENSITIVE_ENV_NAMES=(
 # Bash 3.2 with `set -u` rejects expansion of a genuinely empty array.
 # A reserved, valid sentinel keeps every array expansion portable.
 SG_EXTRA_SENSITIVE_ENV_NAMES=(SCALEGUARD_INTERNAL_NO_EXTRA_SENSITIVE_ENV)
+SG_SAFE_AMBIENT_ENV_NAMES=(
+    CUDA_VISIBLE_DEVICES
+    NVIDIA_VISIBLE_DEVICES
+    LANG
+    LC_ALL
+    LC_COLLATE
+    LC_CTYPE
+    LC_MESSAGES
+    LC_MONETARY
+    LC_NUMERIC
+    LC_TIME
+    NO_PROXY
+    REQUESTS_CA_BUNDLE
+    SSL_CERT_DIR
+    SSL_CERT_FILE
+    HF_HOME
+    HUGGINGFACE_HUB_CACHE
+    TRANSFORMERS_CACHE
+    TORCH_HOME
+    XDG_CACHE_HOME
+    PIP_CACHE_DIR
+    SCALEGUARD_ARTIFACT_ROOT
+    SCALEGUARD_AUTODL_CONFIG
+    SCALEGUARD_CACHE_ROOT
+    SCALEGUARD_DIAGNOSTICS_MAX_MODEL_RUNS
+    SCALEGUARD_DIAGNOSTICS_MAX_TOTAL_FILES
+    SCALEGUARD_DIAGNOSTICS_MAX_TOTAL_MIB
+    SCALEGUARD_DIAGNOSTICS_SOURCE
+    SCALEGUARD_DOWNLOAD_OPTIONAL_WEIGHTS
+    SCALEGUARD_EXPERIMENT_CONFIG
+    SCALEGUARD_EXPERIMENT_INPUT
+    SCALEGUARD_GPU_NAME_PATTERN
+    SCALEGUARD_GPU_SAMPLE_INTERVAL_SECONDS
+    SCALEGUARD_INTEGRATION_CONFIG
+    SCALEGUARD_INTEGRATION_INPUT
+    SCALEGUARD_MIN_DISK_GIB
+    SCALEGUARD_MIN_GPUS
+    SCALEGUARD_MIN_GPU_MEMORY_MIB
+    SCALEGUARD_MIN_NVIDIA_DRIVER
+    SCALEGUARD_RUN_ID
+    SCALEGUARD_RUNTIME_DEPENDENCIES_LOCK
+    SCALEGUARD_SMOKE_CONFIG
+    SCALEGUARD_SMOKE_INPUT
+    SCALEGUARD_UPSTREAM_LOCK
+    SCALEGUARD_WEIGHTS_MANIFEST
+    SCALEGUARD_WEIGHTS_ROOT
+    SCALEGUARD_WEIGHT_RECEIPT
+)
+SG_FIXED_SYSTEM_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+sg_ambient_export_is_safe() {
+    local sg_name="$1"
+    local sg_safe
+    for sg_safe in "${SG_SAFE_AMBIENT_ENV_NAMES[@]}"; do
+        [[ "${sg_name}" != "${sg_safe}" ]] || return 0
+    done
+    return 1
+}
+
+sg_privatize_ambient_environment() {
+    local sg_name
+    local sg_isolated_home
+    local sg_isolated_home_parent
+    local sg_runtime_root
+    while IFS= read -r sg_name; do
+        if ! sg_ambient_export_is_safe "${sg_name}"; then
+            # shellcheck disable=SC2163
+            export -n "${sg_name}" 2>/dev/null || true
+        fi
+    done < <(compgen -e)
+
+    umask 077
+    PATH="${SG_FIXED_SYSTEM_PATH}"
+    sg_runtime_root="${SG_REPO_ROOT}/.runtime"
+    [[ ! -L "${sg_runtime_root}" ]] \
+        || sg_die "runtime root must not be a symbolic link: ${sg_runtime_root}"
+    /bin/mkdir -p "${sg_runtime_root}"
+    [[ -d "${sg_runtime_root}" && ! -L "${sg_runtime_root}" && -O "${sg_runtime_root}" ]] \
+        || sg_die "runtime root must be an owned directory: ${sg_runtime_root}"
+    /bin/chmod 0700 "${sg_runtime_root}"
+    sg_isolated_home_parent="${sg_runtime_root}/isolated-homes"
+    [[ ! -L "${sg_isolated_home_parent}" ]] \
+        || sg_die \
+            "isolated HOME parent must not be a symbolic link: ${sg_isolated_home_parent}"
+    /bin/mkdir -p "${sg_isolated_home_parent}"
+    [[ -d "${sg_isolated_home_parent}" \
+        && ! -L "${sg_isolated_home_parent}" \
+        && -O "${sg_isolated_home_parent}" ]] \
+        || sg_die \
+            "isolated HOME parent must be an owned directory: ${sg_isolated_home_parent}"
+    /bin/chmod 0700 "${sg_isolated_home_parent}"
+    sg_isolated_home="$(
+        /usr/bin/mktemp -d "${sg_isolated_home_parent}/home.XXXXXXXX"
+    )" || sg_die "cannot create a fresh isolated HOME"
+    [[ -d "${sg_isolated_home}" && ! -L "${sg_isolated_home}" && -O "${sg_isolated_home}" ]] \
+        || sg_die "isolated HOME must be a fresh owned directory: ${sg_isolated_home}"
+    /bin/chmod 0700 "${sg_isolated_home}"
+    HOME="${sg_isolated_home}"
+    GIT_CONFIG_GLOBAL="/dev/null"
+    GIT_CONFIG_NOSYSTEM="1"
+    GIT_CONFIG_SYSTEM="/dev/null"
+    PIP_CONFIG_FILE="/dev/null"
+    PYTHONNOUSERSITE="1"
+    PYTHONDONTWRITEBYTECODE="1"
+    TMPDIR="/tmp"
+    UV_NO_CONFIG="1"
+    export HOME PATH GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM GIT_CONFIG_SYSTEM
+    export PIP_CONFIG_FILE PYTHONNOUSERSITE PYTHONDONTWRITEBYTECODE
+    export TMPDIR UV_NO_CONFIG
+    unset \
+        BASH_ENV \
+        ENV \
+        CDPATH \
+        GLOBIGNORE \
+        PYTHONBREAKPOINT \
+        PYTHONHOME \
+        PYTHONINSPECT \
+        PYTHONPATH \
+        PYTHONSTARTUP \
+        LD_PRELOAD \
+        DYLD_INSERT_LIBRARIES \
+        DYLD_LIBRARY_PATH \
+        NETRC \
+        PIP_INDEX_URL \
+        PIP_EXTRA_INDEX_URL \
+        UV_INDEX \
+        UV_EXTRA_INDEX_URL \
+        http_proxy \
+        https_proxy \
+        HTTP_PROXY \
+        HTTPS_PROXY \
+        ALL_PROXY \
+        all_proxy
+}
 
 sg_register_sensitive_env_name() {
     local sg_name="$1"
@@ -279,6 +430,11 @@ sg_run_with_download_credentials() {
             HF_HUB_TOKEN \
             HUGGING_FACE_HUB_TOKEN \
             HUGGINGFACE_TOKEN
+        sg_export_private_credentials \
+            HF_TOKEN \
+            HF_HUB_TOKEN \
+            HUGGING_FACE_HUB_TOKEN \
+            HUGGINGFACE_TOKEN
         exec "$@"
     )
 }
@@ -289,6 +445,7 @@ sg_run_with_scheduler_credential() {
     sg_register_sensitive_env_name "${sg_scheduler_env}"
     (
         sg_unset_sensitive_environment "${sg_scheduler_env}"
+        sg_export_private_credentials "${sg_scheduler_env}"
         exec "$@"
     )
 }
@@ -357,7 +514,7 @@ sg_sha256() {
     elif command -v shasum >/dev/null 2>&1; then
         shasum -a 256 -- "${sg_path}" | awk '{print $1}'
     else
-        python3 - "${sg_path}" <<'PY'
+        python3 -I - "${sg_path}" <<'PY'
 import hashlib
 import pathlib
 import sys
@@ -375,7 +532,7 @@ PY
 sg_json_get() {
     local sg_document="$1"
     shift
-    python3 - "${SG_REPO_ROOT}/src" "${sg_document}" "$@" <<'PY'
+    python3 -I - "${SG_REPO_ROOT}/src" "${sg_document}" "$@" <<'PY'
 import pathlib
 import sys
 
@@ -550,24 +707,68 @@ sg_run_logged_with_presence_marker() {
 }
 
 sg_resolve_cli() {
-    if [[ -n "${SCALEGUARD_CLI:-}" ]]; then
-        [[ "${SCALEGUARD_CLI}" != *[[:space:]]* ]] \
-            || sg_die "SCALEGUARD_CLI must be one executable path, not a shell command"
-        [[ -x "${SCALEGUARD_CLI}" ]] \
-            || command -v "${SCALEGUARD_CLI}" >/dev/null 2>&1 \
-            || sg_die "SCALEGUARD_CLI is not executable: ${SCALEGUARD_CLI}"
-        SG_CLI=("${SCALEGUARD_CLI}")
-    elif [[ -x "${SG_REPO_ROOT}/.venv/bin/scaleguard" ]]; then
-        SG_CLI=("${SG_REPO_ROOT}/.venv/bin/scaleguard")
-    elif command -v scaleguard >/dev/null 2>&1; then
-        SG_CLI=("$(command -v scaleguard)")
-    else
-        local sg_python="${SCALEGUARD_PYTHON:-python3}"
-        command -v "${sg_python}" >/dev/null 2>&1 \
-            || sg_die "could not find scaleguard or Python; run scripts/autodl/bootstrap.sh"
-        SG_CLI=("${sg_python}" -m scaleguard.cli)
+    local sg_python="${SG_REPO_ROOT}/.venv/bin/python"
+    local sg_expected_prefix="${SG_REPO_ROOT}/.venv"
+    local sg_expected_module="${SG_REPO_ROOT}/src/scaleguard/cli.py"
+
+    [[ -z "${SCALEGUARD_CLI:-}" ]] \
+        || sg_die \
+            "SCALEGUARD_CLI is not allowed for AutoDL evidence; unset it and use ${sg_python}"
+    [[ -z "${SCALEGUARD_PYTHON:-}" ]] \
+        || sg_die \
+            "SCALEGUARD_PYTHON is not allowed for AutoDL evidence; unset it and use ${sg_python}"
+    [[ -x "${sg_python}" ]] \
+        || sg_die "project ScaleGuard Python is missing or not executable: ${sg_python}"
+    [[ -f "${sg_expected_module}" ]] \
+        || sg_die "project ScaleGuard CLI module is missing: ${sg_expected_module}"
+
+    if ! "${sg_python}" -I - \
+        "${sg_python}" \
+        "${sg_expected_prefix}" \
+        "${sg_expected_module}" <<'PY'
+import os
+import pathlib
+import sys
+
+expected_executable, expected_prefix, expected_module = sys.argv[1:]
+
+
+def lexical_absolute(path: str) -> str:
+    return os.path.normpath(os.path.abspath(path))
+
+
+if lexical_absolute(sys.executable) != lexical_absolute(expected_executable):
+    raise SystemExit(
+        "ScaleGuard interpreter mismatch: "
+        f"expected {expected_executable}, found {sys.executable}"
+    )
+if lexical_absolute(sys.prefix) != lexical_absolute(expected_prefix):
+    raise SystemExit(
+        f"ScaleGuard environment mismatch: expected {expected_prefix}, found {sys.prefix}"
+    )
+
+import scaleguard.cli as scaleguard_cli
+
+module_file = getattr(scaleguard_cli, "__file__", None)
+if module_file is None:
+    raise SystemExit("scaleguard.cli has no filesystem module source")
+actual_module = pathlib.Path(module_file).resolve(strict=True)
+required_module = pathlib.Path(expected_module).resolve(strict=True)
+if actual_module != required_module:
+    raise SystemExit(
+        "ScaleGuard CLI module mismatch: "
+        f"expected {required_module}, found {actual_module}"
+    )
+PY
+    then
+        sg_die \
+            "project ScaleGuard CLI attestation failed; rerun scripts/autodl/bootstrap.sh"
     fi
-    : "${SG_CLI[*]}"
+
+    # Keep the lexical venv entry in argv. Resolving this symlink would bypass
+    # pyvenv.cfg for uv-managed environments.
+    # shellcheck disable=SC2034 # consumed by the AutoDL scripts sourcing this library
+    SG_CLI=("${sg_python}" -I -m scaleguard.cli)
 }
 
 sg_require_file() {
@@ -665,7 +866,7 @@ sg_stop_gpu_monitor() {
 sg_write_file_inventory() {
     local sg_root="$1"
     local sg_destination="$2"
-    python3 - "${sg_root}" "${sg_destination}" <<'PY'
+    python3 -I - "${sg_root}" "${sg_destination}" <<'PY'
 import hashlib
 import json
 import pathlib
@@ -703,7 +904,7 @@ sg_find_bound_weight_receipt() {
     if [[ -n "${sg_override}" ]]; then
         sg_override="$(sg_from_repo "${sg_override}")"
     fi
-    python3 - \
+    python3 -I - \
         "${sg_marker}" \
         "${SG_ARTIFACT_ROOT}" \
         "${sg_override}" \
@@ -763,7 +964,7 @@ sg_validate_materialization_pair() {
     local sg_weight_receipt="$3"
     local sg_weight_root="$4"
     local sg_git_commit="$5"
-    python3 - \
+    python3 -I - \
         "${sg_materialization_receipt}" \
         "${sg_marker}" \
         "${sg_weight_receipt}" \
@@ -1029,7 +1230,7 @@ sg_verify_materialized_weights() {
 
     if ! sg_run_logged \
         "${sg_log_path}" \
-        "${sg_project_python}" "${sg_materializer}" \
+        "${sg_project_python}" -I "${sg_materializer}" \
         --weights-root "${sg_weight_root}" \
         --receipt "${sg_weight_receipt}" \
         --output "${sg_verification_receipt}" \
@@ -1047,3 +1248,5 @@ sg_verify_materialized_weights() {
         sg_die "weight materialization receipts are inconsistent; inspect ${sg_log_path}"
     fi
 }
+
+sg_privatize_ambient_environment
