@@ -102,10 +102,6 @@ SG_SAFE_AMBIENT_ENV_NAMES=(
     LC_MONETARY
     LC_NUMERIC
     LC_TIME
-    NO_PROXY
-    REQUESTS_CA_BUNDLE
-    SSL_CERT_DIR
-    SSL_CERT_FILE
     HF_HOME
     HUGGINGFACE_HUB_CACHE
     TRANSFORMERS_CACHE
@@ -124,6 +120,7 @@ SG_SAFE_AMBIENT_ENV_NAMES=(
     SCALEGUARD_EXPERIMENT_INPUT
     SCALEGUARD_GPU_NAME_PATTERN
     SCALEGUARD_GPU_SAMPLE_INTERVAL_SECONDS
+    SCALEGUARD_RUN_DEADLINE_SECONDS
     SCALEGUARD_INTEGRATION_CONFIG
     SCALEGUARD_INTEGRATION_INPUT
     SCALEGUARD_MIN_DISK_GIB
@@ -248,7 +245,7 @@ sg_resolve_scheduler_api_key_env() {
     local sg_api_key_fields=0
     local sg_line
     local sg_trimmed
-    local sg_value="OPENAI_API_KEY"
+    local sg_value="DASHSCOPE_API_KEY"
 
     if [[ -f "${sg_config_path}" ]]; then
         while IFS= read -r sg_line || [[ -n "${sg_line}" ]]; do
@@ -495,16 +492,155 @@ sg_timestamp() {
 sg_new_run_dir() {
     local sg_stage="$1"
     local sg_run_id="${SCALEGUARD_RUN_ID:-$(sg_timestamp)-$$}"
+    local sg_attempt
+    local sg_candidate
+    local sg_parent
     [[ "${sg_stage}" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || sg_die "invalid stage name: ${sg_stage}"
     [[ "${sg_run_id}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
         || sg_die "SCALEGUARD_RUN_ID may contain only letters, numbers, '.', '_' and '-'"
+    mkdir -p "${SG_ARTIFACT_ROOT}"
+    [[ -d "${SG_ARTIFACT_ROOT}" && ! -L "${SG_ARTIFACT_ROOT}" \
+        && -O "${SG_ARTIFACT_ROOT}" ]] \
+        || sg_die \
+            "artifact root must be an owned, non-symlink directory: ${SG_ARTIFACT_ROOT}"
 
-    SG_RUN_DIR="${SG_ARTIFACT_ROOT}/${sg_stage}/${sg_run_id}"
-    if [[ -e "${SG_RUN_DIR}" ]]; then
-        SG_RUN_DIR="${SG_RUN_DIR}-attempt-$(sg_timestamp)-$$"
+    sg_parent="${SG_ARTIFACT_ROOT}/${sg_stage}"
+    mkdir -p "${sg_parent}"
+    [[ -d "${sg_parent}" && ! -L "${sg_parent}" && -O "${sg_parent}" ]] \
+        || sg_die "run directory parent must be an owned, non-symlink directory: ${sg_parent}"
+    for sg_attempt in {0..99}; do
+        if [[ "${sg_attempt}" -eq 0 ]]; then
+            sg_candidate="${sg_parent}/${sg_run_id}"
+        else
+            sg_candidate="${sg_parent}/${sg_run_id}-attempt-$(sg_timestamp)-$$-${sg_attempt}-${RANDOM}"
+        fi
+        if mkdir "${sg_candidate}" 2>/dev/null; then
+            SG_RUN_DIR="${sg_candidate}"
+            chmod 0700 "${SG_RUN_DIR}"
+            export SG_RUN_DIR
+            return 0
+        fi
+        [[ -e "${sg_candidate}" || -L "${sg_candidate}" ]] \
+            || sg_die "cannot create exclusive run directory: ${sg_candidate}"
+    done
+    sg_die "could not allocate an exclusive run directory after 100 attempts"
+}
+
+sg_acquire_gpu_lease() {
+    local sg_topology="$1"
+    local sg_uid
+    local sg_lease_root
+    local sg_lease_path
+    local sg_ready_path
+    local sg_wait_count
+    [[ "${sg_topology}" =~ ^[a-z0-9][a-z0-9_-]*$ ]] \
+        || sg_die "invalid GPU lease topology: ${sg_topology}"
+    sg_uid="$(/usr/bin/id -u)" \
+        || sg_die "cannot resolve the current user for the host GPU lease"
+    [[ "${sg_uid}" =~ ^[0-9]+$ ]] \
+        || sg_die "current user id is invalid for the host GPU lease"
+    sg_lease_root="/tmp/scaleguard-4k-runtime-leases-${sg_uid}"
+    command -v python3 >/dev/null 2>&1 \
+        || sg_die "python3 is required for exclusive GPU runtime ownership"
+    mkdir -p "${sg_lease_root}"
+    [[ -d "${sg_lease_root}" && ! -L "${sg_lease_root}" \
+        && -O "${sg_lease_root}" ]] \
+        || sg_die "GPU lease root must be an owned, non-symlink directory: ${sg_lease_root}"
+    chmod 0700 "${sg_lease_root}"
+    sg_lease_path="${sg_lease_root}/${sg_topology}.lock"
+    if [[ -e "${sg_lease_path}" || -L "${sg_lease_path}" ]]; then
+        [[ -f "${sg_lease_path}" && ! -L "${sg_lease_path}" \
+            && -O "${sg_lease_path}" ]] \
+            || sg_die "GPU lease must be an owned regular file: ${sg_lease_path}"
     fi
-    mkdir -p "${SG_RUN_DIR}"
-    export SG_RUN_DIR
+    sg_ready_path="${sg_lease_root}/.gpu-lease-ready-$$"
+    [[ ! -e "${sg_ready_path}" && ! -L "${sg_ready_path}" ]] \
+        || sg_die "GPU lease readiness path already exists: ${sg_ready_path}"
+    python3 -I - "${sg_lease_path}" "${sg_ready_path}" "$$" <<'PY' &
+import fcntl
+import os
+import pathlib
+import stat
+import sys
+import time
+
+lock_path = pathlib.Path(sys.argv[1])
+ready_path = pathlib.Path(sys.argv[2])
+parent_pid = int(sys.argv[3])
+flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+flags |= getattr(os, "O_NOFOLLOW", 0)
+
+
+def publish(value: str) -> None:
+    ready_flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_CLOEXEC", 0)
+    ready_flags |= getattr(os, "O_NOFOLLOW", 0)
+    ready_descriptor = os.open(ready_path, ready_flags, 0o600)
+    try:
+        os.write(ready_descriptor, value.encode("ascii"))
+        os.fsync(ready_descriptor)
+    finally:
+        os.close(ready_descriptor)
+
+
+try:
+    descriptor = os.open(lock_path, flags, 0o600)
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.getuid():
+        raise OSError("unsafe GPU lease file")
+    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    publish("busy\n")
+    raise SystemExit(75)
+except OSError as error:
+    publish(f"error:{type(error).__name__}\n")
+    raise SystemExit(70)
+publish("acquired\n")
+while os.getppid() == parent_pid:
+    time.sleep(0.1)
+ready_path.unlink(missing_ok=True)
+PY
+    SG_GPU_LEASE_PID=$!
+    SG_GPU_LEASE_READY="${sg_ready_path}"
+    sg_wait_count=0
+    while [[ "${sg_wait_count}" -lt 100 ]]; do
+        [[ -s "${sg_ready_path}" ]] && break
+        if ! kill -0 "${SG_GPU_LEASE_PID}" 2>/dev/null; then
+            wait "${SG_GPU_LEASE_PID}" || true
+            unset SG_GPU_LEASE_PID SG_GPU_LEASE_READY
+            sg_die "GPU lease helper exited before publishing readiness"
+        fi
+        sleep 0.05
+        sg_wait_count=$((sg_wait_count + 1))
+    done
+    [[ -s "${sg_ready_path}" ]] || sg_die "GPU lease helper did not become ready"
+    case "$(tr -d '\r\n' < "${sg_ready_path}")" in
+        acquired)
+            return 0
+            ;;
+        busy)
+            wait "${SG_GPU_LEASE_PID}" || true
+            rm -f -- "${sg_ready_path}"
+            unset SG_GPU_LEASE_PID SG_GPU_LEASE_READY
+            sg_die "GPU topology ${sg_topology} is already leased by another ScaleGuard run"
+            ;;
+        *)
+            wait "${SG_GPU_LEASE_PID}" || true
+            rm -f -- "${sg_ready_path}"
+            unset SG_GPU_LEASE_PID SG_GPU_LEASE_READY
+            sg_die "GPU lease helper reported an unsafe lock file"
+            ;;
+    esac
+}
+
+sg_release_gpu_lease() {
+    if [[ -n "${SG_GPU_LEASE_PID:-}" ]]; then
+        kill "${SG_GPU_LEASE_PID}" 2>/dev/null || true
+        wait "${SG_GPU_LEASE_PID}" 2>/dev/null || true
+    fi
+    if [[ -n "${SG_GPU_LEASE_READY:-}" ]]; then
+        rm -f -- "${SG_GPU_LEASE_READY}"
+    fi
+    unset SG_GPU_LEASE_PID SG_GPU_LEASE_READY
 }
 
 sg_sha256() {
@@ -807,36 +943,56 @@ sg_write_cache_env() {
 
 sg_start_gpu_monitor() {
     local sg_destination="$1"
+    local sg_gpu_check="$2"
     local sg_interval="${SCALEGUARD_GPU_SAMPLE_INTERVAL_SECONDS:-1}"
-    local sg_visible_devices="${CUDA_VISIBLE_DEVICES:-}"
+    local sg_selected_uuids
     [[ "${sg_interval}" =~ ^[0-9]+([.][0-9]+)?$ ]] \
         || sg_die "SCALEGUARD_GPU_SAMPLE_INTERVAL_SECONDS must be numeric"
-    if [[ -n "${sg_visible_devices}" \
-        && ! "${sg_visible_devices}" =~ ^[^,[:space:]]+(,[^,[:space:]]+)*$ ]]
-    then
-        sg_die \
-            "CUDA_VISIBLE_DEVICES must be a comma-separated list without empty or whitespace selectors"
-    fi
+    awk -v value="${sg_interval}" 'BEGIN { exit !(value >= 0.1 && value <= 60) }' \
+        || sg_die "SCALEGUARD_GPU_SAMPLE_INTERVAL_SECONDS must be between 0.1 and 60"
+    sg_selected_uuids="$(
+        python3 -I - "${SG_REPO_ROOT}/src" "${sg_gpu_check}" <<'PY'
+import pathlib
+import sys
+
+sys.path.insert(0, str(pathlib.Path(sys.argv[1]).resolve()))
+from scaleguard.strict_json import loads_object
+
+path = pathlib.Path(sys.argv[2])
+document = loads_object(path.read_text(encoding="utf-8"))
+selected = document.get("selected_gpus")
+if document.get("status") != "passed" or not isinstance(selected, list) or not selected:
+    raise SystemExit("GPU preflight has no passed selected_gpus inventory")
+uuids = []
+for item in selected:
+    value = item.get("uuid") if isinstance(item, dict) else None
+    if not isinstance(value, str) or not value or "," in value or any(c.isspace() for c in value):
+        raise SystemExit("GPU preflight contains an invalid UUID selector")
+    uuids.append(value)
+if len(uuids) != len(set(uuids)):
+    raise SystemExit("GPU preflight selected a UUID more than once")
+print(",".join(uuids))
+PY
+    )" || sg_die "cannot bind GPU monitor to the preflight inventory"
     command -v nvidia-smi >/dev/null 2>&1 \
         || sg_die "nvidia-smi is required for GPU evidence collection"
 
     (
-        printf 'timestamp_utc,index,uuid,name,memory_used_mib,memory_total_mib,utilization_gpu_percent\n'
+        local sg_sample_kind="inventory"
+        printf 'timestamp_utc,sample_kind,index,uuid,name,memory_used_mib,memory_total_mib,utilization_gpu_percent\n'
         while :; do
             local sg_sample_time
-            sg_sample_time="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-            if [[ -n "${sg_visible_devices}" ]]; then
-                nvidia-smi \
-                    -i "${sg_visible_devices}" \
-                    --query-gpu=index,uuid,name,memory.used,memory.total,utilization.gpu \
-                    --format=csv,noheader,nounits \
-                    | sed "s/^/${sg_sample_time},/"
-            else
-                nvidia-smi \
-                    --query-gpu=index,uuid,name,memory.used,memory.total,utilization.gpu \
-                    --format=csv,noheader,nounits \
-                    | sed "s/^/${sg_sample_time},/"
-            fi
+            # Sub-second timestamps are required to audit the configured 100 ms
+            # minimum interval and to distinguish a stalled monitor from a live
+            # one without relying on row counts alone. AutoDL images provide GNU
+            # coreutils, whose %N formatting is used throughout the real wrapper.
+            sg_sample_time="$(date -u '+%Y-%m-%dT%H:%M:%S.%6NZ')"
+            nvidia-smi \
+                -i "${sg_selected_uuids}" \
+                --query-gpu=index,uuid,name,memory.used,memory.total,utilization.gpu \
+                --format=csv,noheader,nounits \
+                | sed "s/^/${sg_sample_time},${sg_sample_kind},/"
+            sg_sample_kind="workload"
             sleep "${sg_interval}"
         done
     ) > "${sg_destination}" 2>/dev/null &

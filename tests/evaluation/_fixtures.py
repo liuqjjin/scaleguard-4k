@@ -81,7 +81,11 @@ def write_calibration_manifest(
     mock: bool = False,
     quality_backend: str = "gradient_proxy_v1",
     measurement: tuple[float, str] | None = None,
+    input_image: Path | None = None,
 ) -> Path:
+    if input_image is None:
+        input_image = path.with_name(f"{path.stem}-input.bin")
+        input_image.write_bytes(f"input:{run_id}".encode())
     steps: list[dict[str, Any]] = []
     for index, (quality_gain, scale_nrmse, scale_edge_mae) in enumerate(values, start=1):
         steps.append(
@@ -100,7 +104,15 @@ def write_calibration_manifest(
             }
         )
     path.write_text(
-        json.dumps({"run_id": run_id, "mock": mock, "steps": steps}),
+        json.dumps(
+            {
+                "run_id": run_id,
+                "status": "succeeded",
+                "mock": mock,
+                "input_image": artifact(input_image, mock=mock),
+                "steps": steps,
+            }
+        ),
         encoding="utf-8",
     )
     return path
@@ -159,7 +171,11 @@ def write_summary_manifest(
                     "fourkagent": {
                         "mode": fourkagent_mode,
                         "profile": "FastGen4K_P",
-                        "llm_model": "gpt-4-turbo",
+                        "llm_provider": "dashscope",
+                        "llm_base_url": ("https://dashscope.aliyuncs.com/compatible-mode/v1"),
+                        "llm_region": "cn-beijing",
+                        "llm_model": "qwen3.7-flash-2026-07-15",
+                        "api_key_env": "DASHSCOPE_API_KEY",
                     },
                     "coz": {
                         "mode": "persistent",

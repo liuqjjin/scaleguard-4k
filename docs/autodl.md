@@ -28,8 +28,8 @@ the instance. Enter the token interactively:
 ```bash
 read -rsp 'HF token: ' HF_TOKEN && printf '\n'
 export HF_TOKEN
-read -rsp 'OpenAI API key: ' OPENAI_API_KEY && printf '\n'
-export OPENAI_API_KEY
+read -rsp 'DashScope API key: ' DASHSCOPE_API_KEY && printf '\n'
+export DASHSCOPE_API_KEY
 export CUDA_VISIBLE_DEVICES=0,1
 ```
 
@@ -309,6 +309,11 @@ Model commands, managed services, and persistent CoZ workers own fresh process
 groups. A returned leader cannot leave an ordinary same-group helper running:
 the wrapper waits only a short shutdown grace and then uses bounded TERM/KILL
 cleanup. Configured upstream commands must not daemonize through `setsid`.
+The canonical two-GPU topology also holds one cooperative, host-local `flock`
+lease for the complete wrapper attempt. A concurrent ScaleGuard wrapper fails
+before GPU preflight instead of sharing model memory or producing ambiguous GPU
+evidence. The lease holder exits with its parent even after abnormal shutdown;
+this coordinates ScaleGuard runs, not unrelated host processes.
 
 The per-attempt receipts live under
 `runtime-environments/{scaleguard,4kagent,depictqa,coz}.json`. Preflight rejects
@@ -321,9 +326,19 @@ bootstrap before a real model process starts.
 An explicit output path must not already exist. This prevents a stale image from
 turning a no-op into a false pass. Default output paths are unique to each run.
 Set `SCALEGUARD_GPU_SAMPLE_INTERVAL_SECONDS` to change the default one-second
-sampling period. If the matching download receipt was moved outside the artifact
-tree, set `SCALEGUARD_WEIGHT_RECEIPT` to its reviewed path; its SHA-256 must
-still match the fixed marker.
+sampling period; accepted values are 0.1 through 60 seconds. The runtime receipt
+binds the monitor to the two UUIDs selected by GPU preflight. `execution.json`
+reports inventory binding separately from host-level workload observation; the
+latter is deliberately not described as per-process GPU attribution. The
+runtime validator reopens the attempt-local GPU receipt, verifies its hash,
+commit, topology, and CUDA selectors, then carries that normalized identity in
+the runtime execution binding. Set
+`SCALEGUARD_RUN_DEADLINE_SECONDS` to change the full-wrapper deadline from its
+14,400-second default (allowed range: 60 through 86,400 seconds). The deadline
+covers preflight, model execution, and post-run evidence checks and has a bounded
+TERM/KILL shutdown. If the matching download receipt was moved outside the
+artifact tree, set `SCALEGUARD_WEIGHT_RECEIPT` to its reviewed path; its SHA-256
+must still match the fixed marker.
 
 `execution.json.status == "passed"` means only that the command and wrapper
 artifact checks passed. Review the ScaleGuard run manifest to confirm real
@@ -380,7 +395,7 @@ After setting only authorized input paths and credential environment variables:
 export SCALEGUARD_SMOKE_INPUT=/authorized-data/smoke.png
 export SCALEGUARD_INTEGRATION_INPUT=/authorized-data/integration.png
 external_gate/commands.sh
-unset HF_TOKEN OPENAI_API_KEY
+unset HF_TOKEN DASHSCOPE_API_KEY
 ```
 
 The exact request, pass conditions and result record are in

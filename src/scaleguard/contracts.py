@@ -5,11 +5,15 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
+
+FINAL_ADAIN_ALGORITHM = "scaleguard.adain.rgb-v1"
+QUALITY_IDENTITY_SCHEMA = 1
 
 
 def utc_now() -> str:
@@ -74,6 +78,7 @@ class MetricRecord:
     quality_candidate: float
     quality_gain: float
     quality_backend: str
+    quality_identity_sha256: str
     scale_nrmse: float
     scale_edge_mae: float
     measurement_nrmse: float | None
@@ -166,13 +171,36 @@ class ManifestRecorder:
         self.write()
 
     def write(self) -> None:
-        payload = json.dumps(
-            manifest_as_dict(self.manifest),
-            indent=2,
-            sort_keys=True,
-            ensure_ascii=False,
-            allow_nan=False,
+        payload = (
+            json.dumps(
+                manifest_as_dict(self.manifest),
+                indent=2,
+                sort_keys=True,
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+            + b"\n"
         )
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        temporary.write_text(payload + "\n", encoding="utf-8")
-        os.replace(temporary, self.path)
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=self.path.parent,
+                prefix=f".{self.path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self.path)
+            directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            directory_fd = os.open(self.path.parent, directory_flags)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)

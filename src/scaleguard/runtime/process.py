@@ -24,7 +24,6 @@ _POST_LEADER_GROUP_GRACE_SECONDS = 0.2
 _SAFE_ENVIRONMENT_NAMES = frozenset(
     {
         "COMSPEC",
-        "HOME",
         "LANG",
         "LC_ALL",
         "LC_COLLATE",
@@ -33,20 +32,11 @@ _SAFE_ENVIRONMENT_NAMES = frozenset(
         "LC_MONETARY",
         "LC_NUMERIC",
         "LC_TIME",
-        "LD_LIBRARY_PATH",
-        "LOGNAME",
-        "NO_PROXY",
-        "PATH",
         "PATHEXT",
-        "REQUESTS_CA_BUNDLE",
-        "SHELL",
-        "SSL_CERT_DIR",
-        "SSL_CERT_FILE",
         "SystemRoot",
         "TEMP",
         "TMP",
         "TMPDIR",
-        "USER",
     }
 )
 
@@ -59,6 +49,9 @@ def minimal_subprocess_environment(
     environment = {
         name: value for name, value in os.environ.items() if name in _SAFE_ENVIRONMENT_NAMES
     }
+    # Do not trust an ambient executable search path. Project model interpreters
+    # are passed as absolute paths; system helpers resolve from the OS default.
+    environment["PATH"] = os.defpath
     if overrides:
         environment.update(overrides)
     return environment
@@ -215,14 +208,28 @@ def _copy_redacted(
 
 
 class _GpuSampler:
-    def __init__(self, interval_seconds: float) -> None:
+    def __init__(
+        self,
+        interval_seconds: float,
+        visible_devices: str | None = None,
+    ) -> None:
         self.interval_seconds = interval_seconds
+        if (
+            visible_devices is not None
+            and visible_devices
+            and not re.fullmatch(
+                r"(?:[0-9]+|GPU-[A-Za-z0-9-]+)(?:,(?:[0-9]+|GPU-[A-Za-z0-9-]+))*",
+                visible_devices,
+            )
+        ):
+            raise WorkerError("CUDA_VISIBLE_DEVICES contains an unsafe GPU selector")
+        self.visible_devices = visible_devices
         self.peaks: dict[str, int] = {}
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
-        if shutil.which("nvidia-smi") is None:
+        if self.visible_devices == "" or shutil.which("nvidia-smi") is None:
             return
         self._thread = threading.Thread(target=self._sample_loop, name="gpu-sampler", daemon=True)
         self._thread.start()
@@ -236,12 +243,17 @@ class _GpuSampler:
     def _sample_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                result = subprocess.run(
+                command = ["nvidia-smi"]
+                if self.visible_devices:
+                    command.extend(["-i", self.visible_devices])
+                command.extend(
                     [
-                        "nvidia-smi",
                         "--query-gpu=index,memory.used",
                         "--format=csv,noheader,nounits",
-                    ],
+                    ]
+                )
+                result = subprocess.run(
+                    command,
                     check=False,
                     capture_output=True,
                     text=True,
@@ -278,10 +290,17 @@ class ProcessRunner:
         if not argv or not argv[0]:
             raise WorkerError(f"{label} command is empty")
         log_dir.mkdir(parents=True, exist_ok=True)
+        private_home = log_dir / "subprocess-home"
+        private_home.mkdir(mode=0o700, exist_ok=True)
+        private_home.chmod(0o700)
         stdout_path = log_dir / f"{label}.stdout.log"
         stderr_path = log_dir / f"{label}.stderr.log"
         process_env = minimal_subprocess_environment(env)
-        sampler = _GpuSampler(self.gpu_poll_interval_seconds)
+        process_env.setdefault("HOME", str(private_home.resolve()))
+        sampler = _GpuSampler(
+            self.gpu_poll_interval_seconds,
+            process_env.get("CUDA_VISIBLE_DEVICES"),
+        )
         started = time.monotonic()
         process: subprocess.Popen[bytes]
         returncode: int

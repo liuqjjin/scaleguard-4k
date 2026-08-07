@@ -104,6 +104,15 @@ Files below `overlays/` are small ScaleGuard-owned adapters:
 
 - `overlays/4kagent/run_native_restoration.py` keeps 4KAgent's restoration and
   reflection path while reserving terminal generative SR for ScaleGuard.
+- `overlays/4kagent/serve_depictqa_eval.py` launches the pinned transitive
+  DepictQA application through an inference-only import boundary, forces its
+  Flask server to loopback without a reloader, and requires restricted
+  checkpoint loading. It neither vendors nor reimplements DepictQA.
+- `overlays/4kagent/scheduler_client.py` owns the bounded, text-only
+  OpenAI-compatible HTTP transport used by the restoration scheduler. It binds
+  provider and endpoint identity, retry and timeout budgets, response shape,
+  and redacted request evidence; it has no image-upload path and implements no
+  additional model.
 - `overlays/chain-of-zoom/coz_session_worker.py` exposes one explicit 4× CoZ
   transition at a time in a persistent session.
 

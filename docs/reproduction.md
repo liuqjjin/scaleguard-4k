@@ -13,7 +13,7 @@ research metrics. The highest supported project level is `STATIC_READY`.
 | `COMPONENT_REPRODUCED` | 4KAgent and CoZ each run with real locked source and weights; commands, logs, hashes, environment, and hardware are retained |
 | `AB_INTEGRATED` | one real terminal 4KAgent → CoZ path succeeds with a fresh output and per-GPU evidence |
 | `SCALEGUARD_VALIDATED` | real candidates exercise reviewed accept, stop, and rollback behavior with a matching calibration receipt |
-| `RESEARCH_EVALUATED` | complete paired A-only, B-only, A→B-fixed, and ScaleGuard experiments plus declared ablations and failure analysis |
+| `RESEARCH_EVALUATED` | complete paired A-only, B-only, AB-fixed, and ScaleGuard experiments plus declared ablations and failure analysis |
 
 Levels are cumulative. A syntax check is not an installation; a mock run is not
 a component reproduction; an output image is not a validated controller; and a

@@ -11,6 +11,12 @@ import pytest
 import scaleguard.manifest as manifest_validation
 from scaleguard.backends.fake import FakeRestorationBackend, FakeScaleBackend
 from scaleguard.config import ControllerConfig, MetricConfig, PipelineConfig, RuntimeConfig
+from scaleguard.contracts import (
+    CompletionLevel,
+    ManifestRecorder,
+    RunManifest,
+    RunStatus,
+)
 from scaleguard.controller.trusted_scale import TrustedScaleController
 from scaleguard.images import inspect_image
 from scaleguard.manifest import ManifestValidationError, validate_run_manifest
@@ -30,6 +36,7 @@ def _generated_manifest(
     target_factor: int = 4,
     measurement_enabled: bool = False,
     calibration_receipt: Path | None = None,
+    color_strategy: str = "none",
 ) -> tuple[Path, dict[str, Any]]:
     config = PipelineConfig(
         runtime=RuntimeConfig(run_root=tmp_path / "runs"),
@@ -44,7 +51,7 @@ def _generated_manifest(
         controller=ControllerConfig(
             target_factor=target_factor,
             max_coz_steps=2,
-            color_strategy="none",
+            color_strategy=color_strategy,
         ),
     )
     source = make_image(tmp_path / "source.png", size=(8, 5))
@@ -87,11 +94,42 @@ def _metrics(*, measurement: bool = False) -> dict[str, Any]:
         "quality_candidate": 0.5,
         "quality_gain": 0.3,
         "quality_backend": "audited",
+        "quality_identity_sha256": "a" * 64,
         "scale_nrmse": 0.1,
         "scale_edge_mae": 0.1,
         "measurement_nrmse": 0.1 if measurement else None,
         "measurement_model": "resize_lanczos" if measurement else None,
     }
+
+
+@pytest.mark.parametrize(
+    ("record_path", "field", "value", "message"),
+    [
+        (("input_image",), "mock", True, "disagrees"),
+        (("input_image",), "stage", "coz_scale_1", "artifact role"),
+        (("restored_image",), "stage", "input", "artifact role"),
+        (("steps", 0, "trusted_before"), "stage", "swapped", "accepted artifact chain"),
+        (("steps", 0, "candidate"), "stage", "input", "newly generated scale state"),
+        (("final_image",), "stage", "coz_scale_1", "artifact role"),
+    ],
+)
+def test_artifact_roles_bind_mock_and_stage_semantics(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    record_path: tuple[str | int, ...],
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    path, payload = _generated_manifest(tmp_path, make_image)
+    record: Any = payload
+    for component in record_path:
+        record = record[component]
+    record[field] = value
+    _write_manifest(path, payload)
+
+    with pytest.raises(ManifestValidationError, match=message):
+        validate_run_manifest(path)
 
 
 def test_scalar_contract_helpers_reject_ambiguous_types_and_timezones() -> None:
@@ -143,6 +181,8 @@ def test_measurement_metric_record_rejects_incomplete_or_derived_claims(
         manifest_validation._metric_record(
             metrics,
             "metrics",
+            quality_backend="audited",
+            quality_identity_sha256="a" * 64,
             measurement_enabled=True,
             measurement_model="resize_lanczos",
         )
@@ -154,6 +194,8 @@ def test_measurement_metric_record_is_conditional_and_gate_enforced() -> None:
         manifest_validation._metric_record(
             disabled,
             "metrics",
+            quality_backend="audited",
+            quality_identity_sha256="a" * 64,
             measurement_enabled=False,
             measurement_model="resize_lanczos",
         )
@@ -164,6 +206,8 @@ def test_measurement_metric_record_is_conditional_and_gate_enforced() -> None:
         manifest_validation._metric_record(
             disabled,
             "metrics",
+            quality_backend="audited",
+            quality_identity_sha256="a" * 64,
             measurement_enabled=False,
             measurement_model="resize_lanczos",
         )
@@ -221,6 +265,233 @@ def test_process_evidence_rejects_non_replayable_records(
     process.update(mutation)
     with pytest.raises(ManifestValidationError, match=message):
         manifest_validation._process(process, "process")
+
+
+@pytest.mark.parametrize("case", ["unknown_field", "missing_default", "wrong_type"])
+def test_manifest_config_must_be_complete_valid_and_canonical(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    case: str,
+) -> None:
+    path, payload = _generated_manifest(tmp_path, make_image)
+    if case == "unknown_field":
+        payload["config"]["controller"]["shadow_gate"] = True
+        message = "unknown keys"
+    elif case == "missing_default":
+        del payload["config"]["controller"]["color_strategy"]
+        message = "not canonical"
+    else:
+        payload["config"]["controller"]["target_factor"] = 4.0
+        message = "must be int"
+    _write_manifest(path, payload)
+
+    with pytest.raises(ManifestValidationError, match=message):
+        validate_run_manifest(path)
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("provenance_evaluator", "evaluator disagrees"),
+        ("provenance_digest", "quality_identity_sha256 disagrees"),
+        ("step_backend", "quality_backend disagrees"),
+        ("step_digest", "quality_identity_sha256 disagrees"),
+        ("final_digest", "quality_identity_sha256 disagrees"),
+    ],
+)
+def test_quality_identity_is_bound_across_config_provenance_and_metrics(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    case: str,
+    message: str,
+) -> None:
+    path, payload = _generated_manifest(tmp_path, make_image)
+    if case == "provenance_evaluator":
+        payload["provenance"]["quality_identity"]["evaluator"] = "forged:evaluator"
+    elif case == "provenance_digest":
+        payload["provenance"]["quality_identity_sha256"] = "b" * 64
+    elif case == "step_backend":
+        payload["steps"][0]["metrics"]["quality_backend"] = "forged:evaluator"
+    elif case == "step_digest":
+        payload["steps"][0]["metrics"]["quality_identity_sha256"] = "b" * 64
+    else:
+        payload["final_metrics"]["metrics"]["quality_identity_sha256"] = "b" * 64
+    _write_manifest(path, payload)
+
+    with pytest.raises(ManifestValidationError, match=message):
+        validate_run_manifest(path)
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("missing", "derivation must be an object"),
+        ("unretained", "source is not a retained state"),
+        ("forged_bytes", "not a byte-identical copy"),
+        ("forged_state", "invalid selected state"),
+    ],
+)
+def test_copy_final_derivation_cannot_be_omitted_or_substituted(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    case: str,
+    message: str,
+) -> None:
+    path, payload = _generated_manifest(tmp_path, make_image)
+    derivation = payload["final_metrics"]["derivation"]
+    if case == "missing":
+        del payload["final_metrics"]["derivation"]
+    elif case == "unretained":
+        derivation["source_sha256"] = "f" * 64
+    elif case == "forged_state":
+        payload["final_metrics"]["selected_state"] = "untracked"
+    else:
+        _replace_artifact(
+            payload["final_image"],
+            tmp_path / "forged-final.png",
+            make_image,
+            size=(32, 20),
+        )
+    _write_manifest(path, payload)
+
+    with pytest.raises(ManifestValidationError, match=message):
+        validate_run_manifest(path)
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("algorithm", "algorithm is unsupported"),
+        ("reference", "reference must be the restored state"),
+        ("bytes", "does not match deterministic AdaIN"),
+    ],
+)
+def test_adain_final_derivation_is_recomputed_from_bound_inputs(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    case: str,
+    message: str,
+) -> None:
+    path, payload = _generated_manifest(
+        tmp_path,
+        make_image,
+        color_strategy="adain",
+    )
+    assert payload["final_metrics"]["selected_state"] == "adain"
+    derivation = payload["final_metrics"]["derivation"]
+    if case == "algorithm":
+        derivation["algorithm"] = "scaleguard.adain.rgb-v2"
+    elif case == "reference":
+        derivation["reference_sha256"] = payload["steps"][0]["candidate"]["sha256"]
+    else:
+        _replace_artifact(
+            payload["final_image"],
+            tmp_path / "forged-adain.png",
+            make_image,
+            size=(32, 20),
+        )
+    _write_manifest(path, payload)
+
+    with pytest.raises(ManifestValidationError, match=message):
+        validate_run_manifest(path)
+
+
+def test_success_cannot_end_on_an_unconsumed_continue_state(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+) -> None:
+    path, payload = _generated_manifest(tmp_path, make_image, target_factor=16)
+    first_step = payload["steps"][0]
+    assert first_step["decision"] == "continue"
+    payload["steps"] = [first_step]
+    payload["status"] = "succeeded_with_rollback"
+    payload["achieved_factor"] = 4
+    payload["target_reached"] = False
+    payload["final_image"] = dict(first_step["candidate"])
+    payload["final_image"]["stage"] = "final_output"
+    payload["final_metrics"].update(
+        after_color_alignment=False,
+        selected_state="trusted",
+        selected_scale=4,
+        derivation={
+            "kind": "copy",
+            "source_sha256": first_step["candidate"]["sha256"],
+            "source_scale": 4,
+        },
+    )
+    _write_manifest(path, payload)
+
+    with pytest.raises(ManifestValidationError, match="dangling continue"):
+        validate_run_manifest(path)
+
+
+@pytest.mark.parametrize("status", ["running", "failed"])
+def test_early_phase_manifest_does_not_require_later_artifacts(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    status: str,
+) -> None:
+    path, payload = _generated_manifest(tmp_path, make_image)
+    payload.update(
+        status=status,
+        completion_level="STATIC_READY",
+        finished_at=None if status == "running" else payload["finished_at"],
+        achieved_factor=None,
+        target_reached=False,
+        restored_image=None,
+        restoration_metadata={},
+        restoration_process=None,
+        scale_session_process=None,
+        steps=[],
+        final_image=None,
+        final_metrics={},
+        events=[],
+        error=(
+            None
+            if status == "running"
+            else {"type": "SyntheticFailure", "message": "failed before restoration"}
+        ),
+    )
+    _write_manifest(path, payload)
+
+    assert validate_run_manifest(path)["status"] == status
+
+
+def test_manifest_recorder_uses_a_unique_fsynced_temporary(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = make_image(tmp_path / "source.png")
+    artifact = inspect_image(source, mock=False, stage="input")
+    manifest = RunManifest(
+        schema_version="1.0",
+        run_id="atomic-writer",
+        status=RunStatus.RUNNING,
+        completion_level=CompletionLevel.STATIC_READY,
+        started_at="2026-08-07T00:00:00+00:00",
+        finished_at=None,
+        mock=False,
+        config=PipelineConfig().as_dict(),
+        provenance={},
+        input_image=artifact,
+        requested_factor=4,
+    )
+    manifest_path = tmp_path / "run" / "manifest.json"
+    manifest_path.parent.mkdir()
+    stale_temporary = manifest_path.with_suffix(".json.tmp")
+    stale_temporary.write_text("unrelated writer", encoding="utf-8")
+    fsync_calls: list[int] = []
+    monkeypatch.setattr(
+        "scaleguard.contracts.os.fsync",
+        lambda descriptor: fsync_calls.append(descriptor),
+    )
+
+    ManifestRecorder(manifest_path, manifest)
+
+    assert stale_temporary.read_text(encoding="utf-8") == "unrelated writer"
+    assert len(fsync_calls) == 2
+    assert list(manifest_path.parent.glob(".manifest.json.*.tmp")) == []
 
 
 @pytest.mark.parametrize(

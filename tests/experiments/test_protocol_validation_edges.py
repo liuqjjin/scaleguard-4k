@@ -44,6 +44,7 @@ def _protocol_document() -> dict[str, Any]:
     ("mutate", "message"),
     [
         (lambda root: root.update(schema_version=2), "schema_version"),
+        (lambda root: root.update(name="renamed-ablation"), "fixed protocol"),
         (lambda root: root.update(integration_runner="other.sh"), "integration_runner"),
         (lambda root: root.update(base_requirements=[]), "base_requirements must be"),
         (
@@ -63,6 +64,10 @@ def _protocol_document() -> dict[str, Any]:
         (
             lambda root: root["metrics"].update(full_reference=["psnr", "psnr"]),
             "non-empty unique string list",
+        ),
+        (
+            lambda root: root["metrics"].update(full_reference=["psnr", "ssim"]),
+            "executable metric contract",
         ),
         (lambda root: root.update(notes=[]), "notes must be"),
     ],
@@ -546,6 +551,228 @@ def test_attempt_execution_accepts_all_bound_bytes(tmp_path: Path) -> None:
         )
         == []
     )
+
+
+def _system_evidence_fixture() -> tuple[dict[str, Any], bytes, dict[str, Any]]:
+    selected = [
+        {
+            "logical_index": index,
+            "physical_index": str(index),
+            "uuid": f"GPU-{index}",
+            "name": "NVIDIA GeForce RTX 4090",
+            "memory_total_mib": 24564,
+            "driver_version": "560.35.03",
+        }
+        for index in range(2)
+    ]
+    hardware = {"selected_gpu_count": 2, "selected_gpus": selected}
+    peaks = {
+        str(index): {
+            "uuid": f"GPU-{index}",
+            "name": "NVIDIA GeForce RTX 4090",
+            "memory_total_mib": 24564,
+            "peak_memory_used_mib": 2048 + index * 1024,
+            "peak_utilization_percent": 50 + index * 10,
+        }
+        for index in range(2)
+    }
+    execution = {
+        "started_at_utc": "2026-08-08T00:00:00Z",
+        "completed_at_utc": "2026-08-08T00:00:42Z",
+        "duration_seconds": 42,
+        "gpu_sampling": {
+            "sample_count": 4,
+            "sample_interval_seconds": 1.0,
+            "window_started_at_utc": "2026-08-08T00:00:00Z",
+            "window_completed_at_utc": "2026-08-08T00:00:01Z",
+            "window_duration_seconds": 1.0,
+            "boundary_tolerance_seconds": 5.0,
+            "maximum_gap_tolerance_seconds": 2.0,
+            "maximum_observed_gap_seconds": 1.0,
+            "temporal_coverage_complete": True,
+            "minimum_gpu_count": 2,
+            "preflight_receipt_bound": True,
+            "inventory_binding_complete": True,
+            "workload_sampling_complete": True,
+            "workload_observed_by_uuid": {"GPU-0": True, "GPU-1": True},
+            "workload_samples_by_uuid": {"GPU-0": 1, "GPU-1": 1},
+            "attribution_scope": "physical_gpu_host_level_not_process_attributed",
+            "evidence_complete": True,
+            "peak_by_physical_index": peaks,
+            "raw_csv": "gpu-samples.csv",
+        },
+    }
+    samples = (
+        b"timestamp_utc,sample_kind,index,uuid,name,memory_used_mib,"
+        b"memory_total_mib,utilization_gpu_percent\n"
+        b"2026-08-08T00:00:00Z,inventory,0,GPU-0,NVIDIA GeForce RTX 4090,"
+        b"1024,24564,0\n"
+        b"2026-08-08T00:00:00Z,inventory,1,GPU-1,NVIDIA GeForce RTX 4090,"
+        b"2048,24564,0\n"
+        b"2026-08-08T00:00:01Z,workload,0,GPU-0,NVIDIA GeForce RTX 4090,"
+        b"2048,24564,50\n"
+        b"2026-08-08T00:00:01Z,workload,1,GPU-1,NVIDIA GeForce RTX 4090,"
+        b"3072,24564,60\n"
+    )
+    return execution, samples, hardware
+
+
+def test_attempt_system_evidence_replays_physical_gpu_samples() -> None:
+    execution, samples, hardware = _system_evidence_fixture()
+
+    verified, issues = experiments._validate_attempt_system_evidence(
+        json.dumps(execution).encode(),
+        samples,
+        hardware,
+    )
+
+    assert issues == []
+    assert verified is not None
+    assert verified["duration_seconds"] == 42
+    normalized = verified["gpu_sampling"]["peak_by_physical_index"]
+    assert normalized["0"]["uuid_sha256"] == hashlib.sha256(b"GPU-0").hexdigest()
+    assert "uuid" not in normalized["0"]
+
+    tampered = copy.deepcopy(execution)
+    tampered["gpu_sampling"]["peak_by_physical_index"]["0"]["peak_memory_used_mib"] = 9999
+    rejected, rejected_issues = experiments._validate_attempt_system_evidence(
+        json.dumps(tampered).encode(),
+        samples,
+        hardware,
+    )
+    assert rejected is None
+    assert rejected_issues
+    assert "does not replay" in rejected_issues[0]
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (
+            lambda execution, _samples, _hardware: execution.update(duration_seconds=-1),
+            "non-negative",
+        ),
+        (
+            lambda execution, _samples, _hardware: execution["gpu_sampling"].update(
+                sample_interval_seconds=0.0
+            ),
+            "interval",
+        ),
+        (
+            lambda execution, _samples, _hardware: execution["gpu_sampling"].update(
+                evidence_complete=False
+            ),
+            "must be true",
+        ),
+        (
+            lambda execution, _samples, _hardware: execution["gpu_sampling"].update(
+                temporal_coverage_complete=False
+            ),
+            "must be true",
+        ),
+        (
+            lambda execution, _samples, _hardware: execution["gpu_sampling"].update(
+                minimum_gpu_count=1
+            ),
+            "selected topology",
+        ),
+        (
+            lambda execution, _samples, _hardware: execution["gpu_sampling"][
+                "workload_observed_by_uuid"
+            ].pop("GPU-1"),
+            "workload maps",
+        ),
+        (
+            lambda execution, _samples, _hardware: execution["gpu_sampling"][
+                "workload_observed_by_uuid"
+            ].update({"GPU-1": False}),
+            "incomplete GPU workload",
+        ),
+        (
+            lambda execution, _samples, _hardware: execution["gpu_sampling"][
+                "peak_by_physical_index"
+            ].pop("1"),
+            "do not cover",
+        ),
+        (
+            lambda _execution, samples, _hardware: samples.__setitem__(0, b"bad,header\n"),
+            "header",
+        ),
+    ],
+)
+def test_attempt_system_evidence_rejects_incomplete_or_unbound_samples(
+    mutate: Callable[[dict[str, Any], list[bytes], dict[str, Any]], Any],
+    message: str,
+) -> None:
+    execution, sample_payload, hardware = _system_evidence_fixture()
+    samples = [sample_payload]
+    mutate(execution, samples, hardware)
+
+    verified, issues = experiments._validate_attempt_system_evidence(
+        json.dumps(execution).encode(),
+        samples[0],
+        hardware,
+    )
+
+    assert verified is None
+    assert len(issues) == 1
+    assert message in issues[0]
+
+
+def test_attempt_system_evidence_rejects_short_csv_for_long_sampling_window() -> None:
+    execution, samples, hardware = _system_evidence_fixture()
+    execution["gpu_sampling"].update(
+        window_completed_at_utc="2026-08-08T00:00:42Z",
+        window_duration_seconds=42.0,
+    )
+
+    verified, issues = experiments._validate_attempt_system_evidence(
+        json.dumps(execution).encode(),
+        samples,
+        hardware,
+    )
+
+    assert verified is None
+    assert len(issues) == 1
+    assert "do not cover the sampling window" in issues[0]
+
+
+def test_attempt_system_evidence_rejects_timestamp_drift_inside_window() -> None:
+    execution, samples, hardware = _system_evidence_fixture()
+    drifted = samples.replace(
+        b"2026-08-08T00:00:01Z,workload,1",
+        b"2026-08-07T23:59:59Z,workload,1",
+    )
+
+    verified, issues = experiments._validate_attempt_system_evidence(
+        json.dumps(execution).encode(),
+        drifted,
+        hardware,
+    )
+
+    assert verified is None
+    assert len(issues) == 1
+    assert "not monotonic" in issues[0]
+
+
+def test_attempt_system_evidence_rejects_an_unobserved_sampling_gap() -> None:
+    execution, samples, hardware = _system_evidence_fixture()
+    execution["gpu_sampling"].update(
+        window_completed_at_utc="2026-08-08T00:00:04Z",
+        window_duration_seconds=4.0,
+        maximum_observed_gap_seconds=4.0,
+    )
+    sparse = samples.replace(b"2026-08-08T00:00:01Z", b"2026-08-08T00:00:04Z")
+
+    verified, issues = experiments._validate_attempt_system_evidence(
+        json.dumps(execution).encode(),
+        sparse,
+        hardware,
+    )
+
+    assert verified is None
+    assert len(issues) == 1
+    assert "exceeds the maximum allowed gap" in issues[0]
 
 
 def _model_evidence_fixture(

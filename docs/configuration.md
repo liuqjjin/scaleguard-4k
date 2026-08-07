@@ -69,8 +69,17 @@ fourkagent:
   toolbox_root: null              # Materialized 4KAgent toolbox runtime.
   hps_root: null                  # Materialized HPSv2 assets.
   quality_model_path: null        # Local MUSIQ checkpoint passed to the overlay.
-  llm_model: gpt-4-turbo          # Scheduler model recorded in evidence.
-  api_key_env: OPENAI_API_KEY     # Uppercase credential-variable name, never the secret.
+  llm_provider: dashscope         # Provider is bound to endpoint, model, and key name.
+  llm_base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  llm_region: cn-beijing
+  llm_model: qwen3.7-flash-2026-07-15 # Dated scheduler snapshot.
+  api_key_env: DASHSCOPE_API_KEY  # Variable name only; the secret is never serialized.
+  llm_connect_timeout_seconds: 10
+  llm_read_timeout_seconds: 120
+  llm_max_transport_retries: 4    # Additional network/429/5xx attempts.
+  llm_max_structure_retries: 2    # Additional responses for invalid task-order JSON.
+  llm_max_completion_tokens: 1024
+  llm_temperature: 0.0            # Fixed for the audited scheduling contract.
 
 coz:
   mode: fake                     # fake | command | upstream | persistent
@@ -123,6 +132,21 @@ A non-mock run rejects it unless
 `controller.accept_unvalidated_quality_proxy` is explicitly enabled for
 calibration work. Real integrated gating with PyIQA is constrained to CPU so it
 does not interfere with either upstream GPU lifecycle.
+
+The canonical scheduler sends only the text scheduling prompt and locally
+derived degradation labels to Alibaba Cloud Model Studio. It never sends image
+bytes. The API uses DashScope's OpenAI-compatible wire format, but it does not
+contact or bill OpenAI. JSON mode and non-thinking output are enforced by the
+adapter; the response is checked against the exact task permutation before
+execution. See [ADR 0012](adr/0012-bind-the-remote-scheduler-to-dashscope.md).
+
+`llm_provider: openai` is an explicit compatibility mode, not the canonical or
+default runtime. Selecting it requires the complete matching binding:
+`https://api.openai.com/v1`, region `global`, a `gpt-*` model identifier, and
+`OPENAI_API_KEY`; providers, endpoints, regions, model namespaces, and
+credential-variable names cannot be mixed. The canonical real-runtime
+preflight accepts only the DashScope binding shown above, so an OpenAI-mode run
+does not qualify as canonical project evidence.
 
 `identity` restoration and `fixed` acceptance are not general runtime escape
 hatches. They are accepted only when `experiment_group` and

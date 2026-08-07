@@ -173,9 +173,11 @@ calibration-001,1,true
 calibration-002,1,false
 ```
 
-The default calibration algorithm uses acceptable, non-mock samples only:
+The default calibration algorithm uses acceptable, non-mock samples only. Its
+minimum and resampling unit is one unique input-image SHA-256 cluster, not an
+individual recursive scale step or a repeated seed:
 
-- minimum acceptable samples: 20;
+- minimum acceptable input-image clusters: 20;
 - quality lower quantile: 0.05;
 - error upper quantile: 0.95;
 - linear quantile estimator;
@@ -196,9 +198,10 @@ uv run --locked python -I scripts/experiments/calibrate_gates.py \
 Use `--include-measurement` only when every accepted calibration sample has the
 same declared measurement model and a measurement score.
 
-The tool verifies artifact hashes and complete label coverage. Fewer acceptable
-real samples write `status: insufficient_data` and exit non-zero. Mock samples
-are counted but excluded. Mixed quality backends are rejected.
+The tool fully validates every source manifest, verifies artifact hashes and
+complete label coverage, and rejects mock or ineligible run states. Fewer than
+20 acceptable real input-image clusters write `status: insufficient_data` and
+exit non-zero. Mixed evaluator identities are rejected.
 
 Copy the resulting threshold values exactly into a dedicated runtime
 configuration, set `metrics.calibration_receipt` to the receipt, and verify the
@@ -210,10 +213,11 @@ uv run --locked scaleguard evaluation verify \
   --config configs/runtime/calibrated.yaml
 ```
 
-Verification checks schema, receipt digest, empty issue list, minimum sample
-count, input evidence hashes, backend and proxy identity, measurement identity,
-bootstrap intervals, and exact threshold equality. A file merely present at
-the configured path is not enough; run this verifier.
+Verification reopens the recorded labels and manifests, reruns calibration from
+those exact bytes, and compares the rebuilt receipt. It also checks evaluator
+and weight identity, complete forward-model parameters, cluster-bootstrap
+settings, intervals, and exact threshold equality. A self-hash or a file merely
+present at the configured path is not enough; run this verifier.
 
 The controller repeats that verification when it is constructed and records
 the resolved receipt path, size, SHA-256, and semantic result in the run
@@ -235,13 +239,15 @@ The declared protocol includes:
 - controller: quality gain, scale NRMSE, scale edge MAE, and optional
   measurement NRMSE;
 - decisions: accept, stop, rollback, and failure rates; and
-- systems: success rate, wall time, first-load versus steady-step time, and
-  peak VRAM per physical GPU.
+- systems: success rate, wall time, CoZ initialization versus first/steady-step
+  time, worker allocator peaks, and host-level sampled memory/utilization for
+  each preflight-bound physical GPU.
 
-The metric harness consumes completed run manifests and an aligned reference
-for each manifest. It verifies the manifest file, the manifest-declared input
-and final-image hashes, and the reference bytes before measuring anything. A
-single pair can be measured with:
+The metric harness consumes completed run manifests. PSNR, SSIM, and LPIPS
+require one aligned reference per manifest; MUSIQ and CLIPIQA can run without a
+reference. It fully validates each manifest and verifies the declared input,
+final-image, reference, and weight bytes before measuring anything. A single
+full-reference pair can be measured with:
 
 ```bash
 uv run --locked scaleguard evaluation metrics \
@@ -250,9 +256,9 @@ uv run --locked scaleguard evaluation metrics \
   --output artifacts/metrics/example.json
 ```
 
-Repeat `--manifest` and `--reference` in corresponding order for a batch. The
-receipt retains one sample record per pair and does not aggregate or impute
-scores:
+Repeat `--manifest` and `--reference` in corresponding order for a
+full-reference batch. The receipt retains one sample record per pair and does
+not impute scores:
 
 ```bash
 uv run --locked scaleguard evaluation metrics \
@@ -272,7 +278,8 @@ The built-in reference metrics have this fixed contract:
 - stored RGB code values are divided by 255; no transfer-function
   linearization is applied;
 - output and reference dimensions must match exactly; there is no resize;
-- EXIF orientation must be absent or identity;
+- EXIF orientation must be absent or identity; the evaluator never rotates
+  stored pixels implicitly;
 - ICC profiles are not applied and their byte digests must match;
 - the declared border is cropped from all four sides before reference metrics;
 - PSNR is `10 log10(1 / MSE)` over all retained RGB samples, with exact matches
@@ -297,30 +304,42 @@ uv run --locked scaleguard evaluation metrics \
   --metric lpips \
   --metric musiq \
   --metric clipiqa \
-  --pyiqa-weight lpips=weights/metrics/pyiqa/LPIPS_v0.1_alex.pth \
-  --pyiqa-backbone lpips=weights/metrics/pyiqa/alexnet-owt-7be5be79.pth \
+  --pyiqa-weight lpips=weights/metrics/lpips/LPIPS_v0.1_alex-df73285e.pth \
+  --pyiqa-backbone lpips=weights/metrics/user-provided/alexnet-owt-7be5be79.pth \
   --pyiqa-weight musiq=weights/metrics/pyiqa/musiq_koniq_ckpt-e95806b9.pth \
-  --pyiqa-weight clipiqa=weights/metrics/pyiqa/RN50.pt \
+  --pyiqa-weight clipiqa=weights/metrics/clipiqa/RN50.pt \
   --device cuda:0 \
   --output artifacts/metrics/example-learned.json
 ```
 
 CLIPIQA accepts only the OpenAI RN50 checkpoint whose SHA-256 is fixed by the
-pinned PyIQA implementation. Learned metrics require `--crop-border 0` because
+pinned PyIQA implementation. `download_weights.sh --include-optional` prepares
+the content-addressed LPIPS linear-layer and CLIPIQA RN50 files. The separate
+244 MB Torchvision AlexNet ImageNet backbone is not in the project lock because
+the publisher URL exposes only a short hash prefix; supply it explicitly,
+record its complete locally measured SHA-256 in the metric receipt, and review
+its terms before the study. Learned metrics require `--crop-border 0` because
 the adapter will not create unbound temporary crops. Every result records the
 metric name, backend and version, native score direction, requested/observed
 device when initialization succeeds, parameters, and local weight hashes.
 
 The JSON output is atomically replaced and carries its own canonical
-`receipt_sha256`. A clean receipt exits 0. Missing weights, mock runs, failed
+`receipt_sha256`, but that self-hash is not a trust decision. A clean receipt
+exits 0. Missing weights, mock runs, failed
 run status, metric exceptions, or invalid evidence remain in `issues`, produce
 `completed_with_issues`, and exit 1. Counts distinguish measured, failed, and
 not-run metrics. Invalid command structure exits 2.
 
-The harness does not publish aggregate statistics or systems measurements.
-Those values must come from reviewed experiment code and raw artifacts, not
-manual transcription. Keeping these definitions fixed is mandatory because
-upstream issue history documents PSNR/SSIM setting mismatches.
+The metric command does not aggregate across samples. Aggregate comparisons
+come only from the paired-summary implementation described below. On
+consumption it reopens the exact manifest, input, output, reference, and weight
+paths, verifies their recorded hashes and the complete manifest contract, and
+recomputes PSNR/SSIM. A learned score is admitted only when its recorded local
+checkpoint remains available, hash-identical, and can be rerun offline with
+the locked implementation. A missing learned-metric runtime remains visible as
+`unverified`; its reported value is never used. Keeping these definitions
+fixed is mandatory because upstream issue history documents PSNR/SSIM setting
+mismatches.
 
 ## Paired summary
 
@@ -334,6 +353,8 @@ uv run --locked python -I scripts/experiments/summarize_ablation.py \
   --ab-fixed /root/autodl-tmp/scaleguard-4k/ablation/suite-001/jobs/ab-fixed \
   --scaleguard /root/autodl-tmp/scaleguard-4k/ablation/suite-001/jobs/scaleguard \
   --suite-receipt /root/autodl-tmp/scaleguard-4k/ablation/suite-001/suite-receipt.json \
+  --metric-receipt artifacts/metrics/full-reference.json \
+  --metric-receipt artifacts/metrics/no-reference.json \
   --output-csv artifacts/ablation/paired.csv \
   --output-json artifacts/ablation/paired.json \
   --artifact-root "$PWD"
@@ -348,10 +369,34 @@ verified full input SHA-256 and seed. The summary:
 - retains missing groups, failures, mock runs, and missing metrics as issues;
 - independently revalidates the passed suite, every raw wrapper attempt,
   manifest path/hash binding, and within-sample hardware identity;
+- maps each repeated `--metric-receipt` sample by the exact resolved manifest
+  path, manifest SHA-256, and run ID, rejecting duplicates, identity drift, and
+  conflicting metric definitions;
 - marks a pair research-eligible only when all four real successful groups are
   complete, issue-free, and exactly present in that verified suite receipt;
 - records all source-manifest hashes; and
-- computes no aggregate headline claim.
+- computes the same predeclared ScaleGuard-minus-baseline paired effects for
+  controller consistency and source-replayed PSNR, SSIM, LPIPS, MUSIQ, and
+  CLIPIQA scores, with improvement-oriented deltas, paired Cohen dz,
+  input-cluster bootstrap 95% intervals, exclusion rates, and per-group
+  systems aggregates; and
+- independently replays the wrapper's UUID-bound `gpu-samples.csv` against its
+  execution summary, reports GPU UUIDs only as SHA-256 identities, and keeps
+  those host-level peaks separate from worker allocator evidence.
+
+External score states are explicit: `measured`, `missing`, `failed`,
+`unverified`, or `not_applicable`. In particular, A-only is a native-resolution
+restoration baseline. Its output is never resized or imputed for the 4×
+full-reference comparison, so PSNR, SSIM, and LPIPS are recorded as
+`not_applicable` for that comparison. No metric receipts are required to build
+a diagnostic summary, but such a summary contains no external metric claim.
+
+The aggregation unit is the unique input SHA-256 cluster. Runs or seeds from
+the same input are averaged within that cluster before equal-weight bootstrap
+resampling, preventing repeated scale steps or seeds from masquerading as
+independent images. The JSON receipt binds the exact CSV bytes and is the commit
+marker for the two-file summary. Statistics with insufficient eligible input
+clusters remain explicitly unavailable; the command never invents a value.
 
 The suite reader requires the recorded clean project commit to remain checked
 out and every original raw evidence path to remain available. Omitting
@@ -360,7 +405,10 @@ then explicitly marked `research_eligible: false`.
 
 ## Statistical reporting
 
-For a completed study:
+The summary already implements paired effects, standardized effect sizes,
+cluster-bootstrap intervals, missing rates, success rate, wall time, CoZ
+initialization/first/steady-step timing, worker allocator peaks, and replayed
+host-level per-GPU aggregates. For a completed study, reporting must still:
 
 - report sample counts before and after exclusions;
 - use paired differences at the input level;
@@ -370,7 +418,8 @@ For a completed study:
 - include threshold and tile-size sensitivity;
 - preserve outliers and representative failure cases;
 - distinguish first-load from steady-state time; and
-- report every physical GPU's sampled peak with the sampling interval.
+- report every physical GPU's sampled peak and sampling interval as host-level,
+  non-process-attributed evidence, never as a component-specific VRAM figure.
 
 Do not select the best seed after viewing evaluation outputs. If multiple seeds
 are part of the protocol, declare them in advance and report their distribution.

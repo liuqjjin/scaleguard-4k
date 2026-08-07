@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,15 +12,27 @@ import pytest
 from PIL import Image
 
 from scaleguard.cli import main
+from scaleguard.evaluation import metrics as metrics_module
 from scaleguard.evaluation.evidence import EvaluationEvidenceError, canonical_sha256
 from scaleguard.evaluation.metrics import (
     METRIC_RECEIPT_SCHEMA,
     evaluate_metric_receipt,
     psnr_rgb,
     ssim_rgb,
+    verify_metric_receipt,
 )
+from scaleguard.manifest import ManifestValidationError
 
 from ._fixtures import artifact, write_summary_manifest
+
+
+@pytest.fixture(autouse=True)
+def _accept_minimal_metric_fixtures(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        metrics_module,
+        "validate_run_manifest",
+        lambda path, **_kwargs: json.loads(path.read_text(encoding="utf-8")),
+    )
 
 
 def _fail_project_root_resolution() -> Path:
@@ -69,6 +82,38 @@ def test_rgb_psnr_and_ssim_definitions() -> None:
         ssim_rgb(black[:10], black[:10])
 
 
+def test_pyiqa_environment_forces_safe_checkpoint_loading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("TORCH_FORCE_WEIGHTS_ONLY_LOAD", raising=False)
+    monkeypatch.setenv("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
+
+    with metrics_module._offline_environment(tmp_path):
+        assert os.environ["TORCH_FORCE_WEIGHTS_ONLY_LOAD"] == "1"
+        assert "TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD" not in os.environ
+
+    assert "TORCH_FORCE_WEIGHTS_ONLY_LOAD" not in os.environ
+    assert os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] == "1"
+
+
+def test_canonical_pyiqa_hashes_match_the_checked_in_weight_lock() -> None:
+    lock = json.loads(
+        (Path(__file__).resolve().parents[2] / "weights-lock.json").read_text(encoding="utf-8")
+    )
+    by_id = {artifact["id"]: artifact for artifact in lock["artifacts"]}
+    expected = {
+        "lpips": ("scaleguard-pyiqa-lpips-v01-alex", "metrics/lpips"),
+        "musiq": ("scaleguard-pyiqa-musiq-koniq", "metrics/pyiqa"),
+        "clipiqa": ("scaleguard-pyiqa-clipiqa-openai-rn50", "metrics/clipiqa/RN50.pt"),
+    }
+
+    for metric_name, (artifact_id, destination) in expected.items():
+        artifact_record = by_id[artifact_id]
+        assert metrics_module._PYIQA_WEIGHT_SHA256[metric_name] == artifact_record["known_sha256"]
+        assert artifact_record["destination"] == destination
+
+
 def test_single_sample_receipt_binds_all_evidence_and_is_self_hashed(tmp_path: Path) -> None:
     source = _rgb(tmp_path / "source.png", 20)
     final = _rgb(tmp_path / "final.png", 80)
@@ -108,6 +153,64 @@ def test_single_sample_receipt_binds_all_evidence_and_is_self_hashed(tmp_path: P
     body = dict(on_disk)
     digest = body.pop("receipt_sha256")
     assert digest == canonical_sha256(body)
+
+
+def test_metric_receipt_verifier_replays_scores_and_rejects_self_signed_forgery(
+    tmp_path: Path,
+) -> None:
+    source = _rgb(tmp_path / "source.png", 20)
+    final = _rgb(tmp_path / "final.png", 80)
+    reference = _rgb(tmp_path / "reference.png", 70)
+    manifest = _manifest(
+        tmp_path / "manifest.json",
+        run_id="replayed",
+        source=source,
+        output=final,
+    )
+    receipt_path = tmp_path / "metric-receipt.json"
+    evaluate_metric_receipt([manifest], [reference], receipt_path)
+
+    verified = verify_metric_receipt(receipt_path, artifact_root=tmp_path)
+
+    assert verified["verified"] is True
+    assert verified["research_eligible"] is True
+    assert verified["samples"][0]["metrics"]["psnr"]["status"] == "measured"
+
+    forged = json.loads(receipt_path.read_text(encoding="utf-8"))
+    forged["samples"][0]["metrics"][0]["value"] = 99.0
+    forged.pop("receipt_sha256")
+    forged["receipt_sha256"] = canonical_sha256(forged)
+    receipt_path.write_text(json.dumps(forged), encoding="utf-8")
+
+    with pytest.raises(EvaluationEvidenceError, match="score differs on replay"):
+        verify_metric_receipt(receipt_path, artifact_root=tmp_path)
+
+
+def test_metric_receipt_verifier_rejects_manifest_identity_drift(tmp_path: Path) -> None:
+    source = _rgb(tmp_path / "source.png", 20)
+    final = _rgb(tmp_path / "final.png", 80)
+    reference = _rgb(tmp_path / "reference.png", 80)
+    manifest = _manifest(
+        tmp_path / "manifest.json",
+        run_id="identity",
+        source=source,
+        output=final,
+    )
+    receipt_path = tmp_path / "metric-receipt.json"
+    evaluate_metric_receipt(
+        [manifest],
+        [reference],
+        receipt_path,
+        metric_names=("psnr",),
+    )
+    forged = json.loads(receipt_path.read_text(encoding="utf-8"))
+    forged["samples"][0]["manifest"]["sha256"] = "f" * 64
+    forged.pop("receipt_sha256")
+    forged["receipt_sha256"] = canonical_sha256(forged)
+    receipt_path.write_text(json.dumps(forged), encoding="utf-8")
+
+    with pytest.raises(EvaluationEvidenceError, match="manifest SHA256 changed"):
+        verify_metric_receipt(receipt_path, artifact_root=tmp_path)
 
 
 def test_batch_evaluation_preserves_pair_order_and_crop_contract(tmp_path: Path) -> None:
@@ -357,6 +460,11 @@ def test_pyiqa_adapter_records_version_weight_device_and_blocks_network(
     )
     weight = tmp_path / "musiq.pth"
     weight.write_bytes(b"locked-musiq")
+    monkeypatch.setitem(
+        metrics_module._PYIQA_WEIGHT_SHA256,
+        "musiq",
+        artifact(weight)["sha256"],
+    )
     calls: list[dict[str, Any]] = []
 
     class FakeTensor:
@@ -422,6 +530,11 @@ def test_pyiqa_adapter_success_path(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     )
     weight = tmp_path / "musiq.pth"
     weight.write_bytes(b"locked-musiq")
+    monkeypatch.setitem(
+        metrics_module._PYIQA_WEIGHT_SHA256,
+        "musiq",
+        artifact(weight)["sha256"],
+    )
 
     class FakeTensor:
         def detach(self) -> FakeTensor:
@@ -466,6 +579,68 @@ def test_pyiqa_adapter_success_path(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     result = receipt["samples"][0]["metrics"][0]
     assert result["status"] == "measured"
     assert result["value"] == pytest.approx(73.25)
+
+
+def test_learned_metric_is_not_research_eligible_when_replay_source_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _rgb(tmp_path / "source.png", 0)
+    final = _rgb(tmp_path / "final.png", 10)
+    manifest = _manifest(
+        tmp_path / "manifest.json",
+        run_id="learned-replay",
+        source=source,
+        output=final,
+    )
+    weight = tmp_path / "musiq.pth"
+    weight.write_bytes(b"locked-musiq")
+    monkeypatch.setitem(
+        metrics_module._PYIQA_WEIGHT_SHA256,
+        "musiq",
+        artifact(weight)["sha256"],
+    )
+
+    class FakeTensor:
+        def detach(self) -> FakeTensor:
+            return self
+
+        def cpu(self) -> FakeTensor:
+            return self
+
+        def item(self) -> float:
+            return 61.5
+
+    class CallableMetric:
+        lower_better = False
+
+        def __call__(self, _path: str) -> FakeTensor:
+            return FakeTensor()
+
+    monkeypatch.setattr(
+        "scaleguard.evaluation.metrics.importlib.metadata.version",
+        lambda name: "0.1.16",
+    )
+    monkeypatch.setattr(
+        "scaleguard.evaluation.metrics.importlib.import_module",
+        lambda name: SimpleNamespace(create_metric=lambda *args, **kwargs: CallableMetric()),
+    )
+    receipt_path = tmp_path / "receipt.json"
+    evaluate_metric_receipt(
+        [manifest],
+        None,
+        receipt_path,
+        metric_names=("musiq",),
+        pyiqa_weights={"musiq": weight},
+    )
+    weight.unlink()
+
+    verified = verify_metric_receipt(receipt_path, artifact_root=tmp_path)
+
+    assert verified["verified"] is False
+    assert verified["research_eligible"] is False
+    assert verified["issues"] == ["learned_metric_source_unavailable:musiq"]
+    assert verified["samples"][0]["metrics"]["musiq"]["status"] == "unverified"
 
 
 def test_pyiqa_initialization_failures_are_receipted(
@@ -521,13 +696,18 @@ def test_pyiqa_initialization_failures_are_receipted(
         metric_names=("clipiqa",),
         pyiqa_weights={"clipiqa": weight},
     )
-    assert "pinned OpenAI RN50" in bad_clipiqa["samples"][0]["metrics"][0]["issue"]
+    assert "pinned canonical checkpoint" in bad_clipiqa["samples"][0]["metrics"][0]["issue"]
 
     monkeypatch.setattr(
         "scaleguard.evaluation.metrics.importlib.import_module",
         lambda name: SimpleNamespace(
             create_metric=lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("broken"))
         ),
+    )
+    monkeypatch.setitem(
+        metrics_module._PYIQA_WEIGHT_SHA256,
+        "musiq",
+        artifact(weight)["sha256"],
     )
     init_failure = evaluate_metric_receipt(
         [manifest],
@@ -578,6 +758,57 @@ def test_metric_request_validation_rejects_ambiguous_batches(tmp_path: Path) -> 
             metric_names=("musiq",),
             crop_border=1,
         )
+
+
+def test_no_reference_metric_accepts_no_reference_image(tmp_path: Path) -> None:
+    source = _rgb(tmp_path / "source.png", 0)
+    final = _rgb(tmp_path / "final.png", 10)
+    manifest = _manifest(
+        tmp_path / "manifest.json",
+        run_id="no-reference",
+        source=source,
+        output=final,
+    )
+
+    receipt = evaluate_metric_receipt(
+        [manifest],
+        None,
+        tmp_path / "receipt.json",
+        metric_names=("musiq",),
+    )
+
+    assert receipt["samples"][0]["reference_image"] is None
+    assert "counts must match" not in " ".join(receipt["issues"])
+
+
+def test_metric_receipt_rejects_output_aliases_and_requires_full_manifest_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _rgb(tmp_path / "source.png", 0)
+    final = _rgb(tmp_path / "final.png", 10)
+    reference = _rgb(tmp_path / "reference.png", 10)
+    manifest = _manifest(
+        tmp_path / "manifest.json",
+        run_id="validation",
+        source=source,
+        output=final,
+    )
+
+    with pytest.raises(EvaluationEvidenceError, match=r"would overwrite .* final image"):
+        evaluate_metric_receipt([manifest], [reference], final, metric_names=("psnr",))
+
+    def reject(*_args: object, **_kwargs: object) -> None:
+        raise ManifestValidationError("forged runtime evidence")
+
+    monkeypatch.setattr(metrics_module, "validate_run_manifest", reject)
+    receipt = evaluate_metric_receipt(
+        [manifest],
+        [reference],
+        tmp_path / "receipt.json",
+        metric_names=("psnr",),
+    )
+    assert "forged runtime evidence" in receipt["issues"][0]
 
 
 def test_cli_runs_single_and_batch_metrics(tmp_path: Path, monkeypatch, capsys) -> None:

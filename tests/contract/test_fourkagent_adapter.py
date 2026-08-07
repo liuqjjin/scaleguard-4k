@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -18,7 +19,34 @@ from scaleguard.runtime.process import ProcessRunner
 @pytest.fixture(autouse=True)
 def reachable_external_depictqa(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("scaleguard.backends.fourkagent.tcp_ready", lambda _host, _port: True)
-    monkeypatch.setenv("OPENAI_API_KEY", "contract-credential-placeholder")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "contract-credential-placeholder")
+
+
+def adapter_document(result: str, **extra: object) -> dict[str, object]:
+    return {
+        "result": result,
+        "execution_path": {"subtasks": [], "tools": []},
+        "models": {
+            "remote_scheduler": {
+                "provider": "dashscope",
+                "api_style": "openai-compatible-chat-completions",
+                "region": "cn-beijing",
+                "endpoint_host_sha256": hashlib.sha256(b"dashscope.aliyuncs.com").hexdigest(),
+                "requested_model": "qwen3.7-flash-2026-07-15",
+                "request_parameters": {
+                    "max_completion_tokens": 1024,
+                    "temperature": 0.0,
+                    "response_format": "json_object",
+                    "enable_thinking": False,
+                    "connect_timeout_seconds": 10.0,
+                    "read_timeout_seconds": 120.0,
+                    "max_transport_retries": 4,
+                },
+                "attempts": [],
+            }
+        },
+        **extra,
+    }
 
 
 def evidence(argv: Sequence[str], cwd: Path, log_dir: Path, label: str) -> ProcessEvidence:
@@ -88,7 +116,7 @@ def test_fourkagent_adapter_normalizes_the_locked_result_and_records_execution_p
             "HF_HUB_DISABLE_TELEMETRY": "1",
             "PYTHONDONTWRITEBYTECODE": "1",
             "TORCH_FORCE_WEIGHTS_ONLY_LOAD": "1",
-            "OPENAI_API_KEY": "contract-credential-placeholder",
+            "DASHSCOPE_API_KEY": "contract-credential-placeholder",
         }
         cache_dir = Path(env["OUTLINES_CACHE_DIR"])
         assert cache_dir.is_dir()
@@ -96,8 +124,10 @@ def test_fourkagent_adapter_normalizes_the_locked_result_and_records_execution_p
         assert Path(argv[argv.index("--runtime-view") + 1]).is_relative_to(
             (tmp_path / "run").resolve()
         )
-        assert argv[argv.index("--llm-model") + 1] == "gpt-4-turbo"
-        assert argv[argv.index("--api-key-env") + 1] == "OPENAI_API_KEY"
+        assert argv[argv.index("--llm-provider") + 1] == "dashscope"
+        assert argv[argv.index("--llm-region") + 1] == "cn-beijing"
+        assert argv[argv.index("--llm-model") + 1] == "qwen3.7-flash-2026-07-15"
+        assert argv[argv.index("--api-key-env") + 1] == "DASHSCOPE_API_KEY"
         assert (
             Path(argv[argv.index("--perception-model-path") + 1])
             == (tmp_path / "weights/4kagent/models/Qwen2.5-VL-7B-Instruct").resolve()
@@ -110,10 +140,13 @@ def test_fourkagent_adapter_normalizes_the_locked_result_and_records_execution_p
             image.convert("RGB").save(result_path, "JPEG")
         (output_dir / "scaleguard-result.json").write_text(
             json.dumps(
-                {
-                    "result": str(result_path.resolve()),
-                    "execution_path": {"tasks": ["denoise", "deblur"]},
-                }
+                adapter_document(
+                    str(result_path.resolve()),
+                    execution_path={
+                        "subtasks": ["denoise", "deblur"],
+                        "tools": ["denoise_tool", "deblur_tool"],
+                    },
+                )
             ),
             encoding="utf-8",
         )
@@ -132,7 +165,10 @@ def test_fourkagent_adapter_normalizes_the_locked_result_and_records_execution_p
     assert result.image.media_type == "image/png"
     assert result.image.mock is False
     assert result.metadata["backend"] == "4kagent_upstream"
-    assert result.metadata["execution_path"] == {"tasks": ["denoise", "deblur"]}
+    assert result.metadata["execution_path"] == {
+        "subtasks": ["denoise", "deblur"],
+        "tools": ["denoise_tool", "deblur_tool"],
+    }
     assert result.metadata["terminal_generative_sr"] is False
     assert result.metadata["depictqa_service"] == {
         "managed": False,
@@ -140,6 +176,154 @@ def test_fourkagent_adapter_normalizes_the_locked_result_and_records_execution_p
         "port": 5001,
     }
     assert result.process is not None
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "detail"),
+    [
+        (
+            "request_parameters",
+            {
+                "max_completion_tokens": 1024,
+                "temperature": 0.1,
+                "response_format": "json_object",
+                "enable_thinking": False,
+                "connect_timeout_seconds": 10.0,
+                "read_timeout_seconds": 120.0,
+                "max_transport_retries": 4,
+            },
+            "request parameters",
+        ),
+        ("attempts", {}, "must be a list"),
+        ("attempts", [{"outcome": "invented"}], "status code"),
+        (
+            "attempts",
+            [
+                {
+                    "outcome": "retryable_http_error",
+                    "status_code": 401,
+                    "request_id": "request-1",
+                }
+            ],
+            "terminal status",
+        ),
+        (
+            "attempts",
+            [
+                {
+                    "outcome": "completed",
+                    "status_code": 200,
+                    "request_id": "request-1",
+                    "response_model": "qwen-floating-alias",
+                    "finish_reason": "stop",
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "total_tokens": 12,
+                }
+            ],
+            "model contract",
+        ),
+        (
+            "attempts",
+            [
+                {
+                    "outcome": "completed",
+                    "status_code": 200,
+                    "request_id": "request-1",
+                    "response_model": "qwen3.7-flash-2026-07-15",
+                    "finish_reason": "stop",
+                    "prompt_tokens": 10,
+                    "completion_tokens": 2,
+                    "total_tokens": 99,
+                }
+            ],
+            "inconsistent",
+        ),
+    ],
+)
+def test_fourkagent_adapter_rejects_tampered_scheduler_execution_evidence(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+    detail: str,
+) -> None:
+    source = make_image(tmp_path / "source.png")
+
+    def fake_run(
+        _runner: ProcessRunner,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        log_dir: Path,
+        label: str,
+        **_kwargs: Any,
+    ) -> ProcessEvidence:
+        output_dir = Path(argv[argv.index("--output-dir") + 1])
+        result_path = make_image(output_dir / "result.png")
+        document = adapter_document(str(result_path.resolve()))
+        models = document["models"]
+        assert isinstance(models, dict)
+        remote_scheduler = models["remote_scheduler"]
+        assert isinstance(remote_scheduler, dict)
+        remote_scheduler[field] = value
+        (output_dir / "scaleguard-result.json").write_text(
+            json.dumps(document),
+            encoding="utf-8",
+        )
+        return evidence(argv, cwd, log_dir, label)
+
+    monkeypatch.setattr(ProcessRunner, "run", fake_run)
+
+    with pytest.raises(ArtifactError, match=detail):
+        backend(tmp_path).restore(
+            source,
+            tmp_path / "output.png",
+            bridge_factor=1,
+            run_dir=tmp_path / "run",
+        )
+
+
+def test_fourkagent_adapter_rejects_unexpected_scheduler_evidence_fields(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = make_image(tmp_path / "source.png")
+
+    def fake_run(
+        _runner: ProcessRunner,
+        argv: Sequence[str],
+        *,
+        cwd: Path,
+        log_dir: Path,
+        label: str,
+        **_kwargs: Any,
+    ) -> ProcessEvidence:
+        output_dir = Path(argv[argv.index("--output-dir") + 1])
+        result_path = make_image(output_dir / "result.png")
+        document = adapter_document(str(result_path.resolve()))
+        models = document["models"]
+        assert isinstance(models, dict)
+        scheduler = models["remote_scheduler"]
+        assert isinstance(scheduler, dict)
+        scheduler["raw_prompt"] = "must not be persisted"
+        (output_dir / "scaleguard-result.json").write_text(
+            json.dumps(document),
+            encoding="utf-8",
+        )
+        return evidence(argv, cwd, log_dir, label)
+
+    monkeypatch.setattr(ProcessRunner, "run", fake_run)
+
+    with pytest.raises(ArtifactError, match="unexpected fields"):
+        backend(tmp_path).restore(
+            source,
+            tmp_path / "output.png",
+            bridge_factor=1,
+            run_dir=tmp_path / "run",
+        )
 
 
 @pytest.mark.parametrize(
@@ -206,7 +390,7 @@ def test_fourkagent_adapter_rejects_a_result_outside_its_private_directory(
         output_dir = Path(argv[argv.index("--output-dir") + 1])
         output_dir.mkdir(parents=True, exist_ok=True)
         (output_dir / "scaleguard-result.json").write_text(
-            json.dumps({"result": str(escaped.resolve())}),
+            json.dumps(adapter_document(str(escaped.resolve()))),
             encoding="utf-8",
         )
         return evidence(argv, cwd, log_dir, label)
@@ -244,7 +428,7 @@ def test_fourkagent_adapter_rejects_a_result_symlink_outside_its_private_directo
         linked_result = output_dir / "linked.png"
         linked_result.symlink_to(escaped)
         (output_dir / "scaleguard-result.json").write_text(
-            json.dumps({"result": str(linked_result)}),
+            json.dumps(adapter_document(str(linked_result))),
             encoding="utf-8",
         )
         return evidence(argv, cwd, log_dir, label)
@@ -280,7 +464,7 @@ def test_fourkagent_adapter_accepts_a_result_relative_to_its_private_output(
         result_path = output_dir / "nested" / "result.png"
         make_image(result_path)
         (output_dir / "scaleguard-result.json").write_text(
-            json.dumps({"result": "nested/result.png"}),
+            json.dumps(adapter_document("nested/result.png")),
             encoding="utf-8",
         )
         return evidence(argv, cwd, log_dir, label)
@@ -381,9 +565,14 @@ def test_fourkagent_adapter_manages_depictqa_and_expands_project_relative_paths(
         def evidence(self) -> dict[str, object]:
             return {
                 "managed": True,
+                "argv": list(self.call["argv"]),
+                "cwd": str(Path(self.call["cwd"]).resolve()),
                 "host": self.call["host"],
                 "port": self.call["port"],
-                "stopped": self.exited,
+                "returncode": -15,
+                "duration_seconds": 0.1,
+                "stdout_path": str(self.call["log_dir"] / "depictqa-eval.stdout.log"),
+                "stderr_path": str(self.call["log_dir"] / "depictqa-eval.stderr.log"),
             }
 
     def fake_run(
@@ -402,7 +591,7 @@ def test_fourkagent_adapter_manages_depictqa_and_expands_project_relative_paths(
         with Image.open(input_path) as image:
             image.save(result_path, "PNG")
         (output_dir / "scaleguard-result.json").write_text(
-            json.dumps({"result": str(result_path.resolve())}),
+            json.dumps(adapter_document(str(result_path.resolve()))),
             encoding="utf-8",
         )
         return evidence(argv, cwd, log_dir, label)
@@ -451,7 +640,17 @@ def test_fourkagent_adapter_manages_depictqa_and_expands_project_relative_paths(
     ]
     assert result.metadata["depictqa_service"] == {
         "managed": True,
+        "argv": [
+            str((project_root / ".runtime/envs/depictqa/bin/python").resolve()),
+            "server.py",
+            "--checkout",
+            str(checkout),
+        ],
+        "cwd": str((project_root / "third_party/checkouts/4KAgent/DepictQA").resolve()),
         "host": "127.0.0.1",
         "port": 5002,
-        "stopped": True,
+        "returncode": -15,
+        "duration_seconds": 0.1,
+        "stdout_path": str(tmp_path / "run/workers/4kagent/depictqa/depictqa-eval.stdout.log"),
+        "stderr_path": str(tmp_path / "run/workers/4kagent/depictqa/depictqa-eval.stderr.log"),
     }

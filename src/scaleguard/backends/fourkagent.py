@@ -12,6 +12,11 @@ from scaleguard.images import inspect_image, normalize_to_png
 from scaleguard.runtime.process import ProcessRunner, format_command, project_executable
 from scaleguard.runtime.service import ManagedService, tcp_ready
 from scaleguard.strict_json import StrictJSONError, loads_object
+from scaleguard.worker_contracts import (
+    WorkerContractError,
+    validate_fourkagent_restoration_metadata,
+    validate_scheduler_evidence,
+)
 
 
 def _project_path(project_root: Path, path: Path) -> Path:
@@ -98,10 +103,28 @@ class FourKAgentBackend:
                     or Path("weights/metrics/pyiqa/musiq_koniq_ckpt-e95806b9.pth"),
                 )
             ),
+            "--llm-provider",
+            self.config.llm_provider,
+            "--llm-base-url",
+            self.config.llm_base_url,
+            "--llm-region",
+            self.config.llm_region,
             "--llm-model",
             self.config.llm_model,
             "--api-key-env",
             self.config.api_key_env,
+            "--llm-connect-timeout-seconds",
+            str(self.config.llm_connect_timeout_seconds),
+            "--llm-read-timeout-seconds",
+            str(self.config.llm_read_timeout_seconds),
+            "--llm-max-transport-retries",
+            str(self.config.llm_max_transport_retries),
+            "--llm-max-structure-retries",
+            str(self.config.llm_max_structure_retries),
+            "--llm-max-completion-tokens",
+            str(self.config.llm_max_completion_tokens),
+            "--llm-temperature",
+            str(self.config.llm_temperature),
         ]
         if self.config.perception_model_path:
             model_path = Path(self.config.perception_model_path)
@@ -167,6 +190,13 @@ class FourKAgentBackend:
                     f"4KAgent result evidence escaped its private output directory: {evidence_path}"
                 )
             result_data = loads_object(resolved_evidence.read_text(encoding="utf-8"))
+            models = result_data.get("models")
+            if not isinstance(models, dict):
+                raise TypeError("4KAgent evidence is missing remote scheduler provenance")
+            remote_scheduler = validate_scheduler_evidence(
+                models.get("remote_scheduler"),
+                config=self.config,
+            )
             reported_result = Path(result_data["result"])
             upstream_result = (
                 reported_result.resolve()
@@ -175,7 +205,7 @@ class FourKAgentBackend:
             )
         except ArtifactError:
             raise
-        except (OSError, KeyError, TypeError, StrictJSONError) as error:
+        except (OSError, KeyError, TypeError, StrictJSONError, WorkerContractError) as error:
             raise ArtifactError(
                 f"4KAgent did not write a valid adapter result at {evidence_path}: {error}"
             ) from error
@@ -188,16 +218,25 @@ class FourKAgentBackend:
                 f"4KAgent result escaped its private output directory: {upstream_result}"
             )
         normalize_to_png(upstream_result, destination)
+        metadata = {
+            "backend": self.name,
+            "bridge_factor": bridge_factor,
+            "execution_path": result_data.get("execution_path", {}),
+            "terminal_generative_sr": False,
+            "depictqa_service": service_evidence,
+            "remote_scheduler": remote_scheduler,
+        }
+        try:
+            validated_metadata = validate_fourkagent_restoration_metadata(
+                metadata,
+                config=self.config,
+                bridge_factor=bridge_factor,
+            )
+        except WorkerContractError as error:
+            raise ArtifactError(f"invalid 4KAgent parent evidence: {error}") from error
         return WorkerResult(
             image=inspect_image(destination, mock=False, stage="4kagent_restoration"),
-            metadata={
-                "backend": self.name,
-                "bridge_factor": bridge_factor,
-                "execution_path": result_data.get("execution_path", {}),
-                "terminal_generative_sr": False,
-                "depictqa_service": service_evidence,
-                "llm_model": self.config.llm_model,
-            },
+            metadata=validated_metadata,
             process=evidence,
         )
 

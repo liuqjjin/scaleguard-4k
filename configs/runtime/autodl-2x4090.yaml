@@ -32,8 +32,17 @@ fourkagent:
   toolbox_root: weights/4kagent/runtime/toolbox-root
   hps_root: weights/4kagent/hpsv2
   quality_model_path: weights/metrics/pyiqa/musiq_koniq_ckpt-e95806b9.pth
-  llm_model: gpt-4-turbo
-  api_key_env: OPENAI_API_KEY
+  llm_provider: dashscope
+  llm_base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  llm_region: cn-beijing
+  llm_model: qwen3.7-flash-2026-07-15
+  api_key_env: DASHSCOPE_API_KEY
+  llm_connect_timeout_seconds: 10
+  llm_read_timeout_seconds: 120
+  llm_max_transport_retries: 4
+  llm_max_structure_retries: 2
+  llm_max_completion_tokens: 1024
+  llm_temperature: 0
 
 coz:
   mode: persistent

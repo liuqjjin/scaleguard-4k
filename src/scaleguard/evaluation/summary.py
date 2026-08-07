@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import csv
+import hashlib
+import io
 import json
-import os
+import math
 from collections.abc import Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any, cast
+
+import numpy as np
 
 from scaleguard.config import EXPERIMENT_GROUPS as EXPERIMENT_GROUPS
 from scaleguard.errors import ScaleGuardError
@@ -18,8 +23,12 @@ from scaleguard.evaluation.evidence import (
     load_json_object,
     optional_finite_number,
     require_text,
+    resolved_distinct_paths,
     verify_artifact,
+    write_bytes_atomic,
+    write_json_atomic,
 )
+from scaleguard.evaluation.metrics import verify_metric_receipt
 from scaleguard.experiments import (
     ExperimentProtocolError,
     manifest_experiment_issues,
@@ -29,7 +38,7 @@ from scaleguard.manifest import ManifestValidationError, validate_run_manifest
 from scaleguard.provenance import load_regular_file_snapshot
 from scaleguard.strict_json import loads_object
 
-SUMMARY_SCHEMA = "scaleguard.paired-summary/v1"
+SUMMARY_SCHEMA = "scaleguard.paired-summary/v2"
 _GROUP_PREFIX = {
     "A-only": "a_only",
     "B-only": "b_only",
@@ -42,6 +51,20 @@ _METRIC_NAMES = (
     "scale_edge_mae",
     "measurement_nrmse",
 )
+_EXTERNAL_METRIC_NAMES = ("psnr", "ssim", "lpips", "musiq", "clipiqa")
+_SYSTEM_METRIC_NAMES = (
+    "success_rate",
+    "stop_rate",
+    "rollback_rate",
+    "wall_time_seconds",
+    "coz_initialization_seconds",
+    "coz_first_step_seconds",
+    "coz_steady_step_seconds",
+    "peak_vram_mib",
+)
+_BOOTSTRAP_SAMPLES = 2000
+_BOOTSTRAP_CONFIDENCE = 0.95
+_BOOTSTRAP_SEED = 20260807
 _PAIR_PROVENANCE_FIELDS = (
     "bootstrap_receipt_sha256",
     "materialization_marker_sha256",
@@ -194,6 +217,415 @@ def _quality_calibration_evidence(
     )
 
 
+def _wall_time_seconds(manifest: Mapping[str, Any]) -> float | None:
+    started = manifest.get("started_at")
+    finished = manifest.get("finished_at")
+    if not isinstance(started, str) or not isinstance(finished, str):
+        return None
+    try:
+        start_time = datetime.fromisoformat(started.replace("Z", "+00:00"))
+        finish_time = datetime.fromisoformat(finished.replace("Z", "+00:00"))
+        duration = (finish_time - start_time).total_seconds()
+    except (TypeError, ValueError):
+        return None
+    return duration if math.isfinite(duration) and duration >= 0.0 else None
+
+
+def _peak_vram_mib(manifest: Mapping[str, Any]) -> float | None:
+    processes: list[Any] = [
+        manifest.get("restoration_process"),
+        manifest.get("scale_session_process"),
+    ]
+    steps = manifest.get("steps")
+    if isinstance(steps, list):
+        processes.extend(step.get("process") for step in steps if isinstance(step, Mapping))
+    peaks: list[int] = []
+    for process in processes:
+        raw_peaks = process.get("peak_vram_mib") if isinstance(process, Mapping) else None
+        if isinstance(raw_peaks, Mapping):
+            peaks.extend(value for value in raw_peaks.values() if type(value) is int and value >= 0)
+    return float(max(peaks)) if peaks else None
+
+
+def _coz_timing_metrics(manifest: Mapping[str, Any]) -> dict[str, float | None]:
+    steps = manifest.get("steps")
+    if not isinstance(steps, list):
+        steps = []
+    step_durations: list[float] = []
+    initialization: float | None = None
+    for step in steps:
+        if not isinstance(step, Mapping):
+            continue
+        metadata = step.get("worker_metadata")
+        if not isinstance(metadata, Mapping):
+            continue
+        backend = metadata.get("backend")
+        if backend not in {"chain_of_zoom_subprocess", "chain_of_zoom_persistent"}:
+            continue
+        duration = metadata.get("duration_seconds")
+        if (
+            not isinstance(duration, bool)
+            and isinstance(duration, (int, float))
+            and math.isfinite(float(duration))
+            and float(duration) >= 0.0
+        ):
+            step_durations.append(float(duration))
+        initialization_value = metadata.get("initialization_duration_seconds")
+        if (
+            initialization is None
+            and not isinstance(initialization_value, bool)
+            and isinstance(initialization_value, (int, float))
+            and math.isfinite(float(initialization_value))
+            and float(initialization_value) >= 0.0
+        ):
+            initialization = float(initialization_value)
+    return {
+        "coz_initialization_seconds": initialization,
+        "coz_first_step_seconds": step_durations[0] if step_durations else None,
+        "coz_steady_step_seconds": (
+            float(np.mean(step_durations[1:])) if len(step_durations) > 1 else None
+        ),
+    }
+
+
+def _system_metrics(manifest: Mapping[str, Any], status: str) -> dict[str, float | None]:
+    steps = manifest.get("steps")
+    last_decision: str | None = None
+    if isinstance(steps, list) and steps and isinstance(steps[-1], Mapping):
+        raw_decision = steps[-1].get("decision")
+        last_decision = raw_decision if isinstance(raw_decision, str) else None
+    events = manifest.get("events")
+    final_gate_rollback = isinstance(events, list) and any(
+        isinstance(event, Mapping) and event.get("event") == "final_gate_rollback"
+        for event in events
+    )
+    rolled_back = (
+        status == "succeeded_with_rollback" or last_decision == "rollback" or final_gate_rollback
+    )
+    return {
+        "success_rate": float(status in {"succeeded", "succeeded_with_rollback"}),
+        "stop_rate": None if last_decision is None else float(last_decision == "stop"),
+        "rollback_rate": float(rolled_back),
+        "wall_time_seconds": _wall_time_seconds(manifest),
+        **_coz_timing_metrics(manifest),
+        "peak_vram_mib": _peak_vram_mib(manifest),
+    }
+
+
+def _bootstrap_cluster_mean(
+    cluster_values: Mapping[str, Sequence[float]],
+    *,
+    identity: str,
+) -> dict[str, Any]:
+    means = np.asarray(
+        [float(np.mean(values)) for _cluster, values in sorted(cluster_values.items())],
+        dtype=np.float64,
+    )
+    if not len(means):
+        return {
+            "mean": None,
+            "median": None,
+            "bootstrap_ci": {
+                "lower": None,
+                "upper": None,
+                "confidence": _BOOTSTRAP_CONFIDENCE,
+                "status": "no_data",
+            },
+            "independent_clusters": 0,
+        }
+    estimate = float(np.mean(means))
+    median = float(np.median(means))
+    if len(means) < 2:
+        interval = {
+            "lower": None,
+            "upper": None,
+            "confidence": _BOOTSTRAP_CONFIDENCE,
+            "status": "insufficient_clusters",
+        }
+    else:
+        identity_seed = int(hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16], 16)
+        rng = np.random.default_rng(_BOOTSTRAP_SEED ^ identity_seed)
+        indices = rng.integers(
+            0,
+            len(means),
+            size=(_BOOTSTRAP_SAMPLES, len(means)),
+            endpoint=False,
+        )
+        estimates = np.mean(means[indices], axis=1)
+        alpha = (1.0 - _BOOTSTRAP_CONFIDENCE) / 2.0
+        lower, upper = np.quantile(estimates, [alpha, 1.0 - alpha], method="linear")
+        interval = {
+            "lower": float(lower),
+            "upper": float(upper),
+            "confidence": _BOOTSTRAP_CONFIDENCE,
+            "status": "estimated",
+        }
+    return {
+        "mean": estimate,
+        "median": median,
+        "bootstrap_ci": interval,
+        "independent_clusters": len(means),
+    }
+
+
+def _paired_effects(pairs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    effects: list[dict[str, Any]] = []
+    directions = {
+        "quality_gain": "higher_is_better",
+        "scale_nrmse": "lower_is_better",
+        "scale_edge_mae": "lower_is_better",
+        "measurement_nrmse": "lower_is_better",
+    }
+    trusted_count = sum(pair["research_eligible"] is True for pair in pairs)
+    for comparator in EXPERIMENT_GROUPS:
+        if comparator == "ScaleGuard":
+            continue
+        for metric in _METRIC_NAMES:
+            raw_by_cluster: dict[str, list[float]] = {}
+            improvement_by_cluster: dict[str, list[float]] = {}
+            observed_pairs = 0
+            for pair in pairs:
+                if pair["research_eligible"] is not True:
+                    continue
+                runs = pair["runs"]
+                baseline = runs.get(comparator)
+                scaleguard = runs.get("ScaleGuard")
+                if not isinstance(baseline, Mapping) or not isinstance(scaleguard, Mapping):
+                    continue
+                baseline_metrics = baseline.get("metrics")
+                scaleguard_metrics = scaleguard.get("metrics")
+                if not isinstance(baseline_metrics, Mapping) or not isinstance(
+                    scaleguard_metrics, Mapping
+                ):
+                    continue
+                baseline_value = baseline_metrics.get(metric)
+                scaleguard_value = scaleguard_metrics.get(metric)
+                if (
+                    isinstance(baseline_value, bool)
+                    or not isinstance(baseline_value, (int, float))
+                    or not math.isfinite(float(baseline_value))
+                    or isinstance(scaleguard_value, bool)
+                    or not isinstance(scaleguard_value, (int, float))
+                    or not math.isfinite(float(scaleguard_value))
+                ):
+                    continue
+                cluster = str(scaleguard["input_sha256"])
+                raw_delta = float(scaleguard_value) - float(baseline_value)
+                improvement = raw_delta if directions[metric] == "higher_is_better" else -raw_delta
+                raw_by_cluster.setdefault(cluster, []).append(raw_delta)
+                improvement_by_cluster.setdefault(cluster, []).append(improvement)
+                observed_pairs += 1
+            raw = _bootstrap_cluster_mean(
+                raw_by_cluster,
+                identity=f"paired:{comparator}:{metric}:raw",
+            )
+            improvement_summary = _bootstrap_cluster_mean(
+                improvement_by_cluster,
+                identity=f"paired:{comparator}:{metric}:improvement",
+            )
+            cluster_means = np.asarray(
+                [
+                    float(np.mean(values))
+                    for _cluster, values in sorted(improvement_by_cluster.items())
+                ],
+                dtype=np.float64,
+            )
+            standardized: float | None = None
+            if len(cluster_means) >= 2:
+                standard_deviation = float(np.std(cluster_means, ddof=1))
+                if standard_deviation > 0.0:
+                    standardized = float(np.mean(cluster_means) / standard_deviation)
+            effects.append(
+                {
+                    "comparison": f"ScaleGuard - {comparator}",
+                    "metric": metric,
+                    "direction": directions[metric],
+                    "population": "research_eligible_complete_pairs",
+                    "counts": {
+                        "all_pairs": len(pairs),
+                        "trusted_complete_pairs": trusted_count,
+                        "observed_pairs": observed_pairs,
+                        "missing_or_excluded_pairs": len(pairs) - observed_pairs,
+                        "missing_or_excluded_rate": (
+                            (len(pairs) - observed_pairs) / len(pairs) if pairs else None
+                        ),
+                    },
+                    "raw_delta": raw,
+                    "improvement_oriented_delta": improvement_summary,
+                    "paired_standardized_effect_dz": standardized,
+                }
+            )
+    return effects
+
+
+def _systems_aggregates(pairs: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for group in EXPERIMENT_GROUPS:
+        records = [
+            pair["runs"].get(group) for pair in pairs if isinstance(pair.get("runs"), Mapping)
+        ]
+        real_records = [
+            record
+            for record in records
+            if isinstance(record, Mapping) and record.get("mock") is False
+        ]
+        metrics: dict[str, Any] = {}
+        for metric in _SYSTEM_METRIC_NAMES:
+            by_cluster: dict[str, list[float]] = {}
+            for record in real_records:
+                systems = record.get("systems")
+                value = systems.get(metric) if isinstance(systems, Mapping) else None
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(float(value))
+                ):
+                    continue
+                by_cluster.setdefault(str(record["input_sha256"]), []).append(float(value))
+            aggregate = _bootstrap_cluster_mean(
+                by_cluster,
+                identity=f"systems:{group}:{metric}",
+            )
+            observed = sum(len(values) for values in by_cluster.values())
+            metrics[metric] = {
+                "population": "full_manifest_validated_non_mock_runs",
+                "counts": {
+                    "runs": len(real_records),
+                    "observed": observed,
+                    "missing": len(real_records) - observed,
+                    "missing_rate": (
+                        (len(real_records) - observed) / len(real_records) if real_records else None
+                    ),
+                },
+                **aggregate,
+            }
+        result[group] = metrics
+    return result
+
+
+def _host_gpu_aggregates(
+    pairs: Sequence[Mapping[str, Any]],
+    suite_evidence: Mapping[str, Any],
+) -> dict[str, Any]:
+    source = suite_evidence.get("system_evidence")
+    by_sample = source.get("by_sample") if isinstance(source, Mapping) else None
+    if not isinstance(by_sample, Mapping):
+        by_sample = {}
+    pairs_by_id = {str(pair.get("pair_id")): pair for pair in pairs if isinstance(pair, Mapping)}
+    by_group: dict[str, Any] = {}
+    for group in EXPERIMENT_GROUPS:
+        duration_by_cluster: dict[str, list[float]] = {}
+        interval_by_cluster: dict[str, list[float]] = {}
+        gpu_values: dict[str, dict[str, Any]] = {}
+        observed_runs = 0
+        for sample_id, group_records in by_sample.items():
+            if not isinstance(sample_id, str) or not isinstance(group_records, Mapping):
+                continue
+            system = group_records.get(group)
+            pair = pairs_by_id.get(sample_id)
+            if not isinstance(system, Mapping) or not isinstance(pair, Mapping):
+                continue
+            runs = pair.get("runs")
+            run = runs.get(group) if isinstance(runs, Mapping) else None
+            if not isinstance(run, Mapping) or run.get("mock") is not False:
+                continue
+            cluster = str(run.get("input_sha256"))
+            duration = system.get("duration_seconds")
+            sampling = system.get("gpu_sampling")
+            if (
+                isinstance(duration, bool)
+                or not isinstance(duration, (int, float))
+                or not math.isfinite(float(duration))
+                or not isinstance(sampling, Mapping)
+            ):
+                continue
+            interval = sampling.get("sample_interval_seconds")
+            peaks = sampling.get("peak_by_physical_index")
+            if (
+                isinstance(interval, bool)
+                or not isinstance(interval, (int, float))
+                or not math.isfinite(float(interval))
+                or not isinstance(peaks, Mapping)
+            ):
+                continue
+            duration_by_cluster.setdefault(cluster, []).append(float(duration))
+            interval_by_cluster.setdefault(cluster, []).append(float(interval))
+            observed_runs += 1
+            for raw_peak in peaks.values():
+                if not isinstance(raw_peak, Mapping):
+                    continue
+                uuid_sha256 = raw_peak.get("uuid_sha256")
+                if not isinstance(uuid_sha256, str):
+                    continue
+                identity = {
+                    "uuid_sha256": uuid_sha256,
+                    "name": raw_peak.get("name"),
+                    "memory_total_mib": raw_peak.get("memory_total_mib"),
+                }
+                entry = gpu_values.setdefault(
+                    uuid_sha256,
+                    {
+                        "identity": identity,
+                        "physical_indices": set(),
+                        "logical_indices": set(),
+                        "peak_memory_used_mib": {},
+                        "peak_utilization_percent": {},
+                    },
+                )
+                if entry["identity"] != identity:
+                    raise EvaluationEvidenceError(
+                        "validated GPU UUID has inconsistent hardware identity"
+                    )
+                entry["physical_indices"].add(str(raw_peak.get("physical_index")))
+                entry["logical_indices"].add(raw_peak.get("logical_index"))
+                for metric in ("peak_memory_used_mib", "peak_utilization_percent"):
+                    value = raw_peak.get(metric)
+                    if type(value) is int and value >= 0:
+                        entry[metric].setdefault(cluster, []).append(float(value))
+
+        per_gpu: dict[str, Any] = {}
+        for uuid_sha256, entry in sorted(gpu_values.items()):
+            per_gpu[uuid_sha256] = {
+                **entry["identity"],
+                "physical_indices": sorted(entry["physical_indices"]),
+                "logical_indices": sorted(entry["logical_indices"]),
+                "peak_memory_used_mib": _bootstrap_cluster_mean(
+                    entry["peak_memory_used_mib"],
+                    identity=f"host-gpu:{group}:{uuid_sha256}:memory",
+                ),
+                "peak_utilization_percent": _bootstrap_cluster_mean(
+                    entry["peak_utilization_percent"],
+                    identity=f"host-gpu:{group}:{uuid_sha256}:utilization",
+                ),
+            }
+        by_group[group] = {
+            "counts": {
+                "validated_non_mock_runs": sum(
+                    isinstance(pair.get("runs"), Mapping)
+                    and isinstance(pair["runs"].get(group), Mapping)
+                    and pair["runs"][group].get("mock") is False
+                    for pair in pairs
+                ),
+                "observed_runs": observed_runs,
+            },
+            "wrapper_duration_seconds": _bootstrap_cluster_mean(
+                duration_by_cluster,
+                identity=f"host-gpu:{group}:wrapper-duration",
+            ),
+            "sample_interval_seconds": _bootstrap_cluster_mean(
+                interval_by_cluster,
+                identity=f"host-gpu:{group}:sample-interval",
+            ),
+            "by_gpu_uuid_sha256": per_gpu,
+        }
+    return {
+        "verified": suite_evidence.get("verified") is True and bool(by_sample),
+        "source": "independently_replayed_wrapper_execution_and_gpu_samples",
+        "attribution_scope": "physical_gpu_host_level_not_process_attributed",
+        "by_group": by_group,
+    }
+
+
 def _run_record(
     path: Path,
     *,
@@ -234,6 +666,7 @@ def _run_record(
     issues: list[str] = []
     final_image = manifest.get("final_image")
     final_sha256: str | None = None
+    protected_paths = [str(path), str(Path(str(input_evidence["verified_path"])).resolve())]
     if final_image is not None:
         final_evidence = verify_artifact(
             final_image,
@@ -242,6 +675,7 @@ def _run_record(
             artifact_root=artifact_root,
         )
         final_sha256 = final_evidence["sha256"]
+        protected_paths.append(str(Path(str(final_evidence["verified_path"])).resolve()))
     else:
         issues.append("missing_final_image")
 
@@ -293,6 +727,9 @@ def _run_record(
         config if isinstance(config, dict) else {},
         provenance if isinstance(provenance, dict) else None,
     )
+    calibration_path = calibration_evidence.get("path")
+    if isinstance(calibration_path, str) and Path(calibration_path).is_absolute():
+        protected_paths.append(str(Path(calibration_path).resolve()))
     issues.extend(calibration_issues)
     pairing_fingerprint, pairing_issues = _pairing_fingerprint(
         manifest,
@@ -313,6 +750,7 @@ def _run_record(
         "pairing_fingerprint_sha256": pairing_fingerprint,
         "quality_calibration": calibration_evidence,
         "metrics": metrics,
+        "systems": _system_metrics(manifest, status),
         "issues": issues,
     }
     evidence = {
@@ -322,11 +760,15 @@ def _run_record(
         "run_id": run_id,
         "pair_id": pair_id,
         "input_sha256": input_evidence["sha256"],
+        "protected_paths": sorted(set(protected_paths)),
     }
     return pair_id, record, evidence
 
 
-def _flatten_pair(pair: Mapping[str, Any]) -> dict[str, Any]:
+def _flatten_pair(
+    pair: Mapping[str, Any],
+    external_metric_names: Sequence[str],
+) -> dict[str, Any]:
     row: dict[str, Any] = {
         "pair_id": pair["pair_id"],
         "complete": pair["complete"],
@@ -345,23 +787,21 @@ def _flatten_pair(pair: Mapping[str, Any]) -> dict[str, Any]:
         for metric in _METRIC_NAMES:
             value = record["metrics"][metric] if record else None
             row[f"{prefix}_{metric}"] = "" if value is None else value
+        for metric in external_metric_names:
+            external = record.get("external_metrics", {}).get(metric) if record else None
+            row[f"{prefix}_{metric}_status"] = (
+                external.get("status") if isinstance(external, Mapping) else "missing"
+            )
+            value = external.get("value") if isinstance(external, Mapping) else None
+            row[f"{prefix}_{metric}"] = "" if value is None else value
     return row
 
 
-def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
-
-
-def _write_csv_atomic(path: Path, pairs: Sequence[Mapping[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    rows = [_flatten_pair(pair) for pair in pairs]
+def _csv_bytes(
+    pairs: Sequence[Mapping[str, Any]],
+    external_metric_names: Sequence[str],
+) -> bytes:
+    rows = [_flatten_pair(pair, external_metric_names) for pair in pairs]
     fieldnames = ["pair_id", "complete", "research_eligible", "issues"]
     for group in EXPERIMENT_GROUPS:
         prefix = _GROUP_PREFIX[group]
@@ -373,13 +813,18 @@ def _write_csv_atomic(path: Path, pairs: Sequence[Mapping[str, Any]]) -> None:
                 f"{prefix}_mock",
                 f"{prefix}_final_image_sha256",
                 *(f"{prefix}_{metric}" for metric in _METRIC_NAMES),
+                *(
+                    field
+                    for metric in external_metric_names
+                    for field in (f"{prefix}_{metric}_status", f"{prefix}_{metric}")
+                ),
             ]
         )
-    with temporary.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-    os.replace(temporary, path)
+    handle = io.StringIO(newline="")
+    writer = csv.DictWriter(handle, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(rows)
+    return handle.getvalue().encode("utf-8")
 
 
 def _lower_sha256(value: Any, *, context: str) -> str:
@@ -405,6 +850,7 @@ def _suite_receipt_evidence(
             "sha256": None,
             "project_commit": None,
             "hardware": None,
+            "system_evidence": None,
             "issues": ["suite_receipt_missing"],
         }
 
@@ -438,6 +884,7 @@ def _suite_receipt_evidence(
 
     suite_bindings: dict[tuple[str, str], tuple[str, str]] = {}
     hardware_by_sample: dict[str, dict[str, set[str]]] = {}
+    systems_by_sample: dict[str, dict[str, dict[str, Any]]] = {}
     groups_by_sample: dict[str, set[str]] = {}
     for index, raw_job in enumerate(raw_jobs):
         job_context = f"{context}.jobs[{index}]"
@@ -487,6 +934,13 @@ def _suite_receipt_evidence(
         )
         sample_hardware["identity_sha256"].add(identity)
         sample_hardware["class_sha256"].add(hardware_class)
+        system_evidence = raw_job.get("system_evidence")
+        if system_evidence is not None:
+            if not isinstance(system_evidence, dict):
+                raise EvaluationEvidenceError(f"{job_context}.system_evidence must be an object")
+            systems_by_sample.setdefault(sample_id, {})[group] = json.loads(
+                json.dumps(system_evidence, allow_nan=False)
+            )
 
     expected_bindings = {
         (str(item["pair_id"]), str(item["group"])): (
@@ -521,8 +975,306 @@ def _suite_receipt_evidence(
         "sha256": receipt_sha256,
         "project_commit": project_commit,
         "hardware": {"by_sample": hardware_summary},
+        "system_evidence": {"by_sample": systems_by_sample},
         "issues": issues,
     }
+
+
+def _bind_metric_receipts(
+    receipt_paths: Sequence[Path],
+    records: Mapping[str, Mapping[str, dict[str, Any]]],
+    *,
+    artifact_root: Path | None,
+) -> tuple[
+    list[dict[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, int],
+    list[Path],
+]:
+    expected_by_path: dict[str, tuple[str, str, str, dict[str, Any]]] = {}
+    for group_records in records.values():
+        for group, record in group_records.items():
+            manifest_path = str(Path(str(record["manifest_path"])).resolve())
+            if manifest_path in expected_by_path:
+                raise EvaluationEvidenceError(
+                    f"manifest path is reused across paired runs: {manifest_path}"
+                )
+            expected_by_path[manifest_path] = (
+                str(record["manifest_sha256"]),
+                str(record["run_id"]),
+                group,
+                record,
+            )
+
+    resolved_receipts: set[str] = set()
+    receipt_evidence: list[dict[str, Any]] = []
+    definitions: dict[str, dict[str, Any]] = {}
+    result_identities: dict[str, str] = {}
+    bound_manifests: set[str] = set()
+    protected_paths: set[Path] = set()
+    for receipt_index, receipt_path in enumerate(receipt_paths):
+        resolved_receipt = str(receipt_path.expanduser().resolve())
+        if resolved_receipt in resolved_receipts:
+            raise EvaluationEvidenceError(f"duplicate metric receipt path: {resolved_receipt}")
+        resolved_receipts.add(resolved_receipt)
+        verified = verify_metric_receipt(receipt_path, artifact_root=artifact_root)
+        receipt_evidence.append(
+            {
+                key: value
+                for key, value in verified.items()
+                if key not in {"samples", "metric_definitions", "protected_paths"}
+            }
+        )
+        raw_protected_paths = verified.get("protected_paths")
+        if not isinstance(raw_protected_paths, list) or any(
+            not isinstance(source, str) or not Path(source).is_absolute()
+            for source in raw_protected_paths
+        ):
+            raise AssertionError("verified metric receipt protected paths are invalid")
+        protected_paths.update(Path(source).resolve() for source in raw_protected_paths)
+        raw_definitions = verified["metric_definitions"]
+        if not isinstance(raw_definitions, Mapping):
+            raise AssertionError("verified metric definitions must be a mapping")
+        for name, raw_definition in raw_definitions.items():
+            if name not in _EXTERNAL_METRIC_NAMES or not isinstance(raw_definition, dict):
+                raise EvaluationEvidenceError(
+                    f"metric receipt {receipt_index} returned an invalid definition"
+                )
+            previous = definitions.get(name)
+            if previous is not None and previous != raw_definition:
+                raise EvaluationEvidenceError(
+                    f"external metric definition conflicts across receipts: {name}"
+                )
+            definitions[name] = dict(raw_definition)
+
+        raw_samples = verified["samples"]
+        if not isinstance(raw_samples, list):
+            raise AssertionError("verified metric receipt samples must be a list")
+        for sample_index, sample in enumerate(raw_samples):
+            if not isinstance(sample, Mapping):
+                raise AssertionError("verified metric receipt sample must be a mapping")
+            manifest_path = str(Path(str(sample["manifest_path"])).resolve())
+            expected = expected_by_path.get(manifest_path)
+            if expected is None:
+                raise EvaluationEvidenceError(
+                    f"metric receipt sample does not map to a supplied manifest: {manifest_path}"
+                )
+            expected_sha256, expected_run_id, group, record = expected
+            if (
+                sample.get("manifest_sha256") != expected_sha256
+                or sample.get("run_id") != expected_run_id
+            ):
+                raise EvaluationEvidenceError(
+                    f"metric receipt sample identity drift for manifest: {manifest_path}"
+                )
+            if manifest_path in bound_manifests:
+                raise EvaluationEvidenceError(
+                    f"multiple metric receipt samples bind the same manifest: {manifest_path}"
+                )
+            bound_manifests.add(manifest_path)
+            raw_metrics = sample.get("metrics")
+            if not isinstance(raw_metrics, Mapping):
+                raise AssertionError("verified sample metrics must be a mapping")
+            observed_metrics: dict[str, dict[str, Any]] = {}
+            for name, raw_metric in raw_metrics.items():
+                if name not in definitions or not isinstance(raw_metric, Mapping):
+                    raise EvaluationEvidenceError(
+                        f"metric receipt sample {sample_index} has invalid metric {name!r}"
+                    )
+                metric = dict(raw_metric)
+                identity = metric.get("identity_sha256")
+                if metric.get("status") == "measured":
+                    if not isinstance(identity, str):
+                        raise EvaluationEvidenceError(
+                            f"measured external metric has no identity: {name}"
+                        )
+                    previous_identity = result_identities.get(name)
+                    if previous_identity is not None and previous_identity != identity:
+                        raise EvaluationEvidenceError(
+                            f"measured external metric definition conflicts: {name}"
+                        )
+                    result_identities[name] = identity
+                if group == "A-only" and definitions[name]["reference_required"] is True:
+                    metric = {
+                        "status": "not_applicable",
+                        "value": None,
+                        "direction": definitions[name]["direction"],
+                        "identity_sha256": definitions[name]["identity_sha256"],
+                        "reason": "native_resolution_output_not_comparable_to_4x_reference",
+                    }
+                observed_metrics[name] = metric
+            record["external_metrics"] = observed_metrics
+            record["metric_receipt"] = {
+                "path": verified["path"],
+                "sha256": verified["sha256"],
+                "receipt_sha256": verified["receipt_sha256"],
+                "research_eligible": verified["research_eligible"],
+            }
+
+    for name, identity in result_identities.items():
+        definitions[name]["measured_identity_sha256"] = identity
+
+    status_counts = {
+        "measured": 0,
+        "missing": 0,
+        "not_applicable": 0,
+        "unverified": 0,
+        "failed": 0,
+    }
+    for group_records in records.values():
+        for group, record in group_records.items():
+            observed = record.setdefault("external_metrics", {})
+            if not isinstance(observed, dict):
+                raise AssertionError("external metrics must be a dictionary")
+            for name, definition in definitions.items():
+                if name not in observed:
+                    if group == "A-only" and definition["reference_required"] is True:
+                        observed[name] = {
+                            "status": "not_applicable",
+                            "value": None,
+                            "direction": definition["direction"],
+                            "identity_sha256": definition["identity_sha256"],
+                            "reason": "native_resolution_output_not_comparable_to_4x_reference",
+                        }
+                    else:
+                        observed[name] = {
+                            "status": "missing",
+                            "value": None,
+                            "direction": definition["direction"],
+                            "identity_sha256": definition["identity_sha256"],
+                            "reason": "no_verified_metric_receipt_sample",
+                        }
+                status = observed[name].get("status")
+                if status not in status_counts:
+                    raise EvaluationEvidenceError(
+                        f"external metric {name} has unsupported status {status!r}"
+                    )
+                status_counts[status] += 1
+    return receipt_evidence, definitions, status_counts, sorted(protected_paths)
+
+
+def _external_metric_effects(
+    pairs: Sequence[Mapping[str, Any]],
+    definitions: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    effects: list[dict[str, Any]] = []
+    trusted_count = sum(pair["research_eligible"] is True for pair in pairs)
+    for comparator in EXPERIMENT_GROUPS:
+        if comparator == "ScaleGuard":
+            continue
+        for metric_name in _EXTERNAL_METRIC_NAMES:
+            definition = definitions.get(metric_name)
+            if definition is None:
+                continue
+            raw_by_cluster: dict[str, list[float]] = {}
+            improvement_by_cluster: dict[str, list[float]] = {}
+            excluded_statuses: dict[str, int] = {}
+            observed_pairs = 0
+            for pair in pairs:
+                if pair["research_eligible"] is not True:
+                    excluded_statuses["pair_not_research_eligible"] = (
+                        excluded_statuses.get("pair_not_research_eligible", 0) + 1
+                    )
+                    continue
+                runs = pair["runs"]
+                baseline = runs.get(comparator)
+                treatment = runs.get("ScaleGuard")
+                if not isinstance(baseline, Mapping) or not isinstance(treatment, Mapping):
+                    excluded_statuses["missing_run"] = excluded_statuses.get("missing_run", 0) + 1
+                    continue
+                baseline_metrics = baseline.get("external_metrics")
+                treatment_metrics = treatment.get("external_metrics")
+                baseline_metric = (
+                    baseline_metrics.get(metric_name)
+                    if isinstance(baseline_metrics, Mapping)
+                    else None
+                )
+                treatment_metric = (
+                    treatment_metrics.get(metric_name)
+                    if isinstance(treatment_metrics, Mapping)
+                    else None
+                )
+                baseline_status = (
+                    baseline_metric.get("status")
+                    if isinstance(baseline_metric, Mapping)
+                    else "missing"
+                )
+                treatment_status = (
+                    treatment_metric.get("status")
+                    if isinstance(treatment_metric, Mapping)
+                    else "missing"
+                )
+                if baseline_status != "measured" or treatment_status != "measured":
+                    key = f"baseline:{baseline_status}|scaleguard:{treatment_status}"
+                    excluded_statuses[key] = excluded_statuses.get(key, 0) + 1
+                    continue
+                if not isinstance(baseline_metric, Mapping) or not isinstance(
+                    treatment_metric, Mapping
+                ):
+                    raise AssertionError("measured external metrics must be mappings")
+                baseline_value = baseline_metric.get("value")
+                treatment_value = treatment_metric.get("value")
+                if (
+                    isinstance(baseline_value, bool)
+                    or not isinstance(baseline_value, (int, float))
+                    or not math.isfinite(float(baseline_value))
+                    or isinstance(treatment_value, bool)
+                    or not isinstance(treatment_value, (int, float))
+                    or not math.isfinite(float(treatment_value))
+                ):
+                    excluded_statuses["non_finite"] = excluded_statuses.get("non_finite", 0) + 1
+                    continue
+                cluster = str(treatment["input_sha256"])
+                raw_delta = float(treatment_value) - float(baseline_value)
+                improvement = (
+                    raw_delta if definition["direction"] == "higher_is_better" else -raw_delta
+                )
+                raw_by_cluster.setdefault(cluster, []).append(raw_delta)
+                improvement_by_cluster.setdefault(cluster, []).append(improvement)
+                observed_pairs += 1
+            raw = _bootstrap_cluster_mean(
+                raw_by_cluster,
+                identity=f"external:{comparator}:{metric_name}:raw",
+            )
+            improvement_summary = _bootstrap_cluster_mean(
+                improvement_by_cluster,
+                identity=f"external:{comparator}:{metric_name}:improvement",
+            )
+            cluster_means = np.asarray(
+                [
+                    float(np.mean(values))
+                    for _cluster, values in sorted(improvement_by_cluster.items())
+                ],
+                dtype=np.float64,
+            )
+            standardized: float | None = None
+            if len(cluster_means) >= 2:
+                standard_deviation = float(np.std(cluster_means, ddof=1))
+                if standard_deviation > 0.0:
+                    standardized = float(np.mean(cluster_means) / standard_deviation)
+            effects.append(
+                {
+                    "comparison": f"ScaleGuard - {comparator}",
+                    "metric": metric_name,
+                    "direction": definition["direction"],
+                    "definition_identity_sha256": definition.get(
+                        "measured_identity_sha256",
+                        definition["identity_sha256"],
+                    ),
+                    "population": "research_eligible_complete_pairs_with_verified_scores",
+                    "counts": {
+                        "all_pairs": len(pairs),
+                        "trusted_complete_pairs": trusted_count,
+                        "observed_pairs": observed_pairs,
+                        "missing_not_applicable_or_excluded_pairs": len(pairs) - observed_pairs,
+                        "excluded_by_status": dict(sorted(excluded_statuses.items())),
+                    },
+                    "raw_delta": raw,
+                    "improvement_oriented_delta": improvement_summary,
+                    "paired_standardized_effect_dz": standardized,
+                }
+            )
+    return effects
 
 
 def summarize_paired_manifests(
@@ -532,8 +1284,26 @@ def summarize_paired_manifests(
     *,
     artifact_root: Path | None = None,
     suite_receipt: Path | None = None,
+    metric_receipts: Sequence[Path] = (),
 ) -> dict[str, Any]:
     """Write paired rows without imputing absent groups or metrics."""
+
+    protected_inputs = [
+        (f"{group} manifest {index}", path)
+        for group in EXPERIMENT_GROUPS
+        for index, path in enumerate(manifests_by_group.get(group, ()))
+    ]
+    if suite_receipt is not None:
+        protected_inputs.append(("suite receipt", suite_receipt))
+    protected_inputs.extend(
+        (f"metric receipt {index}", path) for index, path in enumerate(metric_receipts)
+    )
+    resolved_outputs = resolved_distinct_paths(
+        {"summary CSV": output_csv, "summary JSON": output_json},
+        inputs=protected_inputs,
+    )
+    resolved_csv = resolved_outputs["summary CSV"]
+    resolved_json = resolved_outputs["summary JSON"]
 
     unknown_groups = sorted(set(manifests_by_group) - set(EXPERIMENT_GROUPS))
     if unknown_groups:
@@ -565,6 +1335,29 @@ def summarize_paired_manifests(
     if manifest_count == 0:
         raise EvaluationEvidenceError("at least one experiment manifest is required")
     suite_evidence = _suite_receipt_evidence(suite_receipt, input_evidence)
+    (
+        metric_receipt_evidence,
+        external_definitions,
+        external_status_counts,
+        metric_protected_paths,
+    ) = _bind_metric_receipts(
+        metric_receipts,
+        records,
+        artifact_root=artifact_root,
+    )
+    additional_protected_inputs = [
+        (f"manifest evidence {index}", Path(source))
+        for index, evidence in enumerate(input_evidence)
+        for source in evidence["protected_paths"]
+    ]
+    additional_protected_inputs.extend(
+        (f"metric source evidence {index}", source)
+        for index, source in enumerate(metric_protected_paths)
+    )
+    resolved_distinct_paths(
+        {"summary CSV": resolved_csv, "summary JSON": resolved_json},
+        inputs=additional_protected_inputs,
+    )
 
     pairs: list[dict[str, Any]] = []
     for pair_id in sorted(records):
@@ -599,10 +1392,18 @@ def summarize_paired_manifests(
             }
         )
 
+    external_metric_names = tuple(
+        name for name in _EXTERNAL_METRIC_NAMES if name in external_definitions
+    )
+    csv_payload = _csv_bytes(pairs, external_metric_names)
     payload: dict[str, Any] = {
         "schema_version": SUMMARY_SCHEMA,
         "groups": list(EXPERIMENT_GROUPS),
         "suite_receipt": suite_evidence,
+        "metric_receipts": metric_receipt_evidence,
+        "external_metric_definitions": {
+            name: external_definitions[name] for name in external_metric_names
+        },
         "inputs": sorted(
             input_evidence,
             key=lambda item: (item["pair_id"], item["group"], item["run_id"]),
@@ -617,9 +1418,38 @@ def summarize_paired_manifests(
                 for pair in pairs
             ),
         },
+        "external_metric_counts": {
+            "receipts": len(metric_receipt_evidence),
+            "definitions": len(external_metric_names),
+            **external_status_counts,
+        },
+        "aggregate_protocol": {
+            "paired_comparator": "ScaleGuard",
+            "bootstrap_unit": "input_sha256_cluster",
+            "cluster_aggregation": "mean_across_runs_then_equal_weight_across_inputs",
+            "bootstrap_samples": _BOOTSTRAP_SAMPLES,
+            "bootstrap_confidence": _BOOTSTRAP_CONFIDENCE,
+            "bootstrap_seed": _BOOTSTRAP_SEED,
+            "minimum_clusters_for_interval": 2,
+            "standardized_effect": "paired Cohen dz over input-cluster means",
+        },
+        "paired_effects": _paired_effects(pairs),
+        "external_metric_effects": _external_metric_effects(
+            pairs,
+            external_definitions,
+        ),
+        "systems_by_group": _systems_aggregates(pairs),
+        "host_gpu_systems": _host_gpu_aggregates(pairs, suite_evidence),
+        "csv_output": {
+            "path": str(resolved_csv),
+            "size_bytes": len(csv_payload),
+            "sha256": hashlib.sha256(csv_payload).hexdigest(),
+        },
         "pairs": pairs,
     }
     payload["summary_sha256"] = canonical_sha256(payload)
-    _write_csv_atomic(output_csv, pairs)
-    _write_json_atomic(output_json, payload)
+    # The JSON is the commit marker for the CSV bytes. Consumers must verify
+    # csv_output before treating the pair as one committed summary.
+    write_bytes_atomic(resolved_csv, csv_payload)
+    write_json_atomic(resolved_json, payload)
     return payload

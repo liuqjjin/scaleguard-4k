@@ -54,7 +54,7 @@ def test_atomic_evidence_write_removes_a_failed_temporary_file(
     def fail_dump(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("serialization failed")
 
-    monkeypatch.setattr("scaleguard.evaluation.evidence.json.dump", fail_dump)
+    monkeypatch.setattr("scaleguard.evaluation.evidence.json.dumps", fail_dump)
 
     with pytest.raises(RuntimeError, match="serialization failed"):
         write_json_atomic(destination, {"status": "passed"})

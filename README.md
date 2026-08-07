@@ -1,7 +1,7 @@
 # ScaleGuard-4K
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-green.svg)](https://github.com/liuqjjin/scaleguard-4k/blob/main/LICENSE)
 [![CI](https://github.com/liuqjjin/scaleguard-4k/actions/workflows/ci.yml/badge.svg)](https://github.com/liuqjjin/scaleguard-4k/actions/workflows/ci.yml)
 
 > **Trusted scale control for degradation-aware high-resolution image restoration**
@@ -24,7 +24,7 @@ upstream implementation is redistributed or reimplemented here.
 > checks, contracts, and deployment entry points are ready. No ScaleGuard GPU
 > result, runtime, VRAM figure, or research metric is claimed. The authoritative
 > boundary and unsupported levels are recorded in
-> [docs/results/STATUS.md](docs/results/STATUS.md).
+> [docs/results/STATUS.md](https://github.com/liuqjjin/scaleguard-4k/blob/main/docs/results/STATUS.md).
 
 ## Why the scale state is explicit
 
@@ -50,7 +50,7 @@ recursion its own short-lived process/session contract.
 
 Python 3.10 or newer and [uv](https://docs.astral.sh/uv/) are required. CI and
 the runtime bootstrap use uv 0.11.16, recorded in
-[`environments/uv.version`](environments/uv.version).
+[`environments/uv.version`](https://github.com/liuqjjin/scaleguard-4k/blob/main/environments/uv.version).
 
 ```bash
 uv sync --locked --extra dev
@@ -70,7 +70,7 @@ but it does not load either upstream model. Every derived artifact is marked
 image-quality or runtime claims.
 
 Runtime YAML is strict and does not interpolate environment variables. See the
-[annotated configuration reference](docs/configuration.md) for every field,
+[annotated configuration reference](https://github.com/liuqjjin/scaleguard-4k/blob/main/docs/configuration.md) for every field,
 path-resolution rules, and observation-model parameters.
 
 For the complete development checks:
@@ -85,7 +85,8 @@ uv run --locked python -I -m pytest --cov=scaleguard --cov-report=term-missing -
 ## Real runtime
 
 The real path is prepared for Linux x86_64 (glibc 2.28 or newer) with two
-24 GiB RTX 4090-class GPUs. It keeps ScaleGuard, 4KAgent, CoZ, and 4KAgent's
+NVIDIA GeForce RTX 4090 GPUs on the same host, each with 24 GiB VRAM. It keeps
+ScaleGuard, 4KAgent, CoZ, and 4KAgent's
 transitive DepictQA service in four isolated environments; DepictQA is not a
 third core project. Do not merge their PyTorch and Transformers stacks.
 
@@ -101,14 +102,16 @@ scripts/autodl/run_smoke.sh \
 
 CoZ uses Stable Diffusion 3 Medium, whose Hugging Face repository is gated.
 The user must accept its license and authenticate privately before the pinned
-snapshot can be downloaded. A 4KAgent scheduler API credential, the upstream
-DepictQA delta, authorized images, and a suitable host are also external gates.
+snapshot can be downloaded. A Beijing-region DashScope credential for the
+version-pinned Qwen text scheduler, the upstream DepictQA delta, authorized
+images, and a suitable host are also external gates. The scheduler request is
+text-only and does not use the OpenAI service.
 The Qwen model and several metric/model dependencies carry terms more
 restrictive than this repository's Apache-2.0 license.
 
 No real command above has been promoted to a project result. Read
-[installation](docs/installation.md), [the AutoDL guide](docs/autodl.md),
-[the external-gate request](external_gate/REQUEST.md), and [NOTICE](NOTICE)
+[installation](https://github.com/liuqjjin/scaleguard-4k/blob/main/docs/installation.md), [the AutoDL guide](https://github.com/liuqjjin/scaleguard-4k/blob/main/docs/autodl.md),
+[the external-gate request](https://github.com/liuqjjin/scaleguard-4k/blob/main/external_gate/REQUEST.md), and [NOTICE](https://github.com/liuqjjin/scaleguard-4k/blob/main/NOTICE)
 before downloading weights or publishing outputs.
 
 ## Scale policy
@@ -129,8 +132,8 @@ opaque score.
 
 The bundled `gradient_proxy` exists only to exercise CPU control flow. Real-runtime
 configs use a versioned PyIQA metric, and thresholds still require a held-out
-validation split. See [the evaluation protocol](docs/evaluation-protocol.md) and
-the ADRs in [docs/adr](docs/adr).
+validation split. See [the evaluation protocol](https://github.com/liuqjjin/scaleguard-4k/blob/main/docs/evaluation-protocol.md) and
+the ADRs in [docs/adr](https://github.com/liuqjjin/scaleguard-4k/tree/main/docs/adr).
 
 ## Repository map
 
@@ -151,9 +154,11 @@ tree hashes, patches, model revisions, and known blobs are recorded in
 
 ## Evidence rules
 
-Run manifests preserve the config, seeds, image hashes, decisions, prompts,
-process commands, stderr/stdout paths, and available GPU-memory evidence. The
-published completion labels have strict meanings:
+Run manifests preserve the config, seeds, image hashes, decisions,
+prompt-profile identifiers, redacted scheduler request metadata, process
+commands, stderr/stdout paths, and available GPU-memory evidence. Raw remote
+scheduler prompts and image bytes are not serialized. The published completion
+labels have strict meanings:
 
 - `STATIC_READY`: CPU tests and contracts pass.
 - `COMPONENT_REPRODUCED`: both upstreams ran independently with real models.
@@ -163,8 +168,8 @@ published completion labels have strict meanings:
 
 Only the highest level backed by retained artifacts may be reported.
 The current level is `STATIC_READY`; see
-[the evidence status](docs/results/STATUS.md). Before tagging a release, follow
-[the release checklist](docs/release-checklist.md).
+[the evidence status](https://github.com/liuqjjin/scaleguard-4k/blob/main/docs/results/STATUS.md). Before tagging a release, follow
+[the release checklist](https://github.com/liuqjjin/scaleguard-4k/blob/main/docs/release-checklist.md).
 
 ## License
 

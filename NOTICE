@@ -50,8 +50,12 @@ PyIQA 0.1.16 / IQA-PyTorch
   Code license: PolyForm Noncommercial License 1.0.0, with the NTU S-Lab
   License 1.0 applying to identified components.
 
-Both licenses restrict use to non-commercial purposes. The selected MUSIQ
-weight is hosted in chaofengc/IQA-PyTorch-Weights under CC-BY-NC-SA-4.0.
+Both licenses restrict use to non-commercial purposes. The selected MUSIQ and
+optional LPIPS linear-layer weights are hosted in
+chaofengc/IQA-PyTorch-Weights under CC-BY-NC-SA-4.0. Optional CLIPIQA uses the
+OpenAI CLIP RN50 checkpoint; its weight terms remain NOASSERTION even though
+the CLIP source repository is MIT-licensed. The separate Torchvision AlexNet
+backbone is a user-provided evaluation input and is not redistributed here.
 PyIQA is an optional metric dependency; its terms do not change the
 Apache-2.0 license on original ScaleGuard-4K source, but a runtime that installs
 or uses it is subject to those additional restrictions. This project therefore
@@ -69,6 +73,12 @@ The code licenses above are not model licenses. In particular:
   license. Required attribution when redistributing Qwen materials:
   "Qwen is licensed under the Qwen RESEARCH LICENSE AGREEMENT, Copyright (c)
   Alibaba Cloud. All Rights Reserved."
+* Qwen/Qwen2.5-VL-7B-Instruct is pinned at revision
+  cc594898137f460bfe9f0759e9844b3ce807cfb5 and is loaded locally by the
+  4KAgent perception path used to derive its HPS prompt. The model card at that
+  revision declares Apache-2.0. That declaration applies to this 7B artifact;
+  it does not change the separate Qwen Research License terms of the 3B model
+  used by the CoZ runtime.
 * lmsys/vicuna-7b-v1.5 uses the Llama 2 Community License.
 * zhiyuanyou/DepictQA2-DQ495K declares Apache-2.0 on its model card.
 * The CoZ-specific SR, VAE, DAPE, and VLM adapter files are distributed in the

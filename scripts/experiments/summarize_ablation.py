@@ -37,6 +37,13 @@ def main() -> int:
         type=Path,
         help="passed ablation suite receipt required for research eligibility",
     )
+    parser.add_argument(
+        "--metric-receipt",
+        type=Path,
+        action="append",
+        default=[],
+        help="source-replayed external metric receipt; repeat for multiple batches",
+    )
     args = parser.parse_args()
     try:
         summary = summarize_paired_manifests(
@@ -50,6 +57,7 @@ def main() -> int:
             args.output_json,
             artifact_root=args.artifact_root,
             suite_receipt=args.suite_receipt,
+            metric_receipts=args.metric_receipt,
         )
     except (OSError, ScaleGuardError, ValueError) as error:
         parser.error(str(error))

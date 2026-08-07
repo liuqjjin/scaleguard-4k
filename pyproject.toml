@@ -14,7 +14,9 @@ license-files = [
   "NOTICE",
   "third_party/licenses/Chain-of-Zoom-MIT.txt",
 ]
-authors = [{ name = "ScaleGuard-4K contributors" }]
+authors = [
+  { name = "liuqjjin", email = "156533013+liuqjjin@users.noreply.github.com" },
+]
 keywords = [
   "computational-imaging",
   "image-quality-assessment",
@@ -56,7 +58,9 @@ dev = [
   "pip-audit==2.10.1",
   "pytest>=8.3,<10",
   "pytest-cov>=6,<8",
+  "readme-renderer[md]==45.0",
   "ruff>=0.11,<1",
+  "twine==6.1.0",
   "types-PyYAML>=6.0.12",
 ]
 

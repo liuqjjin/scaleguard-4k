@@ -26,6 +26,7 @@ from scaleguard.contracts import WorkerResult
 from scaleguard.controller.trusted_scale import TrustedScaleController
 from scaleguard.errors import ArtifactError
 from scaleguard.images import inspect_image
+from scaleguard.manifest import validate_run_manifest
 
 
 def pipeline_config(tmp_path: Path, target_factor: int) -> PipelineConfig:
@@ -453,6 +454,120 @@ def test_external_output_cannot_overwrite_run_evidence(
     assert manifest["final_image"] is None
 
 
+def test_external_output_publication_is_canonical_and_no_clobber(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = make_image(tmp_path / "source.png")
+    config = pipeline_config(tmp_path, 1)
+    controller = TrustedScaleController(
+        config,
+        FakeRestorationBackend(),
+        FakeScaleBackend(),
+    )
+    destination = tmp_path / "published.png"
+    destination.write_bytes(b"pre-existing evidence")
+    resolution_calls: list[Path] = []
+    resolve_output = controller._resolve_external_output
+
+    def record_resolution(
+        output: Path,
+        run_dir: Path,
+        *,
+        source: Path,
+        overwrite: bool,
+    ) -> Path:
+        resolution_calls.append(output)
+        return resolve_output(
+            output,
+            run_dir,
+            source=source,
+            overwrite=overwrite,
+        )
+
+    monkeypatch.setattr(controller, "_resolve_external_output", record_resolution)
+
+    with pytest.raises(FileExistsError):
+        controller.run(
+            source,
+            tmp_path / "nested" / ".." / "published.png",
+            run_id="no-clobber",
+        )
+
+    assert resolution_calls == [tmp_path / "nested" / ".." / "published.png"]
+    assert destination.read_bytes() == b"pre-existing evidence"
+    with pytest.raises(FileExistsError):
+        controller._publish_no_clobber(source, destination)
+    assert destination.read_bytes() == b"pre-existing evidence"
+    assert list(tmp_path.glob(".published.png.*.tmp")) == []
+    manifest_path = config.runtime.run_root / "no-clobber" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "failed"
+    assert manifest["error"]["type"] == "FileExistsError"
+    assert validate_run_manifest(manifest_path)["status"] == "failed"
+
+
+def test_explicit_overwrite_atomically_replaces_a_non_input_output(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+) -> None:
+    source = make_image(tmp_path / "source.png", size=(8, 5), color=(10, 20, 30))
+    destination = make_image(
+        tmp_path / "published.png",
+        size=(2, 2),
+        color=(240, 10, 10),
+    )
+    previous_bytes = destination.read_bytes()
+    config = pipeline_config(tmp_path, 1)
+    controller = TrustedScaleController(
+        config,
+        FakeRestorationBackend(),
+        FakeScaleBackend(),
+    )
+
+    returned = controller.run(
+        source,
+        destination,
+        run_id="explicit-overwrite",
+        overwrite=True,
+    )
+
+    assert returned == destination.resolve()
+    assert destination.read_bytes() != previous_bytes
+    with Image.open(destination) as image:
+        assert image.size == (8, 5)
+    assert list(tmp_path.glob(".published.png.*.tmp")) == []
+    manifest_path = config.runtime.run_root / "explicit-overwrite" / "manifest.json"
+    assert validate_run_manifest(manifest_path)["status"] == "succeeded"
+
+
+def test_explicit_overwrite_cannot_alias_the_input(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+) -> None:
+    source = make_image(tmp_path / "source.png", size=(8, 5))
+    source_bytes = source.read_bytes()
+    config = pipeline_config(tmp_path, 1)
+    controller = TrustedScaleController(
+        config,
+        FakeRestorationBackend(),
+        FakeScaleBackend(),
+    )
+
+    with pytest.raises(ValueError, match="cannot overwrite the input image"):
+        controller.run(
+            source,
+            source,
+            run_id="input-alias",
+            overwrite=True,
+        )
+
+    assert source.read_bytes() == source_bytes
+    manifest_path = config.runtime.run_root / "input-alias" / "manifest.json"
+    assert validate_run_manifest(manifest_path)["status"] == "failed"
+
+
 class BadBridgeRestorationBackend(FakeRestorationBackend):
     def restore(
         self,
@@ -492,6 +607,10 @@ def test_restoration_bridge_must_realize_its_exact_declared_scale(
     assert manifest["status"] == "failed"
     assert manifest["achieved_factor"] is None
     assert manifest["target_reached"] is False
+    assert (
+        validate_run_manifest(config.runtime.run_root / "bad-bridge" / "manifest.json")["status"]
+        == "failed"
+    )
 
 
 def test_non_finite_metrics_fail_closed_without_writing_nonstandard_json(
@@ -514,6 +633,7 @@ def test_non_finite_metrics_fail_closed_without_writing_nonstandard_json(
     assert "NaN" not in payload
     manifest = json.loads(payload, parse_constant=lambda value: pytest.fail(value))
     assert manifest["status"] == "failed"
+    assert validate_run_manifest(manifest_path)["status"] == "failed"
 
 
 def test_mock_manifest_marks_every_generated_artifact_and_worker_result(
@@ -771,8 +891,8 @@ def test_post_color_gates_reject_a_damaging_adain_result_and_keep_trusted_bytes(
 
 
 class RecordingQuality:
-    name = "recording_quality"
-    is_proxy = False
+    name = "gradient_proxy_v1"
+    is_proxy = True
 
     def __init__(self) -> None:
         self.sizes: list[tuple[int, int]] = []

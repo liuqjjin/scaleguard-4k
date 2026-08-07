@@ -1,6 +1,6 @@
 # Upstream and model artifact audit
 
-Audit date: 2026-07-27
+Audit date: 2026-08-08
 
 ## Conclusion
 
@@ -35,8 +35,8 @@ locks remain immutable even if a branch changes later.
 
 | Role | Repository | Locked commit | Root tree | Declared license | Remote status at audit |
 | --- | --- | --- | --- | --- | --- |
-| Core restoration/planning runtime | [4KAgent](https://github.com/taco-group/4KAgent) | [`04179ffe`](https://github.com/taco-group/4KAgent/commit/04179ffed12c1db64890a48ac6d51ae4abeaee37) | `66f62367c915042ef945562bddc791bfc445fb42` | [Apache-2.0](https://github.com/taco-group/4KAgent/blob/04179ffed12c1db64890a48ac6d51ae4abeaee37/LICENSE) | `HEAD`, `main`, and lightweight tag `v1.0` resolved to the locked commit |
-| Core terminal SR runtime | [Chain-of-Zoom](https://github.com/bryanswkim/Chain-of-Zoom) | [`5a4f351c`](https://github.com/bryanswkim/Chain-of-Zoom/commit/5a4f351c9c655568c4705d5fc53ef70a3f28905f) | `177741fa5443a5073f29b1cf3ffad67e596d0b5d` | [MIT](https://github.com/bryanswkim/Chain-of-Zoom/blob/5a4f351c9c655568c4705d5fc53ef70a3f28905f/LICENSE) | `HEAD` and `main` resolved to the locked commit; no tag was advertised |
+| Core restoration/planning runtime | [4KAgent](https://github.com/taco-group/4KAgent) | [`04179ffe`](https://github.com/taco-group/4KAgent/commit/04179ffed12c1db64890a48ac6d51ae4abeaee37) | `66f62367c915042ef945562bddc791bfc445fb42` | [Apache-2.0](https://github.com/taco-group/4KAgent/blob/04179ffed12c1db64890a48ac6d51ae4abeaee37/LICENSE) | `HEAD`, `main`, and lightweight tag `v1.0` still resolved to the locked commit |
+| Core terminal SR runtime | [Chain-of-Zoom](https://github.com/bryanswkim/Chain-of-Zoom) | [`5a4f351c`](https://github.com/bryanswkim/Chain-of-Zoom/commit/5a4f351c9c655568c4705d5fc53ef70a3f28905f) | `177741fa5443a5073f29b1cf3ffad67e596d0b5d` | [MIT](https://github.com/bryanswkim/Chain-of-Zoom/blob/5a4f351c9c655568c4705d5fc53ef70a3f28905f/LICENSE) | `HEAD` and `main` still resolved to the locked commit; no tag was advertised |
 
 The root tree is recorded separately from the commit so checkout verification
 detects a commit mismatch and a content-tree mismatch independently. The
@@ -186,7 +186,7 @@ but not authenticated against a publisher digest,” not “verified.”
 | Artifact | Immutable identity or SHA-256 | Gate/license observation |
 | --- | --- | --- |
 | Stable Diffusion 3 Medium diffusers | Hugging Face revision `ea42f8cef0f178587cf766dc8129abd379c90671` | Auto-gated; Stability AI Non-Commercial Research Community License |
-| Qwen2.5-VL-3B-Instruct | Hugging Face revision `66285546d2b821cf421d4f5eb2576359d3770cd3` | Qwen Research License Agreement; non-commercial research/evaluation terms |
+| Qwen2.5-VL-3B-Instruct | Hugging Face revision `66285546d2b821cf421d4f5eb2576359d3770cd3` | CoZ prompt VLM; Qwen Research License Agreement with non-commercial research/evaluation terms |
 | SR LoRA `model_20001.pkl` | `697d3f9ab69a222006ca3ae48503cf057774c8142646301e9bba90e58242e47e` | Tracked in CoZ; no separate checkpoint model card found |
 | SR VAE `vae_encoder_20001.pt` | `ed7f7aa03dfcbce9016d51c5aa8d3920428b3d7c9a678c721cd062d01805ae4a` | Tracked in CoZ; no separate checkpoint model card found |
 | VLM adapter config | `66ebc2c4fcfe472c503814f7440b5e4bde2a2e4d197a52495e42df8dca69017e` | Must remain paired with the pinned adapter |
@@ -201,6 +201,7 @@ it is not treated as a usable checkpoint or a runtime dependency.
 
 | Artifact | Immutable identity | Audit treatment |
 | --- | --- | --- |
+| Qwen2.5-VL-7B-Instruct | Hugging Face revision [`cc594898137f460bfe9f0759e9844b3ce807cfb5`](https://huggingface.co/Qwen/Qwen2.5-VL-7B-Instruct/tree/cc594898137f460bfe9f0759e9844b3ce807cfb5) | Local 4KAgent perception VLM used to derive the HPS prompt; the model card at this revision declares Apache-2.0 |
 | 4KAgent toolbox archive | Hugging Face revision `296428714177474f40a841a1677a935b7ea3bc9c`; archive SHA-256 `5caae37bbf06d2690d93974d80bfed42c55c4ad89aead5aa455420687b417c7e` | Repository card says Apache-2.0, but the archive aggregates expert checkpoints; whole archive remains `NOASSERTION` |
 | Vicuna 7B v1.5 | Hugging Face revision `3321f76e3f527bd14065daf69dad9344000a201d` | Llama 2 Community License |
 | DepictQA2 DQ495K | Hugging Face revision `915fee700b9f41c8be7da5d5b83da8a71dfc332b`; `ckpt.pt` SHA-256 `4494778f6045effa9252e145184e0cd5d2b184de3bd7be37849f81558dea2f56` | Model card declares Apache-2.0 |
@@ -208,6 +209,12 @@ it is not treated as a usable checkpoint or a runtime dependency.
 | DepictQA degradation delta | Pinned Google Drive object; no publisher digest | Required manual gate; receipt records a measured hash but cannot authenticate it |
 | HPS v2.1 | Hugging Face revision `697403c78157020a1ae59d23f111aa58ced35b0a`; file SHA-256 `c57a38fb4a2f7e7c15bf00da2ea377cdf165448b4dd1052a484c215a998c9837` | Model card declares Apache-2.0 |
 | MUSIQ KonIQ weight | Hugging Face revision `0df2df423c65f6a64209309695f3845727431027`; file SHA-256 `e95806b9eae5f3814c410f574ba8e552362bd5bc63d758ed5b97860f5d6185aa` | Weight repository is CC-BY-NC-SA-4.0 |
+| LPIPS v0.1 Alex linear layer (optional) | Same immutable Hugging Face revision; LFS SHA-256 `df73285e35b22355a2df87cdb6b70b343713b667eddbda73e1977e0c860835c0` | Weight repository is CC-BY-NC-SA-4.0; separate AlexNet backbone remains user-provided and hash-bound per receipt |
+| OpenAI CLIP RN50 for CLIPIQA (optional) | Content-addressed official URL and SHA-256 `afeb0e10f9e5a86da6080e35cf09123aca3b358a0c3e3b6c78a7b63bc04b6762` | CLIP code is MIT; model-weight terms remain `NOASSERTION` |
+
+The 7B and 3B Qwen artifacts are separate locked model releases with different
+roles and license declarations. Apache-2.0 on the 7B model card must not be
+carried over to the 3B CoZ dependency or its adapters.
 
 The first two model destinations are deliberately
 `models/stabilityai/stable-diffusion-3-medium-diffusers` and
@@ -233,7 +240,7 @@ At that source state, the repository
 is PolyForm Noncommercial 1.0.0, and the project states that the
 [NTU S-Lab License](https://github.com/chaofengc/IQA-PyTorch/blob/18dd7a19694e94aac21019170e3f5e63d6b4e19e/LICENSE-S-Lab)
 applies to identified components. Both impose non-commercial boundaries. The
-selected weight adds CC-BY-NC-SA-4.0.
+selected MUSIQ and LPIPS weights add CC-BY-NC-SA-4.0.
 
 These terms do not change the Apache-2.0 license of ScaleGuard's original
 source, but they do constrain a runtime that installs or uses the optional
@@ -249,6 +256,12 @@ sensitivity analysis, and retained calibration evidence.
 ## Issue review and reproducibility implications
 
 All issues below were open at the audit date.
+
+- [4KAgent pull request 13](https://github.com/taco-group/4KAgent/pull/13)
+  proposes a MiniMax provider and remains open. ScaleGuard does not import that
+  branch or introduce MiniMax as another runtime dependency. The canonical Qwen
+  scheduler lives in the repository-owned overlay; the locked upstream commit
+  and root tree remain unchanged.
 
 - [4KAgent issue 9](https://github.com/taco-group/4KAgent/issues/9) reports
   reproduction gaps and plan differences. A
@@ -288,6 +301,11 @@ All issues below were open at the audit date.
 - [CoZ issue 13](https://github.com/bryanswkim/Chain-of-Zoom/issues/13) asked
   for full-image tiling before the later full-image code appeared. It is useful
   history, not evidence that the pinned commit lacks full-image inference.
+
+- [CoZ issue 19](https://github.com/bryanswkim/Chain-of-Zoom/issues/19) still
+  requests the unreleased GRPO training code. ScaleGuard performs inference
+  integration only and makes no claim that CoZ training or preference alignment
+  is reproducible from the public repository.
 
 - AgenticIR
   [issue 8](https://github.com/Kaiwen-Zhu/AgenticIR/issues/8#issuecomment-3854573189)

@@ -8,6 +8,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypeVar, cast
+from urllib.parse import urlsplit
 
 from scaleguard.errors import ConfigurationError
 from scaleguard.strict_yaml import StrictYAMLError
@@ -22,6 +23,19 @@ EXPERIMENT_GROUP_SEMANTICS = {
     "ScaleGuard": ("upstream", "persistent", 4, 1, "trusted"),
 }
 EXPERIMENT_GROUPS = tuple(EXPERIMENT_GROUP_SEMANTICS)
+
+DASHSCOPE_PROVIDER = "dashscope"
+DASHSCOPE_MODEL = "qwen3.7-flash-2026-07-15"
+DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+DASHSCOPE_REGION = "cn-beijing"
+OPENAI_PROVIDER = "openai"
+OPENAI_BASE_URL = "https://api.openai.com/v1"
+
+_DASHSCOPE_SHARED_HOSTS = {
+    "dashscope.aliyuncs.com": "cn-beijing",
+    "dashscope-intl.aliyuncs.com": "ap-southeast-1",
+    "dashscope-us.aliyuncs.com": "us-east-1",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -52,8 +66,17 @@ class FourKAgentConfig:
     toolbox_root: Path | None = None
     hps_root: Path | None = None
     quality_model_path: Path | None = None
-    llm_model: str = "gpt-4-turbo"
-    api_key_env: str = "OPENAI_API_KEY"
+    llm_provider: str = DASHSCOPE_PROVIDER
+    llm_base_url: str = DASHSCOPE_BASE_URL
+    llm_region: str = DASHSCOPE_REGION
+    llm_model: str = DASHSCOPE_MODEL
+    api_key_env: str = "DASHSCOPE_API_KEY"
+    llm_connect_timeout_seconds: float = 10.0
+    llm_read_timeout_seconds: float = 120.0
+    llm_max_transport_retries: int = 4
+    llm_max_structure_retries: int = 2
+    llm_max_completion_tokens: int = 1024
+    llm_temperature: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -206,6 +229,67 @@ def _local_model_location(value: str) -> bool:
     return path.is_absolute() or value.startswith(("./", "../", "weights/", "third_party/"))
 
 
+def _dashscope_endpoint_region(host: str) -> str | None:
+    return _DASHSCOPE_SHARED_HOSTS.get(host)
+
+
+def _validate_llm_endpoint(config: FourKAgentConfig) -> None:
+    try:
+        parsed = urlsplit(config.llm_base_url)
+        port = parsed.port
+    except ValueError as error:
+        raise ConfigurationError(f"fourkagent.llm_base_url is invalid: {error}") from error
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or port is not None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ConfigurationError(
+            "fourkagent.llm_base_url must be one credential-free HTTPS API base URL"
+        )
+    if parsed.path.rstrip("/") != "/compatible-mode/v1" and not (
+        config.llm_provider == OPENAI_PROVIDER and parsed.path.rstrip("/") == "/v1"
+    ):
+        raise ConfigurationError("fourkagent.llm_base_url has an unsupported API path")
+
+    host = parsed.hostname.lower()
+    if config.llm_provider == DASHSCOPE_PROVIDER:
+        region = _dashscope_endpoint_region(host)
+        if region is None:
+            raise ConfigurationError(
+                "fourkagent.llm_base_url must use an official DashScope pay-as-you-go endpoint"
+            )
+        if region != config.llm_region:
+            raise ConfigurationError(
+                "fourkagent.llm_region does not match the configured DashScope endpoint"
+            )
+        if config.api_key_env != "DASHSCOPE_API_KEY":
+            raise ConfigurationError(
+                "DashScope provider requires fourkagent.api_key_env=DASHSCOPE_API_KEY"
+            )
+        if re.fullmatch(r"qwen[0-9a-z.-]+", config.llm_model) is None:
+            raise ConfigurationError("DashScope provider requires a Qwen model identifier")
+    elif config.llm_provider == OPENAI_PROVIDER:
+        if config.llm_base_url.rstrip("/") != OPENAI_BASE_URL:
+            raise ConfigurationError(
+                "OpenAI provider is pinned to the official OpenAI API base URL"
+            )
+        if config.llm_region != "global":
+            raise ConfigurationError("OpenAI provider requires fourkagent.llm_region=global")
+        if config.api_key_env != "OPENAI_API_KEY":
+            raise ConfigurationError(
+                "OpenAI provider requires fourkagent.api_key_env=OPENAI_API_KEY"
+            )
+        if not config.llm_model.startswith("gpt-"):
+            raise ConfigurationError("OpenAI provider requires a gpt-* model identifier")
+    else:
+        raise ConfigurationError("fourkagent.llm_provider must be dashscope or openai")
+
+
 def validate_config(config: PipelineConfig) -> None:
     _validate_types(config)
     if config.fourkagent.mode not in {"fake", "command", "upstream", "identity"}:
@@ -288,6 +372,21 @@ def validate_config(config: PipelineConfig) -> None:
         )
     if not config.fourkagent.llm_model:
         raise ConfigurationError("fourkagent.llm_model must not be empty")
+    _validate_llm_endpoint(config.fourkagent)
+    if not 0.1 <= config.fourkagent.llm_connect_timeout_seconds <= 30.0:
+        raise ConfigurationError(
+            "fourkagent.llm_connect_timeout_seconds must be between 0.1 and 30"
+        )
+    if not 1.0 <= config.fourkagent.llm_read_timeout_seconds <= 600.0:
+        raise ConfigurationError("fourkagent.llm_read_timeout_seconds must be between 1 and 600")
+    if not 0 <= config.fourkagent.llm_max_transport_retries <= 8:
+        raise ConfigurationError("fourkagent.llm_max_transport_retries must be between 0 and 8")
+    if not 0 <= config.fourkagent.llm_max_structure_retries <= 5:
+        raise ConfigurationError("fourkagent.llm_max_structure_retries must be between 0 and 5")
+    if not 64 <= config.fourkagent.llm_max_completion_tokens <= 4096:
+        raise ConfigurationError("fourkagent.llm_max_completion_tokens must be between 64 and 4096")
+    if config.fourkagent.llm_temperature != 0.0:
+        raise ConfigurationError("fourkagent.llm_temperature must be 0 for audited scheduling")
     if config.coz.tile_size <= 0:
         raise ConfigurationError("coz.tile_size must be positive")
     if config.coz.tile_overlap < 0 or config.coz.tile_overlap >= config.coz.tile_size:
@@ -433,6 +532,9 @@ def _validate_types(config: PipelineConfig) -> None:
         ("fourkagent.depictqa_host", config.fourkagent.depictqa_host),
         ("fourkagent.depictqa_visible_devices", config.fourkagent.depictqa_visible_devices),
         ("fourkagent.perception_model_path", config.fourkagent.perception_model_path),
+        ("fourkagent.llm_provider", config.fourkagent.llm_provider),
+        ("fourkagent.llm_base_url", config.fourkagent.llm_base_url),
+        ("fourkagent.llm_region", config.fourkagent.llm_region),
         ("fourkagent.llm_model", config.fourkagent.llm_model),
         ("fourkagent.api_key_env", config.fourkagent.api_key_env),
         ("coz.mode", config.coz.mode),
@@ -485,6 +587,18 @@ def _validate_types(config: PipelineConfig) -> None:
     integer_fields: list[tuple[str, Any]] = [
         ("coz.seed", config.coz.seed),
         ("fourkagent.depictqa_port", config.fourkagent.depictqa_port),
+        (
+            "fourkagent.llm_max_transport_retries",
+            config.fourkagent.llm_max_transport_retries,
+        ),
+        (
+            "fourkagent.llm_max_structure_retries",
+            config.fourkagent.llm_max_structure_retries,
+        ),
+        (
+            "fourkagent.llm_max_completion_tokens",
+            config.fourkagent.llm_max_completion_tokens,
+        ),
         ("coz.tile_size", config.coz.tile_size),
         ("coz.tile_overlap", config.coz.tile_overlap),
         ("controller.target_factor", config.controller.target_factor),
@@ -498,6 +612,15 @@ def _validate_types(config: PipelineConfig) -> None:
             "fourkagent.depictqa_startup_timeout_seconds",
             config.fourkagent.depictqa_startup_timeout_seconds,
         ),
+        (
+            "fourkagent.llm_connect_timeout_seconds",
+            config.fourkagent.llm_connect_timeout_seconds,
+        ),
+        (
+            "fourkagent.llm_read_timeout_seconds",
+            config.fourkagent.llm_read_timeout_seconds,
+        ),
+        ("fourkagent.llm_temperature", config.fourkagent.llm_temperature),
         ("metrics.max_scale_nrmse", config.metrics.max_scale_nrmse),
         ("metrics.max_scale_edge_mae", config.metrics.max_scale_edge_mae),
         ("metrics.max_measurement_nrmse", config.metrics.max_measurement_nrmse),

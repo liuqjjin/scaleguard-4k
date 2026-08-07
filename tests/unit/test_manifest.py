@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -40,6 +41,7 @@ def _manifest(
         config,
         FakeRestorationBackend(),
         FakeScaleBackend(),
+        project_root=tmp_path,
     ).run(source, tmp_path / "output.png", run_id="validated-run")
     return config.runtime.run_root / "validated-run" / "manifest.json"
 
@@ -63,6 +65,53 @@ def _process_evidence(tmp_path: Path) -> dict[str, object]:
     }
 
 
+def _scheduler_evidence() -> dict[str, object]:
+    return {
+        "provider": "dashscope",
+        "api_style": "openai-compatible-chat-completions",
+        "region": "cn-beijing",
+        "endpoint_host_sha256": hashlib.sha256(b"dashscope.aliyuncs.com").hexdigest(),
+        "requested_model": "qwen3.7-flash-2026-07-15",
+        "request_parameters": {
+            "max_completion_tokens": 1024,
+            "temperature": 0.0,
+            "response_format": "json_object",
+            "enable_thinking": False,
+            "connect_timeout_seconds": 10.0,
+            "read_timeout_seconds": 120.0,
+            "max_transport_retries": 4,
+        },
+        "attempts": [],
+    }
+
+
+def _managed_depictqa_evidence(tmp_path: Path) -> dict[str, object]:
+    return {
+        "managed": True,
+        "argv": ["python", "serve_depictqa.py"],
+        "cwd": str(tmp_path),
+        "host": "127.0.0.1",
+        "port": 5001,
+        "returncode": -15,
+        "duration_seconds": 0.1,
+        "stdout_path": str(tmp_path / "depictqa.stdout.log"),
+        "stderr_path": str(tmp_path / "depictqa.stderr.log"),
+    }
+
+
+def _completed_scheduler_attempt(request_id: str) -> dict[str, object]:
+    return {
+        "outcome": "completed",
+        "status_code": 200,
+        "request_id": request_id,
+        "response_model": "qwen3.7-flash-2026-07-15",
+        "finish_reason": "stop",
+        "prompt_tokens": 10,
+        "completion_tokens": 2,
+        "total_tokens": 12,
+    }
+
+
 def _runtime_manifest(
     tmp_path: Path,
     make_image: Callable[..., Path],
@@ -75,7 +124,12 @@ def _runtime_manifest(
     payload["mock"] = False
     payload["completion_level"] = completion_level
     payload["config"]["fourkagent"]["mode"] = "command"
+    payload["config"]["fourkagent"]["command"] = ["fixture-restoration"]
+    payload["config"]["fourkagent"]["depictqa_command"] = ["python", "serve_depictqa.py"]
+    payload["config"]["fourkagent"]["depictqa_cwd"] = str(tmp_path)
     payload["config"]["coz"]["mode"] = "command"
+    payload["config"]["coz"]["command"] = ["fixture-scale"]
+    payload["config"]["controller"]["accept_unvalidated_quality_proxy"] = True
     for artifact in (
         payload["input_image"],
         payload["restored_image"],
@@ -84,12 +138,14 @@ def _runtime_manifest(
         payload["steps"][0]["candidate"],
     ):
         artifact["mock"] = False
-    payload["restoration_metadata"].update(
-        {
-            "backend": "4kagent_upstream",
-            "mock": False,
-        }
-    )
+    payload["restoration_metadata"] = {
+        "backend": "4kagent_upstream",
+        "bridge_factor": 1,
+        "execution_path": {"subtasks": [], "tools": []},
+        "terminal_generative_sr": False,
+        "depictqa_service": _managed_depictqa_evidence(tmp_path),
+        "remote_scheduler": _scheduler_evidence(),
+    }
     payload["restoration_process"] = _process_evidence(tmp_path)
     payload["scale_session_process"] = (
         _process_evidence(tmp_path) if backend == "chain_of_zoom_persistent" else None
@@ -97,9 +153,45 @@ def _runtime_manifest(
     step = payload["steps"][0]
     step["process"] = _process_evidence(tmp_path) if backend == "chain_of_zoom_subprocess" else None
     step["worker_metadata"] = {
+        "source_size": [step["trusted_before"]["width"], step["trusted_before"]["height"]],
+        "output_size": [step["candidate"]["width"], step["candidate"]["height"]],
         "backend": backend,
+        "persistent": backend == "chain_of_zoom_persistent",
+        "step_index": 1,
+        "seed": payload["config"]["coz"]["seed"],
+        "root_sha256": step["trusted_before"]["sha256"],
+        "input_sha256": step["trusted_before"]["sha256"],
         "candidate_sha256": step["candidate"]["sha256"],
+        "prompts": ["restore fine image detail"],
+        "requested_precision": payload["config"]["coz"]["mixed_precision"],
+        "actual_precision": {"transformer": "torch.float32", "vae": "torch.float32"},
+        "component_placement": {
+            name: {"device": "cuda:0", "dtype": "torch.float32"}
+            for name in (
+                "text_encoder_1",
+                "text_encoder_2",
+                "text_encoder_3",
+                "transformer",
+                "vae",
+                "vlm_first_parameter",
+            )
+        },
+        "semantic_anchor": str(tmp_path / "semantic-anchor.png"),
+        "gpu_inventory": [
+            {
+                "logical_index": str(index),
+                "uuid": f"GPU-{index}",
+                "name": "fixture-gpu",
+                "memory_total_mib": "24564",
+            }
+            for index in range(2)
+        ],
+        "mock": False,
+        "duration_seconds": 0.2,
+        "peak_torch_allocated_mib": {"0": 1024, "1": 2048},
     }
+    if backend == "chain_of_zoom_persistent":
+        step["worker_metadata"]["initialization_duration_seconds"] = 1.5
     payload["provenance"].update(
         {
             "runtime_evidence_verified": True,
@@ -126,6 +218,46 @@ def _runtime_manifest(
             "runtime_execution_binding_sha256": "d" * 64,
         }
     )
+    _rewrite(path, payload)
+    return path, payload
+
+
+def _persistent_runtime_manifest(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+) -> tuple[Path, dict[str, Any]]:
+    path, payload = _runtime_manifest(
+        tmp_path,
+        make_image,
+        backend="chain_of_zoom_persistent",
+        completion_level="AB_INTEGRATED",
+    )
+    payload["config"]["fourkagent"].update(
+        {
+            "mode": "upstream",
+            "command": [],
+            "checkout": "third_party/checkouts/4KAgent",
+            "depictqa_command": ["python", "serve_depictqa.py"],
+            "depictqa_cwd": "third_party/checkouts/DepictQA",
+            "perception_model_path": "weights/fourkagent-qwen",
+            "toolbox_root": "weights/fourkagent-toolbox",
+            "hps_root": "weights/fourkagent-hps",
+            "quality_model_path": "weights/fourkagent-musiq.pth",
+        }
+    )
+    payload["config"]["coz"].update(
+        {
+            "mode": "persistent",
+            "command": [],
+            "checkout": "third_party/checkouts/Chain-of-Zoom",
+            "model_path": "weights/coz-sd3",
+            "qwen_model_path": "weights/coz-qwen",
+            "sr_lora_path": "weights/coz-sr-lora",
+            "vae_path": "weights/coz-vae",
+            "vlm_lora_path": "weights/coz-vlm-lora",
+        }
+    )
+    payload["completion_level"] = "STATIC_READY"
     _rewrite(path, payload)
     return path, payload
 
@@ -467,6 +599,195 @@ def test_validator_accepts_verified_runtime_completion_evidence(
     assert manifest["completion_level"] == completion_level
 
 
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("scheduler_extra", "unexpected fields"),
+        ("scheduler_secret", "unexpected fields"),
+        ("scheduler_identity", "scheduler provider"),
+        ("scheduler_sequence", "does not end in a completed attempt"),
+        ("terminal_sr", "terminal_generative_sr"),
+        ("bridge_factor", "bridge_factor"),
+        ("depictqa_schema", "DepictQA evidence"),
+    ],
+)
+def test_manifest_replays_fourkagent_parent_metadata_contract(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    case: str,
+    message: str,
+) -> None:
+    path, payload = _runtime_manifest(tmp_path, make_image)
+    metadata = payload["restoration_metadata"]
+    scheduler = metadata["remote_scheduler"]
+    if case == "scheduler_extra":
+        scheduler["raw_prompt"] = "not persisted"
+    elif case == "scheduler_secret":
+        scheduler["api_key"] = "not persisted"
+    elif case == "scheduler_identity":
+        scheduler["provider"] = "forged"
+    elif case == "scheduler_sequence":
+        scheduler["attempts"] = [
+            _completed_scheduler_attempt("request-1"),
+            {"outcome": "transport_error", "error_type": "Timeout"},
+        ]
+    elif case == "terminal_sr":
+        metadata["terminal_generative_sr"] = True
+    elif case == "bridge_factor":
+        metadata["bridge_factor"] = 2
+    else:
+        metadata["depictqa_service"]["stopped"] = True
+    _rewrite(path, payload)
+
+    with pytest.raises(ManifestValidationError, match=message):
+        validate_run_manifest(path)
+
+
+def test_manifest_allows_zero_or_multiple_completed_scheduler_attempts(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for suffix, attempts in (
+        ("empty", []),
+        (
+            "multiple",
+            [
+                _completed_scheduler_attempt("request-1"),
+                _completed_scheduler_attempt("request-2"),
+            ],
+        ),
+    ):
+        path, payload = _runtime_manifest(tmp_path / suffix, make_image)
+        payload["restoration_metadata"]["remote_scheduler"]["attempts"] = attempts
+        _rewrite(path, payload)
+        _mock_runtime_dependencies(
+            monkeypatch,
+            payload["config"],
+            payload["provenance"],
+        )
+        assert validate_run_manifest(path)["status"] == "succeeded"
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "step_index",
+        "seed",
+        "input_sha256",
+        "candidate_sha256",
+        "requested_precision",
+        "mock",
+        "persistent",
+        "raw_prompt",
+    ],
+)
+def test_manifest_replays_coz_parent_metadata_contract(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    field: str,
+) -> None:
+    path, payload = _runtime_manifest(tmp_path, make_image)
+    metadata = payload["steps"][0]["worker_metadata"]
+    replacements: dict[str, object] = {
+        "step_index": 2,
+        "seed": 999,
+        "input_sha256": "0" * 64,
+        "candidate_sha256": "0" * 64,
+        "requested_precision": "fp16",
+        "mock": True,
+        "persistent": False,
+        "raw_prompt": "not part of the worker contract",
+    }
+    metadata[field] = replacements[field]
+    _rewrite(path, payload)
+
+    with pytest.raises(ManifestValidationError, match="CoZ parent contract"):
+        validate_run_manifest(path)
+
+
+@pytest.mark.parametrize("status", ["running", "failed"])
+@pytest.mark.parametrize(
+    "phase",
+    ["before_restoration", "after_restoration", "after_persistent_candidate"],
+)
+def test_validator_accepts_audited_runtime_intermediate_and_failure_states(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    status: str,
+) -> None:
+    path, payload = _persistent_runtime_manifest(tmp_path, make_image)
+    payload.update(
+        status=status,
+        completion_level="STATIC_READY",
+        finished_at=None if status == "running" else payload["finished_at"],
+        achieved_factor=None,
+        target_reached=False,
+        final_image=None,
+        final_metrics={},
+        events=[],
+        error=(
+            None
+            if status == "running"
+            else {"type": "SyntheticFailure", "message": f"failed {phase}"}
+        ),
+    )
+    if phase == "before_restoration":
+        payload.update(
+            restored_image=None,
+            restoration_metadata={},
+            restoration_process=None,
+            scale_session_process=None,
+            steps=[],
+        )
+    elif phase == "after_restoration":
+        payload.update(scale_session_process=None, steps=[])
+    else:
+        payload["scale_session_process"] = (
+            None if status == "running" else {**_process_evidence(tmp_path), "returncode": 9}
+        )
+    _rewrite(path, payload)
+    _mock_runtime_dependencies(
+        monkeypatch,
+        payload["config"],
+        payload["provenance"],
+    )
+
+    manifest = validate_run_manifest(path)
+
+    assert manifest["status"] == status
+
+
+@pytest.mark.parametrize(
+    ("process_field", "message"),
+    [
+        ("restoration_process", "requires 4KAgent upstream process evidence"),
+        ("scale_session_process", "persistent CoZ requires successful session process evidence"),
+    ],
+)
+def test_successful_audited_runtime_rejects_failed_process_evidence(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+    process_field: str,
+    message: str,
+) -> None:
+    path, payload = _persistent_runtime_manifest(tmp_path, make_image)
+    payload["completion_level"] = "AB_INTEGRATED"
+    payload[process_field]["returncode"] = 9
+    _rewrite(path, payload)
+    _mock_runtime_dependencies(
+        monkeypatch,
+        payload["config"],
+        payload["provenance"],
+    )
+
+    with pytest.raises(ManifestValidationError, match=message):
+        validate_run_manifest(path)
+
+
 def test_validator_rejects_unverified_runtime_completion(
     tmp_path: Path,
     make_image: Callable[..., Path],
@@ -679,3 +1000,171 @@ def test_validator_rejects_coz_candidate_hash_mismatch(
 
     with pytest.raises(ManifestValidationError, match="candidate hash disagrees"):
         validate_run_manifest(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("root_sha256", "e" * 64, "root_sha256 disagrees with the session root"),
+        ("source_size", [1, 1], "source_size disagrees with the input artifact"),
+    ],
+)
+def test_validator_binds_coz_worker_metadata_to_the_artifact_chain(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    path, payload = _runtime_manifest(tmp_path, make_image)
+    payload["steps"][0]["worker_metadata"][field] = value
+    if field == "source_size":
+        payload["steps"][0]["worker_metadata"]["output_size"] = [4, 4]
+    _rewrite(path, payload)
+
+    with pytest.raises(ManifestValidationError, match=message):
+        validate_run_manifest(path)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, True, -0.1, 10**400],
+)
+def test_validator_rejects_tampered_coz_step_duration(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    value: object,
+) -> None:
+    path, payload = _runtime_manifest(tmp_path, make_image)
+    payload["steps"][0]["worker_metadata"]["duration_seconds"] = value
+    _rewrite(path, payload)
+
+    with pytest.raises(
+        ManifestValidationError,
+        match=r"worker_metadata\.duration_seconds must be (numeric|finite|non-negative)",
+    ):
+        validate_run_manifest(path)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, True, -0.1, 10**400],
+)
+def test_validator_rejects_tampered_persistent_initialization_duration(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    value: object,
+) -> None:
+    path, payload = _runtime_manifest(tmp_path, make_image)
+    payload["steps"][0]["worker_metadata"]["initialization_duration_seconds"] = value
+    _rewrite(path, payload)
+
+    with pytest.raises(
+        ManifestValidationError,
+        match=(
+            r"worker_metadata\.initialization_duration_seconds must be "
+            r"(numeric|finite|non-negative)"
+        ),
+    ):
+        validate_run_manifest(path)
+
+
+def test_validator_rejects_initialization_duration_from_one_shot_coz(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+) -> None:
+    path, payload = _runtime_manifest(
+        tmp_path,
+        make_image,
+        backend="chain_of_zoom_subprocess",
+        completion_level="COMPONENT_REPRODUCED",
+    )
+    payload["steps"][0]["worker_metadata"]["initialization_duration_seconds"] = 1.5
+    _rewrite(path, payload)
+
+    with pytest.raises(ManifestValidationError, match="only valid for the first persistent"):
+        validate_run_manifest(path)
+
+
+def test_validator_rejects_initialization_duration_after_first_persistent_step(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+) -> None:
+    path = _manifest(tmp_path, make_image, target_factor=16)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    _template_path, template_payload = _runtime_manifest(tmp_path / "template", make_image)
+    template_metadata = template_payload["steps"][0]["worker_metadata"]
+    for index, step in enumerate(payload["steps"], start=1):
+        metadata = json.loads(json.dumps(template_metadata))
+        metadata.update(
+            source_size=[step["trusted_before"]["width"], step["trusted_before"]["height"]],
+            output_size=[step["candidate"]["width"], step["candidate"]["height"]],
+            seed=payload["config"]["coz"]["seed"] + index - 1,
+            step_index=index,
+            root_sha256=payload["restored_image"]["sha256"],
+            input_sha256=step["trusted_before"]["sha256"],
+            candidate_sha256=step["candidate"]["sha256"],
+        )
+        metadata.pop("initialization_duration_seconds", None)
+        if index == 1:
+            metadata["initialization_duration_seconds"] = 1.5
+        step["worker_metadata"] = metadata
+    payload["steps"][1]["worker_metadata"]["initialization_duration_seconds"] = 0.5
+    _rewrite(path, payload)
+
+    with pytest.raises(ManifestValidationError, match="only valid for the first persistent"):
+        validate_run_manifest(path)
+
+
+@pytest.mark.parametrize(
+    "peaks",
+    [
+        None,
+        [],
+        {},
+        {"0": 1024},
+        {"0": 1024, "2": 2048},
+        {"0": True, "1": 2048},
+        {"0": -1, "1": 2048},
+    ],
+)
+def test_validator_rejects_tampered_coz_allocator_peaks(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    peaks: object,
+) -> None:
+    path, payload = _runtime_manifest(tmp_path, make_image)
+    payload["steps"][0]["worker_metadata"]["peak_torch_allocated_mib"] = peaks
+    _rewrite(path, payload)
+
+    with pytest.raises(ManifestValidationError, match="peak_torch_allocated_mib"):
+        validate_run_manifest(path)
+
+
+def test_validator_rejects_incomplete_coz_metadata_without_allocator_peaks(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+) -> None:
+    path, payload = _runtime_manifest(tmp_path, make_image)
+    payload["steps"][0]["worker_metadata"].pop("peak_torch_allocated_mib")
+    _rewrite(path, payload)
+    with pytest.raises(ManifestValidationError, match="unexpected or missing fields"):
+        validate_run_manifest(path)
+
+
+def test_validator_does_not_apply_coz_metadata_contract_to_custom_backends(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+) -> None:
+    path = _manifest(tmp_path, make_image)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["steps"][0]["worker_metadata"].update(
+        {
+            "duration_seconds": True,
+            "initialization_duration_seconds": -1,
+            "peak_torch_allocated_mib": {"unknown": False},
+        }
+    )
+    _rewrite(path, payload)
+
+    assert validate_run_manifest(path)["status"] == "succeeded"

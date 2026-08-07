@@ -204,8 +204,8 @@ profile:
 
 1. accept the Stable Diffusion 3 model terms on Hugging Face and authenticate
    on the target machine; and
-2. provide the remote 4KAgent scheduler credential named by
-   `fourkagent.api_key_env` (`OPENAI_API_KEY` in the AutoDL configuration); and
+2. create an Alibaba Cloud Model Studio API key in the Beijing region and
+   expose it under the configured `DASHSCOPE_API_KEY` variable; and
 3. obtain the 4KAgent DepictQA degradation delta from its pinned upstream
    Google Drive object.
 
@@ -219,7 +219,14 @@ scripts/autodl/download_weights.sh
 ```
 
 Public downloads are pinned and hashed. Optional artifacts are skipped unless
-`--include-optional` is supplied. The wrapper then invokes
+`--include-optional` is supplied. That option adds the locked LPIPS v0.1
+linear-layer checkpoint and content-addressed OpenAI RN50 file used by the
+offline CLIPIQA adapter. LPIPS also needs the separate Torchvision AlexNet
+ImageNet backbone supplied through `--pyiqa-backbone`; because its publisher
+URL identifies only a short hash prefix, it is treated as an explicit
+user-provided evaluation input and its full measured SHA-256 is bound in the
+metric receipt rather than implied to be prepared by the downloader. The
+wrapper then invokes
 `scripts/weights/materialize.py` without mutating the audited checkouts. That
 hook derives only the expanded 4KAgent toolbox and the DQ495K copy under
 `weights/4kagent/runtime/`, then records their inventories in a materialization
@@ -252,8 +259,8 @@ After provisioning the host and accepting gated terms:
 ```bash
 read -rsp 'HF token: ' HF_TOKEN && printf '\n'
 export HF_TOKEN
-read -rsp 'OpenAI API key: ' OPENAI_API_KEY && printf '\n'
-export OPENAI_API_KEY
+read -rsp 'DashScope API key: ' DASHSCOPE_API_KEY && printf '\n'
+export DASHSCOPE_API_KEY
 export CUDA_VISIBLE_DEVICES=0,1
 
 scripts/autodl/check_gpu.sh
@@ -294,7 +301,7 @@ still requires evidence review before the project status is raised.
 Unset both credential variables after the attempt:
 
 ```bash
-unset HF_TOKEN OPENAI_API_KEY
+unset HF_TOKEN DASHSCOPE_API_KEY
 ```
 
 The complete cache layout, recovery procedure, diagnostics collection, and

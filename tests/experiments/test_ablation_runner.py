@@ -326,6 +326,20 @@ def _write_wrapper_attempt(
         json.dumps(model_evidence_summary) + "\n",
         encoding="utf-8",
     )
+    gpu_samples = attempt_dir / "gpu-samples.csv"
+    gpu_samples.write_text(
+        "timestamp_utc,sample_kind,index,uuid,name,memory_used_mib,"
+        "memory_total_mib,utilization_gpu_percent\n"
+        f"2026-08-08T00:00:00Z,inventory,0,{gpu_uuid_prefix}-0,{gpu_name},"
+        "1024,24564,0\n"
+        f"2026-08-08T00:00:00Z,inventory,1,{gpu_uuid_prefix}-1,{gpu_name},"
+        "2048,24564,0\n"
+        f"2026-08-08T00:00:01Z,workload,0,{gpu_uuid_prefix}-0,{gpu_name},"
+        "2048,24564,50\n"
+        f"2026-08-08T00:00:01Z,workload,1,{gpu_uuid_prefix}-1,{gpu_name},"
+        "3072,24564,60\n",
+        encoding="utf-8",
+    )
     execution = attempt_dir / "execution.json"
     execution.write_text(
         json.dumps(
@@ -333,6 +347,9 @@ def _write_wrapper_attempt(
                 "schema_version": 1,
                 "stage": "experiment",
                 "status": "passed",
+                "started_at_utc": "2026-08-08T00:00:00Z",
+                "completed_at_utc": "2026-08-08T00:00:42Z",
+                "duration_seconds": 42,
                 "return_code": 0,
                 "scaleguard_command_return_code": 0,
                 "git_commit": project_commit,
@@ -350,6 +367,48 @@ def _write_wrapper_attempt(
                     "run_manifest_snapshot": _file_entry(copied_manifest),
                     "summary": model_evidence_summary,
                 },
+                "gpu_sampling": {
+                    "sample_count": 4,
+                    "sample_interval_seconds": 1.0,
+                    "window_started_at_utc": "2026-08-08T00:00:00Z",
+                    "window_completed_at_utc": "2026-08-08T00:00:01Z",
+                    "window_duration_seconds": 1.0,
+                    "boundary_tolerance_seconds": 5.0,
+                    "maximum_gap_tolerance_seconds": 2.0,
+                    "maximum_observed_gap_seconds": 1.0,
+                    "temporal_coverage_complete": True,
+                    "minimum_gpu_count": 2,
+                    "preflight_receipt_bound": True,
+                    "inventory_binding_complete": True,
+                    "workload_sampling_complete": True,
+                    "workload_observed_by_uuid": {
+                        f"{gpu_uuid_prefix}-0": True,
+                        f"{gpu_uuid_prefix}-1": True,
+                    },
+                    "workload_samples_by_uuid": {
+                        f"{gpu_uuid_prefix}-0": 1,
+                        f"{gpu_uuid_prefix}-1": 1,
+                    },
+                    "attribution_scope": "physical_gpu_host_level_not_process_attributed",
+                    "evidence_complete": True,
+                    "peak_by_physical_index": {
+                        "0": {
+                            "uuid": f"{gpu_uuid_prefix}-0",
+                            "name": gpu_name,
+                            "memory_total_mib": 24564,
+                            "peak_memory_used_mib": 2048,
+                            "peak_utilization_percent": 50,
+                        },
+                        "1": {
+                            "uuid": f"{gpu_uuid_prefix}-1",
+                            "name": gpu_name,
+                            "memory_total_mib": 24564,
+                            "peak_memory_used_mib": 3072,
+                            "peak_utilization_percent": 60,
+                        },
+                    },
+                    "raw_csv": "gpu-samples.csv",
+                },
             }
         )
         + "\n",
@@ -357,7 +416,6 @@ def _write_wrapper_attempt(
     )
     simple_files = {
         "experiment.log": "redacted experiment log\n",
-        "gpu-samples.csv": "timestamp,index,memory_used_mib\n0,0,1024\n",
         "nvidia-smi-before.txt": "fixture before\n",
         "nvidia-smi-after.txt": "fixture after\n",
     }
@@ -860,11 +918,20 @@ def test_passed_suite_receipt_reader_revalidates_bound_artifacts(
     assert len(validated["jobs"]) == len(EXPERIMENT_GROUPS)
     assert {job["group"] for job in validated["jobs"]} == set(EXPERIMENT_GROUPS)
     assert len({job["hardware"]["identity_sha256"] for job in validated["jobs"]}) == 1
+    assert all(job["system_evidence"]["duration_seconds"] == 42 for job in validated["jobs"])
+    for job in validated["jobs"]:
+        sampling = job["system_evidence"]["gpu_sampling"]
+        assert sampling["attribution_scope"] == "physical_gpu_host_level_not_process_attributed"
+        assert sampling["sample_interval_seconds"] == 1.0
+        assert {
+            peak["peak_memory_used_mib"] for peak in sampling["peak_by_physical_index"].values()
+        } == {2048, 3072}
+        assert all("uuid" not in peak for peak in sampling["peak_by_physical_index"].values())
 
     pointer = Path(receipt["jobs"][0]["wrapper_evidence_pointer"])
     attempt = json.loads(pointer.read_text(encoding="utf-8"))
-    (Path(attempt["attempt_dir"]) / "experiment.log").write_text(
-        "tampered after suite validation\n",
+    (Path(attempt["attempt_dir"]) / "gpu-samples.csv").write_text(
+        "tampered GPU samples after suite validation\n",
         encoding="utf-8",
     )
     with pytest.raises(ExperimentProtocolError, match="wrapper attempt revalidation failed"):
@@ -1071,7 +1138,7 @@ def test_default_runner_uses_fixed_shell_and_minimal_phase_environment(
     config = _write_base_config(tmp_path / "config.yaml")
     poison = tmp_path / "poison.sh"
     poison.write_text("exit 97\n", encoding="utf-8")
-    monkeypatch.setenv("OPENAI_API_KEY", "scheduler-secret")
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "scheduler-secret")
     monkeypatch.setenv("UNRELATED_SERVICE_TOKEN", "must-not-cross")
     monkeypatch.setenv("PIP_INDEX_URL", "https://user:pass@example.invalid/simple")
     monkeypatch.setenv("BASH_ENV", str(poison))
@@ -1102,7 +1169,7 @@ def test_default_runner_uses_fixed_shell_and_minimal_phase_environment(
     ]
     environment = observed["kwargs"].pop("env")
     assert observed["kwargs"] == {"cwd": tmp_path, "check": False}
-    assert environment["OPENAI_API_KEY"] == "scheduler-secret"
+    assert environment["DASHSCOPE_API_KEY"] == "scheduler-secret"
     assert environment["PATH"] == experiments._FIXED_SYSTEM_PATH
     assert environment["TMPDIR"] == "/tmp"
     isolated_home = Path(environment["HOME"])

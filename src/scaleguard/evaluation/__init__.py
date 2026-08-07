@@ -13,6 +13,7 @@ from scaleguard.evaluation.metrics import (
     evaluate_metric_receipt,
     psnr_rgb,
     ssim_rgb,
+    verify_metric_receipt,
 )
 from scaleguard.evaluation.summary import EXPERIMENT_GROUPS, summarize_paired_manifests
 
@@ -29,4 +30,5 @@ __all__ = [
     "summarize_paired_manifests",
     "verify_calibration_document",
     "verify_calibration_receipt",
+    "verify_metric_receipt",
 ]
