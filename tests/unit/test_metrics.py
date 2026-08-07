@@ -110,6 +110,17 @@ def test_forward_model_registry_is_explicit(name: str, expected_name: str) -> No
     assert build_forward_model(name, {}).name == expected_name
 
 
+def test_forward_model_identity_binds_parameters_and_seed_domain() -> None:
+    narrow = build_forward_model("gaussian_psf", {"sigma": 0.8})
+    wide = build_forward_model("gaussian_psf", {"sigma": 1.6})
+    assert narrow.identity != wide.identity
+    assert narrow.identity["parameters"]["sigma"] == 0.8
+
+    for invalid_seed in (-1, True, 2**63, 1.0):
+        with pytest.raises(ConfigurationError, match="seed must be an integer between"):
+            build_forward_model("poisson_gaussian", {"seed": invalid_seed})
+
+
 @pytest.mark.parametrize(
     ("name", "parameters"),
     [

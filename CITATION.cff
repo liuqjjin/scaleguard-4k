@@ -5,7 +5,8 @@ message: >-
 title: "ScaleGuard-4K: Degradation-Aware Agentic Restoration with Scale- and Measurement-Consistent Extreme Super-Resolution"
 type: software
 authors:
-  - name: ScaleGuard-4K contributors
+  - name: liuqjjin
+    email: 156533013+liuqjjin@users.noreply.github.com
 version: 0.1.0.dev0
 repository-code: "https://github.com/liuqjjin/scaleguard-4k"
 url: "https://github.com/liuqjjin/scaleguard-4k"

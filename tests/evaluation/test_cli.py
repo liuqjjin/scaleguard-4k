@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from scaleguard.cli import main
+from scaleguard.evaluation import calibration as calibration_module
 
 from ._fixtures import (
     write_calibration_manifest,
@@ -20,7 +21,34 @@ def _fail_project_root_resolution() -> Path:
     raise AssertionError("project root must not be resolved")
 
 
+def _accept_minimal_calibration_fixture(monkeypatch: Any) -> None:
+    monkeypatch.setattr(
+        calibration_module,
+        "validate_run_manifest",
+        lambda path, **_kwargs: json.loads(path.read_text(encoding="utf-8")),
+    )
+
+    def identity(
+        manifest: dict[str, Any],
+        **_kwargs: object,
+    ) -> tuple[dict[str, Any], str, str | None]:
+        metrics = manifest["steps"][0]["metrics"]
+        return (
+            {"quality": {"backend": "fixture"}, "measurement": None},
+            metrics["quality_backend"],
+            metrics["measurement_model"],
+        )
+
+    monkeypatch.setattr(calibration_module, "_metric_identity", identity)
+    monkeypatch.setattr(
+        calibration_module,
+        "_expected_metric_identity",
+        lambda _config, recorded, _reasons: dict(recorded),
+    )
+
+
 def test_evaluation_calibrate_and_verify_cli(tmp_path: Path, monkeypatch, capsys) -> None:
+    _accept_minimal_calibration_fixture(monkeypatch)
     monkeypatch.delenv("SCALEGUARD_PROJECT_ROOT", raising=False)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("scaleguard.cli.find_project_root", _fail_project_root_resolution)
@@ -92,6 +120,7 @@ def test_evaluation_cli_returns_one_for_insufficient_data(
     monkeypatch,
     capsys,
 ) -> None:
+    _accept_minimal_calibration_fixture(monkeypatch)
     monkeypatch.setenv("SCALEGUARD_PROJECT_ROOT", str(PROJECT_ROOT))
     trusted = tmp_path / "trusted.bin"
     candidate = tmp_path / "candidate.bin"
@@ -204,6 +233,8 @@ def test_evaluation_summarize_cli_forwards_suite_receipt(
     manifest.write_text("{}\n", encoding="utf-8")
     receipt = tmp_path / "suite-receipt.json"
     receipt.write_text("{}\n", encoding="utf-8")
+    metric_receipt = tmp_path / "metric-receipt.json"
+    metric_receipt.write_text("{}\n", encoding="utf-8")
     observed: dict[str, Any] = {}
 
     def summarize(
@@ -213,6 +244,7 @@ def test_evaluation_summarize_cli_forwards_suite_receipt(
         *,
         artifact_root: Path,
         suite_receipt: Path | None,
+        metric_receipts: list[Path],
     ) -> dict[str, Any]:
         observed.update(
             {
@@ -221,6 +253,7 @@ def test_evaluation_summarize_cli_forwards_suite_receipt(
                 "output_json": output_json,
                 "artifact_root": artifact_root,
                 "suite_receipt": suite_receipt,
+                "metric_receipts": metric_receipts,
             }
         )
         return {
@@ -249,11 +282,14 @@ def test_evaluation_summarize_cli_forwards_suite_receipt(
             str(tmp_path),
             "--suite-receipt",
             str(receipt),
+            "--metric-receipt",
+            str(metric_receipt),
         ]
     )
 
     assert exit_code == 0
     assert observed["suite_receipt"] == receipt
+    assert observed["metric_receipts"] == [metric_receipt]
     assert json.loads(capsys.readouterr().out)["research_eligible_pairs"] == 0
 
 

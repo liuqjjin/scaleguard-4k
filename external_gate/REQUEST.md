@@ -4,7 +4,7 @@ Gate ID: `autodl-2x4090-coz-gated-v1`
 
 ## EXTERNAL GATE
 
-需要用户完成：
+需要账户或数据所有者完成：
 
 1. 开通一台 Linux AutoDL 实例，提供两张可见的 RTX 4090（每张至少
    24000 MiB）、NVIDIA driver 560.28.03 或更新版本，以及至少 150 GiB
@@ -12,7 +12,9 @@ Gate ID: `autodl-2x4090-coz-gated-v1`
 2. 在 Hugging Face 账户接受项目锁文件所列 Stable Diffusion 3 gated
    模型协议。
 3. 在远端交互式 shell 中以隐藏输入分别导出 `HF_TOKEN` 和
-   `OPENAI_API_KEY`。4KAgent overlay 只检查配置指定的环境变量是否存在，
+   `DASHSCOPE_API_KEY`。该 Key 必须在北京地域创建并与配置中的 endpoint
+   匹配；调度器只向百炼发送文本任务标签，不发送图像。overlay 只检查
+   配置指定的环境变量是否存在，
    不把 secret 值写入证据。
 4. 按上游说明手动取得 DepictQA degradation delta，将它放到
    `weights/4kagent/depictqa/delta/degra_eval.pt`。上游没有发布该文件的
@@ -20,12 +22,12 @@ Gate ID: `autodl-2x4090-coz-gated-v1`
 5. 提供一个已授权的 smoke 输入和一个 integration 输入；不要上传受限
    数据或私人图像。
 
-为什么必须由用户完成：
+为什么这些步骤不能由仓库自动完成：
 
 AutoDL 购买、Hugging Face 协议接受、账户令牌和输入数据授权都属于账户或
 数据所有者权限。DepictQA delta 只有上游给出的 Google Drive 对象且没有
-发布 digest，需要用户确认取得的对象及其使用条件。仓库脚本不尝试代替
-用户接受协议，不下载该 manual 项，也不保存凭据。
+发布 digest，需要账户持有人确认取得的对象及其使用条件。仓库脚本不会
+自动接受协议，不下载该 manual 项，也不保存凭据。
 
 最小操作步骤：
 
@@ -33,8 +35,8 @@ AutoDL 购买、Hugging Face 协议接受、账户令牌和输入数据授权都
 cd /path/to/scaleguard-4k
 read -rsp 'HF token: ' HF_TOKEN && printf '\n'
 export HF_TOKEN
-read -rsp 'OpenAI API key: ' OPENAI_API_KEY && printf '\n'
-export OPENAI_API_KEY
+read -rsp 'DashScope API key: ' DASHSCOPE_API_KEY && printf '\n'
+export DASHSCOPE_API_KEY
 export CUDA_VISIBLE_DEVICES=0,1
 export SCALEGUARD_SMOKE_INPUT=/authorized-data/smoke.png
 export SCALEGUARD_INTEGRATION_INPUT=/authorized-data/integration.png
@@ -45,7 +47,7 @@ mkdir -p weights/4kagent/depictqa/delta
 # 将合法取得的文件上传为以下精确路径：
 test -s weights/4kagent/depictqa/delta/degra_eval.pt
 external_gate/commands.sh
-unset HF_TOKEN OPENAI_API_KEY
+unset HF_TOKEN DASHSCOPE_API_KEY
 ```
 
 不要把令牌写进 `.env`、shell 历史、命令参数、issue 或回传压缩包。
@@ -87,7 +89,7 @@ receipt 与固定 marker。发布方没有提供该人工文件的 digest，因�
 - 诊断信息的白名单收集、自动脱敏和内容哈希；
 - 本请求、通过条件与结果模板。
 
-获得条件后 Codex 将立即继续：
+条件满足后的项目验证流程：
 
 - 在实例上执行 `external_gate/commands.sh`；
 - 根据真实错误修复环境或适配；

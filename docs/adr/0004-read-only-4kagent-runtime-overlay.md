@@ -43,9 +43,10 @@ by CLIB-FIQA and HPSv2; neither the checkout nor site-packages is modified.
 HPSv2 receives the locked v2.1 checkpoint explicitly, and its redundant LAION
 pretraining request is suppressed before the strict HPS state-dict load so
 reflection cannot fall back to an implicit download. Reflection uses one
-locked MUSIQ checkpoint rather than a mutable metric bundle. The OpenAI
-scheduler credential is read only from the configured environment variable
-and is never written to an argument, file, or evidence record.
+locked MUSIQ checkpoint rather than a mutable metric bundle. The scheduler
+credential is read only from the configured environment variable and is never
+written to an argument, file, or evidence record. ADR 0012 later replaces the
+provider-specific request loop with a bounded, provider-bound transport.
 
 ScaleGuard still owns the sole final AdaIN color-alignment step.
 
@@ -55,9 +56,8 @@ ScaleGuard still owns the sole final AdaIN color-alignment step.
 - The executable toolbox is smaller than the upstream installation archive;
   this is an intentional deployment profile, not a claim that every 4KAgent
   experiment is reproduced.
-- The remote scheduler model identified in configuration remains a mutable
-  external service. Manifests record its identifier, but exact server-side
-  reproducibility cannot be guaranteed.
+- The remote scheduler remains an external service. A dated snapshot and
+  request receipt reduce drift but cannot guarantee server-side determinism.
 - Model imports and GPU behavior still require the external two-GPU run.
 
 ## Evidence

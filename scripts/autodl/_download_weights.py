@@ -11,6 +11,7 @@ import os
 import pathlib
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -52,8 +53,12 @@ def safe_destination(root: pathlib.Path, value: object) -> pathlib.Path:
     root = root.resolve()
     if not isinstance(value, str) or not value:
         raise ManifestError("every artifact needs a non-empty relative destination")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ManifestError("artifact destination contains a control character")
+    if "\\" in value:
+        raise ManifestError("artifact destination must use POSIX separators")
     relative = pathlib.PurePosixPath(value)
-    if relative.is_absolute() or ".." in relative.parts:
+    if relative.is_absolute() or relative == pathlib.PurePosixPath(".") or ".." in relative.parts:
         raise ManifestError(f"destination must stay below the weight root: {value!r}")
     unresolved = root / pathlib.Path(*relative.parts)
     current = unresolved
@@ -65,6 +70,54 @@ def safe_destination(root: pathlib.Path, value: object) -> pathlib.Path:
     if not destination.is_relative_to(root):
         raise ManifestError(f"destination escapes the weight root: {value!r}")
     return destination
+
+
+def _validate_huggingface_repo_id(value: object, artifact_id: str) -> str:
+    if not isinstance(value, str) or len(value) > 96:
+        raise ManifestError(f"{artifact_id}: invalid Hugging Face repo_id")
+    parts = value.split("/")
+    component = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?")
+    if (
+        len(parts) != 2
+        or any(not component.fullmatch(part) for part in parts)
+        or "--" in value
+        or ".." in value
+    ):
+        raise ManifestError(f"{artifact_id}: invalid Hugging Face repo_id")
+    return value
+
+
+def _validate_huggingface_pattern(value: object, artifact_id: str, field: str) -> str:
+    if not isinstance(value, str) or not value or len(value) > 512:
+        raise ManifestError(f"{artifact_id}: {field} entries must be non-empty strings")
+    if value.startswith("-") or "\\" in value:
+        raise ManifestError(f"{artifact_id}: unsafe Hugging Face {field} pattern: {value!r}")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ManifestError(f"{artifact_id}: unsafe Hugging Face {field} pattern: {value!r}")
+    pattern = pathlib.PurePosixPath(value)
+    if pattern.is_absolute() or ".." in pattern.parts:
+        raise ManifestError(f"{artifact_id}: unsafe Hugging Face {field} pattern: {value!r}")
+    return value
+
+
+def _validate_download_directory(root: pathlib.Path, destination: pathlib.Path) -> None:
+    """Reject link substitution before and after an external downloader runs."""
+
+    root = root.resolve()
+    current = destination
+    while current != root:
+        try:
+            metadata = current.lstat()
+        except FileNotFoundError:
+            current = current.parent
+            continue
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ManifestError(f"download destination contains a symlink: {destination}")
+        if current == destination and not stat.S_ISDIR(metadata.st_mode):
+            raise ManifestError(f"download destination is not a directory: {destination}")
+        current = current.parent
+    if not destination.resolve().is_relative_to(root):
+        raise ManifestError(f"download destination escaped the weight root: {destination}")
 
 
 def validate_artifact(artifact: object, root: pathlib.Path) -> dict[str, Any]:
@@ -112,10 +165,8 @@ def validate_artifact(artifact: object, root: pathlib.Path) -> dict[str, Any]:
     destination = safe_destination(root, artifact.get("destination", artifact_id))
     normalized["_destination"] = destination
     if provider == "huggingface":
-        repo_id = artifact.get("repo_id")
+        normalized["repo_id"] = _validate_huggingface_repo_id(artifact.get("repo_id"), artifact_id)
         revision = artifact.get("revision")
-        if not isinstance(repo_id, str) or not re.fullmatch(r"[^/\s]+/[^/\s]+", repo_id):
-            raise ManifestError(f"{artifact_id}: invalid Hugging Face repo_id")
         if not isinstance(revision, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", revision):
             raise ManifestError(
                 f"{artifact_id}: revision must be an immutable 40-character commit SHA"
@@ -132,10 +183,16 @@ def validate_artifact(artifact: object, root: pathlib.Path) -> dict[str, Any]:
         excludes = artifact.get("exclude", [])
         includes = [] if includes is None else includes
         excludes = [] if excludes is None else excludes
-        if not isinstance(includes, list) or not all(isinstance(item, str) for item in includes):
+        if not isinstance(includes, list):
             raise ManifestError(f"{artifact_id}: include must be a list of strings")
-        if not isinstance(excludes, list) or not all(isinstance(item, str) for item in excludes):
+        if not isinstance(excludes, list):
             raise ManifestError(f"{artifact_id}: exclude must be a list of strings")
+        includes = [
+            _validate_huggingface_pattern(item, artifact_id, "include") for item in includes
+        ]
+        excludes = [
+            _validate_huggingface_pattern(item, artifact_id, "exclude") for item in excludes
+        ]
         if includes == ["**/*"]:
             # Hugging Face uses fnmatchcase semantics: **/* omits repository-root
             # files such as model_index.json. An all-files lock must therefore
@@ -163,6 +220,22 @@ def validate_artifact(artifact: object, root: pathlib.Path) -> dict[str, Any]:
             raise ManifestError(f"{artifact_id}: HTTPS destination must include a filename")
         normalized["sha256"] = expected_sha256
     return normalized
+
+
+def validate_destination_layout(artifacts: list[dict[str, Any]]) -> None:
+    destinations = [
+        item["_destination"]
+        for item in artifacts
+        if isinstance(item.get("_destination"), pathlib.Path)
+    ]
+    if len(destinations) != len(set(destinations)):
+        raise ManifestError("artifact destinations must be unique")
+    for index, destination in enumerate(destinations):
+        for other in destinations[index + 1 :]:
+            if destination in other.parents or other in destination.parents:
+                raise ManifestError(
+                    f"artifact destinations must not be nested: {destination.name} and {other.name}"
+                )
 
 
 def manual_inventory(artifact: dict[str, Any]) -> list[dict[str, object]]:
@@ -255,9 +328,54 @@ def huggingface_command() -> list[str]:
     )
 
 
+def _read_source_marker(path: pathlib.Path) -> dict[str, Any]:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+        metadata = os.fstat(handle.fileno())
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+        ):
+            raise ManifestError(f"unsafe Hugging Face source marker: {path}")
+        payload = handle.read(64 * 1024 + 1)
+    if len(payload) > 64 * 1024:
+        raise ManifestError(f"Hugging Face source marker is too large: {path}")
+    return loads_object(payload)
+
+
+def _write_source_marker(path: pathlib.Path, document: dict[str, object]) -> None:
+    flags = os.O_WRONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except FileNotFoundError:
+        try:
+            descriptor = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            descriptor = os.open(path, flags)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        metadata = os.fstat(handle.fileno())
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_nlink != 1
+        ):
+            raise ManifestError(f"unsafe Hugging Face source marker: {path}")
+        handle.seek(0)
+        handle.truncate()
+        json.dump(document, handle, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
 def download_huggingface(artifact: dict[str, Any]) -> None:
     destination: pathlib.Path = artifact["_destination"]
+    root: pathlib.Path = artifact["_root"]
+    _validate_download_directory(root, destination)
     destination.mkdir(parents=True, exist_ok=True)
+    _validate_download_directory(root, destination)
     marker = destination / ".scaleguard-source.json"
     source_identity = {
         "schema_version": 1,
@@ -267,8 +385,8 @@ def download_huggingface(artifact: dict[str, Any]) -> None:
     }
     if marker.exists():
         try:
-            previous = loads_object(marker.read_text(encoding="utf-8"))
-        except (OSError, StrictJSONError) as exc:
+            previous = _read_source_marker(marker)
+        except (OSError, UnicodeError, StrictJSONError) as exc:
             raise ManifestError(f"{artifact['id']}: invalid source marker: {exc}") from exc
         for key in ("provider", "repo_id", "revision"):
             if previous.get(key) != source_identity[key]:
@@ -282,7 +400,7 @@ def download_huggingface(artifact: dict[str, Any]) -> None:
             "choose a new destination or audit and relocate the existing files"
         )
     source_identity["status"] = "downloading"
-    marker.write_text(json.dumps(source_identity, indent=2) + "\n", encoding="utf-8")
+    _write_source_marker(marker, source_identity)
 
     command = huggingface_command()
     command.extend(
@@ -296,23 +414,32 @@ def download_huggingface(artifact: dict[str, Any]) -> None:
             str(destination),
         ]
     )
-    if artifact.get("include"):
-        command.append("--include")
-        command.extend(artifact["include"])
-    if artifact.get("exclude"):
-        command.append("--exclude")
-        command.extend(artifact["exclude"])
+    for pattern in artifact.get("include", []):
+        command.extend(["--include", pattern])
+    for pattern in artifact.get("exclude", []):
+        command.extend(["--exclude", pattern])
     subprocess.run(command, check=True)
+    _validate_download_directory(root, destination)
     source_identity["status"] = "complete"
-    marker.write_text(json.dumps(source_identity, indent=2) + "\n", encoding="utf-8")
+    _write_source_marker(marker, source_identity)
 
 
 def download_https(artifact: dict[str, Any]) -> None:
     destination: pathlib.Path = artifact["_destination"]
+    root: pathlib.Path = artifact["_root"]
+    _validate_download_directory(root, destination.parent)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    _validate_download_directory(root, destination.parent)
     expected = artifact["sha256"].lower()
-    if destination.is_file() and sha256(destination) == expected:
-        return
+    if destination.exists() or destination.is_symlink():
+        metadata = destination.lstat()
+        if destination.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+            raise ManifestError(f"{artifact['id']}: HTTPS destination is not a regular file")
+        if sha256(destination) == expected:
+            return
+        raise ManifestError(
+            f"{artifact['id']}: existing HTTPS destination has an unexpected SHA-256"
+        )
 
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{destination.name}.",
@@ -336,7 +463,12 @@ def download_https(artifact: dict[str, Any]) -> None:
             raise ManifestError(
                 f"{artifact['id']}: sha256 mismatch; expected {expected}, got {actual}"
             )
-        temporary.replace(destination)
+        try:
+            os.link(temporary, destination, follow_symlinks=False)
+        except FileExistsError as error:
+            raise ManifestError(
+                f"{artifact['id']}: HTTPS destination appeared concurrently"
+            ) from error
     finally:
         temporary.unlink(missing_ok=True)
 
@@ -382,23 +514,12 @@ def main() -> int:
     root.mkdir(parents=True, exist_ok=True)
     document = load_manifest(args.manifest.resolve())
     artifacts = [validate_artifact(item, root) for item in document["artifacts"]]
+    for artifact in artifacts:
+        artifact["_root"] = root
     artifact_ids = [item["id"] for item in artifacts]
     if len(artifact_ids) != len(set(artifact_ids)):
         raise ManifestError("artifact ids must be unique")
-    destinations = [
-        item["_destination"]
-        for item in artifacts
-        if isinstance(item.get("_destination"), pathlib.Path)
-    ]
-    if len(destinations) != len(set(destinations)):
-        raise ManifestError("artifact destinations must be unique")
-    for index, destination in enumerate(destinations):
-        for other in destinations[index + 1 :]:
-            if destination in other.parents or other in destination.parents:
-                raise ManifestError(
-                    "artifact destinations must not be nested: "
-                    f"{destination.relative_to(root)} and {other.relative_to(root)}"
-                )
+    validate_destination_layout(artifacts)
     completed: list[dict[str, object]] = []
     manual_artifacts = [artifact for artifact in artifacts if artifact["provider"] == "manual"]
     manual_files = {
@@ -499,7 +620,8 @@ def main() -> int:
         else:
             download_https(artifact)
         files = inventory(artifact["_destination"])
-        if not files:
+        payload_files = [item for item in files if item.get("path") != ".scaleguard-source.json"]
+        if not payload_files:
             raise ManifestError(f"{artifact['id']}: download produced no regular files")
         known_hashes = expected_hashes(artifact)
         actual_by_path = {str(item["path"]): str(item["sha256"]) for item in files}

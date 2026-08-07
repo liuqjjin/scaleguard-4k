@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
+import json
 import math
 import os
 import shutil
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
@@ -16,6 +19,8 @@ from scaleguard.backends.base import RestorationBackend, ScaleBackend
 from scaleguard.color import apply_adain
 from scaleguard.config import PipelineConfig, validate_config
 from scaleguard.contracts import (
+    FINAL_ADAIN_ALGORITHM,
+    QUALITY_IDENTITY_SCHEMA,
     CompletionLevel,
     Decision,
     ManifestRecorder,
@@ -66,12 +71,55 @@ class TrustedScaleController:
         quality_model_path = config.metrics.quality_model_path
         if quality_model_path is not None and not quality_model_path.is_absolute():
             quality_model_path = self.project_root / quality_model_path
+        if quality_model_path is not None:
+            quality_model_path = quality_model_path.resolve()
         self.quality = quality or build_quality_evaluator(
             config.metrics.quality_backend,
             config.metrics.quality_metric,
             config.metrics.quality_device,
             quality_model_path,
         )
+        expected_quality_name = (
+            "gradient_proxy_v1"
+            if config.metrics.quality_backend == "gradient_proxy"
+            else f"pyiqa:{config.metrics.quality_metric}"
+        )
+        expected_proxy = config.metrics.quality_backend == "gradient_proxy"
+        if (
+            self.quality.name != expected_quality_name
+            or self.quality.is_proxy is not expected_proxy
+        ):
+            raise ValueError(
+                "quality evaluator identity disagrees with metrics configuration: "
+                f"expected {expected_quality_name!r}/proxy={expected_proxy!r}, "
+                f"observed {self.quality.name!r}/proxy={self.quality.is_proxy!r}"
+            )
+        quality_model_sha256 = (
+            self._sha256_file(quality_model_path) if quality_model_path is not None else None
+        )
+        self.quality_identity: dict[str, Any] = {
+            "schema_version": QUALITY_IDENTITY_SCHEMA,
+            "configured_backend": config.metrics.quality_backend,
+            "metric": (
+                config.metrics.quality_metric if config.metrics.quality_backend == "pyiqa" else None
+            ),
+            "evaluator": self.quality.name,
+            "higher_is_better": True,
+            "device": config.metrics.quality_device,
+            "project_root": str(self.project_root),
+            "model_path": str(quality_model_path) if quality_model_path is not None else None,
+            "model_sha256": quality_model_sha256,
+            "is_proxy": self.quality.is_proxy,
+        }
+        self.quality_identity_sha256 = hashlib.sha256(
+            json.dumps(
+                self.quality_identity,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
         self.provenance = provenance or {}
         self.last_run_dir: Path | None = None
         self.measurement: ForwardModel | None = None
@@ -107,7 +155,16 @@ class TrustedScaleController:
                     f"calibration_receipt_unreadable:{type(error).__name__}"
                 ]
 
-    def run(self, source: Path, output: Path, *, run_id: str | None = None) -> Path:
+    def run(
+        self,
+        source: Path,
+        output: Path,
+        *,
+        run_id: str | None = None,
+        overwrite: bool = False,
+    ) -> Path:
+        if type(overwrite) is not bool:
+            raise TypeError("overwrite must be boolean")
         plan = build_scale_plan(
             self.config.controller.target_factor,
             self.config.controller.max_coz_steps,
@@ -116,7 +173,11 @@ class TrustedScaleController:
         run_dir = self._create_run_dir(resolved_run_id)
         self.last_run_dir = run_dir
         normalized_input = run_dir / "input.png"
-        normalize_to_png(source, normalized_input)
+        try:
+            resolved_source = source.expanduser().resolve()
+        except (OSError, RuntimeError) as error:
+            raise ValueError(f"input path cannot be resolved safely: {source}: {error}") from error
+        normalize_to_png(resolved_source, normalized_input)
         input_artifact = inspect_image(normalized_input, mock=False, stage="input")
         mock = self.restoration.mock or self.scale_backend.mock
         manifest = RunManifest(
@@ -132,8 +193,11 @@ class TrustedScaleController:
                 **self.provenance,
                 "restoration_backend": self.restoration.name,
                 "scale_backend": self.scale_backend.name,
+                "project_root": str(self.project_root),
                 "quality_backend": self.quality.name,
                 "quality_backend_is_proxy": self.quality.is_proxy,
+                "quality_identity": self.quality_identity,
+                "quality_identity_sha256": self.quality_identity_sha256,
                 "quality_thresholds_calibrated": self.calibration_valid,
                 "quality_calibration_reasons": self.calibration_reasons,
                 "quality_calibration_receipt": self.calibration_receipt_path,
@@ -148,7 +212,12 @@ class TrustedScaleController:
         rolled_back = False
         session_boundary_valid = False
         try:
-            self._assert_output_outside_run(output, run_dir)
+            resolved_output = self._resolve_external_output(
+                output,
+                run_dir,
+                source=resolved_source,
+                overwrite=overwrite,
+            )
             restored_path = run_dir / "states" / "scale_00_restored.png"
             restoration_devices = (
                 "none"
@@ -311,26 +380,64 @@ class TrustedScaleController:
 
             intended_scale = trusted_scale
             final_state = run_dir / "final.png"
-            attempts: list[tuple[str, Path, float]] = []
+            attempts: list[tuple[str, Path, float, dict[str, Any]]] = []
             if self.config.controller.color_strategy == "adain" and trusted.path != restored_path:
                 color_candidate = run_dir / "states" / "final_color_candidate.png"
                 try:
                     apply_adain(trusted.path, restored_path, color_candidate)
-                    attempts.append(("adain", color_candidate, trusted_scale))
+                    attempts.append(
+                        (
+                            "adain",
+                            color_candidate,
+                            trusted_scale,
+                            {
+                                "kind": "adain",
+                                "source_sha256": trusted.sha256,
+                                "source_scale": trusted_scale,
+                                "reference_sha256": restored_result.image.sha256,
+                                "algorithm": FINAL_ADAIN_ALGORITHM,
+                            },
+                        )
+                    )
                 except Exception as error:
                     recorder.event(
                         "final_color_alignment_failed",
                         error_type=type(error).__name__,
                         message=str(error),
                     )
-            attempts.append(("trusted", trusted.path, trusted_scale))
+            attempts.append(
+                (
+                    "trusted",
+                    trusted.path,
+                    trusted_scale,
+                    self._copy_derivation(trusted.sha256, trusted_scale),
+                )
+            )
             if session_boundary_valid:
                 for step in reversed(manifest.steps):
                     if step.accepted:
                         attempts.append(
-                            ("previous_trusted", step.trusted_before.path, step.input_scale)
+                            (
+                                "previous_trusted",
+                                step.trusted_before.path,
+                                step.input_scale,
+                                self._copy_derivation(
+                                    step.trusted_before.sha256,
+                                    step.input_scale,
+                                ),
+                            )
                         )
-            attempts.append(("restored", restored_path, float(plan.bridge_factor)))
+            attempts.append(
+                (
+                    "restored",
+                    restored_path,
+                    float(plan.bridge_factor),
+                    self._copy_derivation(
+                        restored_result.image.sha256,
+                        float(plan.bridge_factor),
+                    ),
+                )
+            )
 
             seen_paths: set[Path] = set()
             final_metrics: MetricRecord | None = None
@@ -338,7 +445,13 @@ class TrustedScaleController:
             final_label = ""
             final_gates_passed = False
             selected_scale = 0.0
-            for attempt_index, (label, candidate_path, candidate_scale) in enumerate(
+            selected_derivation: dict[str, Any] | None = None
+            for attempt_index, (
+                label,
+                candidate_path,
+                candidate_scale,
+                derivation,
+            ) in enumerate(
                 attempts,
                 start=1,
             ):
@@ -380,8 +493,9 @@ class TrustedScaleController:
                     final_label = label
                     final_gates_passed = gates_passed
                     selected_scale = candidate_scale
+                    selected_derivation = derivation
                     break
-            if final_metrics is None:
+            if final_metrics is None or selected_derivation is None:
                 raise ValueError("no retained scale state passed the post-color final gates")
             if selected_scale < intended_scale:
                 rolled_back = True
@@ -409,6 +523,7 @@ class TrustedScaleController:
                 "acceptance_policy": self.config.controller.acceptance_policy,
                 "gate_reason": final_reason,
                 "metrics": self._metric_payload(final_metrics),
+                "derivation": selected_derivation,
             }
             manifest.achieved_factor = int(selected_scale)
             manifest.target_reached = (
@@ -437,18 +552,20 @@ class TrustedScaleController:
                 if manifest.target_reached and any(step.accepted for step in recorded_candidates):
                     manifest.completion_level = CompletionLevel.AB_INTEGRATED
             manifest.finished_at = utc_now()
-            recorder.event("run_completed", output=str(output.resolve()))
             recorder.write()
             from scaleguard.manifest import validate_run_manifest
 
             validate_run_manifest(recorder.path)
-            self._assert_output_outside_run(output, run_dir)
-            output.parent.mkdir(parents=True, exist_ok=True)
-            self._atomic_copy(final_state, output)
-            recorder.event("external_output_written", output=str(output.resolve()))
-            return output
+            resolved_output.parent.mkdir(parents=True, exist_ok=True)
+            self._publish_output(final_state, resolved_output, overwrite=overwrite)
+            recorder.event("external_output_written", output=str(resolved_output))
+            recorder.event("run_completed", output=str(resolved_output))
+            return resolved_output
         except Exception as error:
             manifest.status = RunStatus.FAILED
+            manifest.completion_level = CompletionLevel.STATIC_READY
+            manifest.achieved_factor = None
+            manifest.target_reached = False
             manifest.finished_at = utc_now()
             manifest.error = {"type": type(error).__name__, "message": str(error)}
             recorder.write()
@@ -488,6 +605,7 @@ class TrustedScaleController:
             scale_edge_mae=scale.edge_mae,
             measurement_nrmse=measurement_nrmse,
             measurement_model=measurement_model,
+            quality_identity_sha256=self.quality_identity_sha256,
         )
         finite_metrics = {
             "quality_baseline": record.quality_baseline,
@@ -544,13 +662,13 @@ class TrustedScaleController:
             )
         return True, "post-color final gates passed"
 
-    @staticmethod
-    def _metric_payload(metrics: MetricRecord) -> dict[str, Any]:
+    def _metric_payload(self, metrics: MetricRecord) -> dict[str, Any]:
         return {
             "quality_baseline": metrics.quality_baseline,
             "quality_candidate": metrics.quality_candidate,
             "quality_gain": metrics.quality_gain,
             "quality_backend": metrics.quality_backend,
+            "quality_identity_sha256": metrics.quality_identity_sha256,
             "scale_nrmse": metrics.scale_nrmse,
             "scale_edge_mae": metrics.scale_edge_mae,
             "measurement_nrmse": metrics.measurement_nrmse,
@@ -661,7 +779,13 @@ class TrustedScaleController:
         return run_dir.resolve()
 
     @staticmethod
-    def _assert_output_outside_run(output: Path, run_dir: Path) -> None:
+    def _resolve_external_output(
+        output: Path,
+        run_dir: Path,
+        *,
+        source: Path,
+        overwrite: bool,
+    ) -> Path:
         try:
             resolved_output = output.expanduser().resolve()
         except (OSError, RuntimeError) as error:
@@ -670,15 +794,63 @@ class TrustedScaleController:
             raise ValueError(
                 f"external output must be outside the immutable run directory: {resolved_output}"
             )
+        if resolved_output == source:
+            raise ValueError(f"external output cannot overwrite the input image: {resolved_output}")
+        if resolved_output.exists() and resolved_output.is_dir():
+            raise IsADirectoryError(f"external output is a directory: {resolved_output}")
+        if not overwrite and (resolved_output.exists() or resolved_output.is_symlink()):
+            raise FileExistsError(f"refusing to replace existing output: {resolved_output}")
+        return resolved_output
 
     @staticmethod
-    def _atomic_copy(source: Path, destination: Path) -> None:
-        temporary = destination.parent / f".{destination.name}.{uuid.uuid4().hex}.tmp"
+    def _publish_output(source: Path, destination: Path, *, overwrite: bool) -> None:
+        temporary: Path | None = None
         try:
-            shutil.copy2(source, temporary)
-            os.replace(temporary, destination)
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=destination.parent,
+                prefix=f".{destination.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as output_handle:
+                temporary = Path(output_handle.name)
+                with source.open("rb") as source_handle:
+                    shutil.copyfileobj(source_handle, output_handle)
+                output_handle.flush()
+                os.fsync(output_handle.fileno())
+            if overwrite:
+                os.replace(temporary, destination)
+            else:
+                os.link(temporary, destination)
+            directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+            directory_fd = os.open(destination.parent, directory_flags)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         finally:
-            temporary.unlink(missing_ok=True)
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _publish_no_clobber(source: Path, destination: Path) -> None:
+        TrustedScaleController._publish_output(source, destination, overwrite=False)
+
+    @staticmethod
+    def _copy_derivation(source_sha256: str, source_scale: float) -> dict[str, Any]:
+        return {
+            "kind": "copy",
+            "source_sha256": source_sha256,
+            "source_scale": source_scale,
+        }
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
 
     @staticmethod
     def _new_run_id() -> str:

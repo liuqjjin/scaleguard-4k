@@ -7,7 +7,7 @@ import json
 import math
 import os
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -49,34 +49,86 @@ def canonical_sha256(payload: Mapping[str, Any]) -> str:
 def write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
     """Durably replace a JSON receipt without exposing a partial file."""
 
-    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (
+        json.dumps(
+            payload,
+            indent=2,
+            sort_keys=True,
+            ensure_ascii=False,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+    write_bytes_atomic(path, encoded)
+
+
+def write_bytes_atomic(path: Path, payload: bytes) -> None:
+    """Durably replace one file via a unique same-directory temporary file."""
+
+    destination = path.expanduser().resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
     temporary_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            dir=path.parent,
-            prefix=f".{path.name}.",
+            "wb",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
             suffix=".tmp",
             delete=False,
         ) as handle:
             temporary_path = Path(handle.name)
-            json.dump(
-                payload,
-                handle,
-                indent=2,
-                sort_keys=True,
-                ensure_ascii=False,
-                allow_nan=False,
-            )
-            handle.write("\n")
+            handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary_path, path)
+        os.replace(temporary_path, destination)
+        _fsync_directory(destination.parent)
     except Exception:
         if temporary_path is not None:
             temporary_path.unlink(missing_ok=True)
         raise
+
+
+def _fsync_directory(path: Path) -> None:
+    """Best-effort directory sync for durable rename metadata."""
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, flags)
+        os.fsync(descriptor)
+    except OSError:
+        # Some supported filesystems do not permit directory fsync. The file
+        # itself has already been synced and atomically replaced.
+        pass
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def resolved_distinct_paths(
+    outputs: Mapping[str, Path],
+    *,
+    inputs: Sequence[tuple[str, Path]] = (),
+) -> dict[str, Path]:
+    """Resolve paths once and reject output/output or output/input aliases."""
+
+    try:
+        resolved_outputs = {label: path.expanduser().resolve() for label, path in outputs.items()}
+        resolved_inputs = [(label, path.expanduser().resolve()) for label, path in inputs]
+    except (OSError, RuntimeError) as error:
+        raise EvaluationEvidenceError(f"cannot resolve evidence path safely: {error}") from error
+
+    output_items = list(resolved_outputs.items())
+    for index, (label, path) in enumerate(output_items):
+        for other_label, other_path in output_items[index + 1 :]:
+            if path == other_path:
+                raise EvaluationEvidenceError(
+                    f"{label} and {other_label} resolve to the same path: {path}"
+                )
+        for input_label, input_path in resolved_inputs:
+            if path == input_path:
+                raise EvaluationEvidenceError(f"{label} would overwrite {input_label}: {path}")
+    return resolved_outputs
 
 
 def load_json_object(path: Path, *, kind: str) -> tuple[dict[str, Any], str]:

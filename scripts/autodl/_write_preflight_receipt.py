@@ -44,6 +44,87 @@ def _new_output_path(value: pathlib.Path) -> pathlib.Path:
     return output
 
 
+def _gpu_preflight_binding(
+    gpu_check: pathlib.Path,
+    *,
+    expected_path: pathlib.Path,
+    commit: str,
+) -> dict[str, object]:
+    gpu_check = gpu_check.resolve()
+    if gpu_check != expected_path.resolve():
+        raise RuntimePreflightError("GPU preflight receipt must come from this runtime attempt")
+    gpu_document, gpu_digest = load_evidence_snapshot(gpu_check, "GPU preflight receipt")
+    selected = gpu_document.get("selected_gpus")
+    requirements = gpu_document.get("requirements")
+    if (
+        gpu_document.get("schema_version") != 1
+        or gpu_document.get("status") != "passed"
+        or gpu_document.get("git_commit") != commit
+        or not isinstance(requirements, dict)
+        or requirements.get("minimum_gpu_count") != 2
+        or not isinstance(selected, list)
+        or len(selected) != 2
+    ):
+        raise RuntimePreflightError(
+            "GPU preflight is not a passed, source-bound dual-GPU inventory"
+        )
+    normalized_gpus: list[dict[str, object]] = []
+    for logical_index, item in enumerate(selected):
+        if not isinstance(item, dict):
+            raise RuntimePreflightError("GPU preflight selected_gpus is malformed")
+        uuid = item.get("uuid")
+        name = item.get("name")
+        memory_total_mib = item.get("memory_total_mib")
+        driver_version = item.get("driver_version")
+        physical_index = item.get("physical_index")
+        if (
+            item.get("logical_index") != logical_index
+            or physical_index != str(logical_index)
+            or not isinstance(uuid, str)
+            or not uuid.startswith("GPU-")
+            or any(character.isspace() for character in uuid)
+            or not isinstance(name, str)
+            or not name
+            or type(memory_total_mib) is not int
+            or memory_total_mib <= 0
+            or not isinstance(driver_version, str)
+            or not driver_version
+        ):
+            raise RuntimePreflightError(
+                "GPU preflight does not match the canonical physical 0,1 topology"
+            )
+        normalized_gpus.append(
+            {
+                "logical_index": logical_index,
+                "physical_index": physical_index,
+                "uuid": uuid,
+                "name": name,
+                "memory_total_mib": memory_total_mib,
+                "driver_version": driver_version,
+            }
+        )
+    if len({str(item["uuid"]) for item in normalized_gpus}) != 2:
+        raise RuntimePreflightError("GPU preflight selected a UUID more than once")
+    visible = gpu_document.get("cuda_visible_devices")
+    if visible is not None:
+        if not isinstance(visible, str):
+            raise RuntimePreflightError("GPU preflight CUDA selector binding is malformed")
+        selectors = visible.split(",")
+        if len(selectors) != 2:
+            raise RuntimePreflightError("GPU preflight must bind exactly two CUDA selectors")
+        for selector, gpu in zip(selectors, normalized_gpus, strict=True):
+            if selector not in {gpu["physical_index"], gpu["uuid"]}:
+                raise RuntimePreflightError(
+                    "GPU preflight CUDA selectors do not match selected GPU identities"
+                )
+    return {
+        "path": str(gpu_check),
+        "sha256": gpu_digest,
+        "cuda_visible_devices": visible,
+        "selected_gpus": normalized_gpus,
+    }
+
+
 def _snapshot_open_receipt(
     descriptor: int,
     *,
@@ -194,6 +275,7 @@ def main() -> int:
     parser.add_argument("--config", type=pathlib.Path, required=True)
     parser.add_argument("--materialization", type=pathlib.Path, required=True)
     parser.add_argument("--runtime-environments", type=pathlib.Path, required=True)
+    parser.add_argument("--gpu-check", type=pathlib.Path, required=True)
     parser.add_argument("--stage-started-at", required=True)
     parser.add_argument("--output", type=pathlib.Path, required=True)
     args = parser.parse_args()
@@ -239,6 +321,11 @@ def main() -> int:
         weight_receipt_override=override,
     )
     commit = require_clean_git_commit(PROJECT_ROOT)
+    gpu_binding = _gpu_preflight_binding(
+        args.gpu_check,
+        expected_path=output.parent / "gpu-preflight" / "gpu_check.json",
+        commit=commit,
+    )
     document = {
         "schema_version": 2,
         "status": "passed",
@@ -249,6 +336,7 @@ def main() -> int:
         "locks": {relative: sha256(PROJECT_ROOT / relative) for relative in LOCK_PATHS},
         "bootstrap": {"path": str(bootstrap), "sha256": sha256(bootstrap)},
         "runtime_environments": environment_records,
+        "gpu_preflight": gpu_binding,
         "materialization": {
             "path": str(materialization),
             "sha256": sha256(materialization),

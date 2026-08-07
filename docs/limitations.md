@@ -48,8 +48,9 @@ preference, identity preservation, or hallucination risk.
 
 PyIQA support fixes package and metric identity and normalizes score direction,
 but availability does not validate thresholds. The checked-in AutoDL numbers
-are placeholders until a disjoint, labeled calibration split produces a valid
-receipt with sensitivity evidence.
+are uncalibrated operational defaults, not result placeholders; they cannot
+support a research claim until a disjoint, labeled calibration split produces a
+valid receipt with sensitivity evidence.
 
 No single no-reference IQA metric is sufficient to establish faithful
 restoration. Domain shift, text, faces, scientific images, and structured
@@ -112,7 +113,8 @@ yet have real-GPU evidence for:
 
 - cleanup after failure;
 - allocator fragmentation;
-- first-load versus steady-state timing;
+- real-GPU first-load versus steady-state timing from the recorded
+  initialization and per-step duration fields;
 - repeat-run determinism; or
 - numerical equivalence to an unpatched/one-shot reference.
 
@@ -122,14 +124,21 @@ run. This avoids hidden CUDA residency at the cost of added controller latency.
 
 ## Upstream variability and reproducibility
 
-4KAgent planning and perception can vary with model/API behavior, environment,
-tool availability, and metric versions. Its public issue history also records
+Planning can vary with remote model/API behavior, environment, tool availability,
+and metric versions. The canonical scheduler is a dated Qwen snapshot on
+DashScope with thinking disabled and temperature zero, but the service is still
+not mathematically deterministic and dated snapshots have finite lifetimes. Its
+request contains task labels inferred from the authorized image, so it is not a
+zero-disclosure path even though image bytes remain local. The upstream issue
+history also records
 evaluation-setting and dataset-completeness concerns. CoZ device mapping may
 vary with the installed Transformers/Accelerate stack.
 
 Seeds, source commits, model revisions, and dependency locks reduce variation;
 they do not eliminate nondeterministic CUDA kernels or VLM generation. Actual
-plans, prompts, logs, versions, and outputs must be retained.
+plans, CoZ generation prompts, redacted remote-scheduler metadata, logs,
+versions, and outputs must be retained; raw scheduler prompts are intentionally
+excluded from receipts.
 
 The required DepictQA degradation delta is a manual Google Drive artifact with
 no publisher digest. A ScaleGuard receipt can bind the exact local bytes after
@@ -143,10 +152,14 @@ PyIQA adapters: they require explicit local weights, block implicit network
 access, and have no project-generated scores yet.
 
 The declared ablation protocol and four-group evidence orchestrator are
-executable, but no authorized suite has been run. The repository does not yet
-provide aggregate statistical or systems reporting, an authorized dataset
-split, a completed four-group study, or human-preference evidence. A suite or
-metric receipt demonstrates execution and provenance, not research validity.
+executable. Paired effects, input-cluster bootstrap intervals, CoZ
+initialization/step timing, and replayed host-level GPU sampling summaries are
+implemented, but no authorized suite has been run or reviewed. The repository
+therefore provides no aggregate result report, authorized dataset split,
+completed four-group study, or human-preference evidence. A suite or metric
+receipt demonstrates execution and provenance, not research validity. Host GPU
+samples are explicitly not process-attributed and must not be presented as a
+component's allocator peak.
 
 A valid receipt needs at least the configured number of acceptable real
 samples, but that minimum is not a guarantee of statistical power or population

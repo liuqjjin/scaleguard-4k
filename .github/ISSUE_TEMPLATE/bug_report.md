@@ -1,36 +1,40 @@
 ---
-name: Bug report
-about: Create a report to help us improve
-title: '[BUG] '
+name: Runtime or contract bug
+about: Report a reproducible ScaleGuard failure with redacted evidence
+title: '[bug] '
 labels: bug
 assignees: ''
 ---
 
-## Bug Description
-A clear and concise description of what the bug is.
+## Failure boundary
 
-## To Reproduce
-Steps to reproduce the behavior:
-1. Configuration used: `configs/runtime/...`
-2. Command run: `scaleguard run ...`
-3. Error occurred at: ...
+Name the failing phase: configuration, restoration, CoZ session, controller,
+manifest verification, evaluation, or deployment wrapper. State whether the
+failure is reproducible in CPU mock mode.
 
-## Expected Behavior
-A clear and concise description of what you expected to happen.
+## Minimal reproduction
+
+- ScaleGuard commit or version:
+- Configuration profile and changed non-secret fields:
+- Redacted command (replace local paths and data names):
+- First failing step or exception class:
+- Expected contract:
+- Observed contract:
 
 ## Environment
-- OS: [e.g. Ubuntu 22.04]
-- Python version: [e.g. 3.11.0]
-- ScaleGuard version: [e.g. 0.1.0.dev0]
-- GPU: [e.g. RTX 4090 x2, or "CPU mock mode"]
-- uv version: [e.g. 0.11.16]
 
-## Manifest and Logs
-Do not attach raw manifests, logs, configurations, images, or diagnostic archives.
-Share only the smallest relevant excerpt after removing credentials, private paths,
-signed URLs, image data, and other sensitive material. Follow
-[`external_gate/REDACTION.md`](../../external_gate/REDACTION.md) before uploading
-anything from a real run.
+- OS and architecture:
+- Python and uv versions:
+- Mode: CPU mock or real runtime
+- For real runtime only: GPU model/count, driver, and CUDA runtime:
 
-## Additional Context
-Add any other context about the problem here.
+## Redacted evidence
+
+Include the run ID, manifest schema/status, and the smallest relevant log or
+validation excerpt. Do not attach raw manifests, logs, configurations, images,
+datasets, or diagnostic archives. Remove credentials, private paths, hostnames,
+signed URLs, image content, and dataset identifiers by following
+[`external_gate/REDACTION.md`](https://github.com/liuqjjin/scaleguard-4k/blob/main/external_gate/REDACTION.md).
+
+- [ ] I checked the excerpt for secrets and private or licensed data.
+- [ ] The reproduction uses data I am authorized to disclose, or no data is attached.

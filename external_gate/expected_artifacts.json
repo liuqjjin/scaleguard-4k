@@ -14,7 +14,7 @@
         "smoke/*/gpu-preflight/gpu_check.json",
         "integration/*/gpu-preflight/gpu_check.json"
       ],
-      "condition": "Every listed stage that was run has status == passed; the standalone gate preflight must exist, two selected GPUs match 4090, and each reports at least 24000 MiB"
+      "condition": "Every listed stage that was run has status == passed; the standalone gate preflight must exist and bind exactly two selected GPUs with logical indices 0 and 1, distinct nonempty NVIDIA UUIDs, distinct physical indices, names matching RTX 4090, and at least 24000 MiB each; every later-stage preflight must preserve that attempt's exact two-UUID topology"
     },
     {
       "glob": "weight-download/*/weights-receipt.json",
@@ -26,11 +26,11 @@
     },
     {
       "glob": "smoke/*/execution.json",
-      "condition": "status == passed; return_code == 0; schema-v2 runtime-preflight.json validates against the clean dispatched commit, config, locks, four fresh same-attempt environment receipts, bootstrap baselines, fixed materialization marker, and weight receipt; output hash and non-empty GPU sample evidence exist"
+      "condition": "status == passed; return_code == 0; schema-v2 runtime-preflight.json validates against the clean dispatched commit, config, locks, four fresh same-attempt environment receipts, bootstrap baselines, fixed materialization marker, weight receipt, and the same-attempt GPU-preflight SHA-256; output hash exists; gpu_sampling.preflight_receipt_bound, inventory_binding_complete, workload_sampling_complete, and evidence_complete are true; inventory and workload rows cover both and only the two bound UUIDs, each UUID has at least one workload sample and observed workload activity, and peak_by_physical_index maps both UUIDs"
     },
     {
       "glob": "integration/*/execution.json",
-      "condition": "status == passed; return_code == 0; schema-v2 runtime-preflight.json validates against the clean dispatched commit, config, locks, four fresh same-attempt environment receipts, bootstrap baselines, fixed materialization marker, and weight receipt; output hash and non-empty GPU sample evidence exist"
+      "condition": "status == passed; return_code == 0; schema-v2 runtime-preflight.json validates against the clean dispatched commit, config, locks, four fresh same-attempt environment receipts, bootstrap baselines, fixed materialization marker, weight receipt, and the same-attempt GPU-preflight SHA-256; output hash exists; gpu_sampling.preflight_receipt_bound, inventory_binding_complete, workload_sampling_complete, and evidence_complete are true; inventory and workload rows cover both and only the two bound UUIDs, each UUID has at least one workload sample and observed workload activity, and peak_by_physical_index maps both UUIDs"
     },
     {
       "globs": [

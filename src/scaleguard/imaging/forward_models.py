@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 import numpy as np
+import PIL
 from PIL import Image, ImageFilter
 
 from scaleguard.errors import ConfigurationError
@@ -19,6 +20,10 @@ class ForwardModel(Protocol):
     def name(self) -> str:
         """Stable identifier recorded in the run manifest."""
 
+    @property
+    def identity(self) -> dict[str, Any]:
+        """Canonical implementation and parameter identity."""
+
     def apply(self, image: Image.Image, output_size: tuple[int, int]) -> Image.Image:
         """Map a reconstruction into observation space."""
 
@@ -26,6 +31,17 @@ class ForwardModel(Protocol):
 @dataclass(frozen=True, slots=True)
 class ResizeModel:
     name: str = "resize_lanczos"
+
+    @property
+    def identity(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "implementation": "scaleguard.pillow",
+            "version": 1,
+            "dependency_versions": {"pillow": PIL.__version__},
+            "preprocessing": {"color_mode": "RGB", "resize": "LANCZOS"},
+            "parameters": {},
+        }
 
     def apply(self, image: Image.Image, output_size: tuple[int, int]) -> Image.Image:
         return image.convert("RGB").resize(output_size, Image.Resampling.LANCZOS)
@@ -35,6 +51,17 @@ class ResizeModel:
 class GaussianPSFModel:
     sigma: float = 1.2
     name: str = "gaussian_psf_resize"
+
+    @property
+    def identity(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "implementation": "scaleguard.pillow",
+            "version": 1,
+            "dependency_versions": {"pillow": PIL.__version__},
+            "preprocessing": {"color_mode": "RGB", "resize": "LANCZOS"},
+            "parameters": {"sigma": self.sigma},
+        }
 
     def apply(self, image: Image.Image, output_size: tuple[int, int]) -> Image.Image:
         return (
@@ -48,6 +75,20 @@ class GaussianPSFModel:
 class JPEGModel:
     quality: int = 75
     name: str = "jpeg_resize"
+
+    @property
+    def identity(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "implementation": "scaleguard.pillow",
+            "version": 1,
+            "dependency_versions": {"pillow": PIL.__version__},
+            "preprocessing": {"color_mode": "RGB", "resize": "LANCZOS"},
+            "parameters": {
+                "quality": self.quality,
+                "subsampling": 0,
+            },
+        }
 
     def apply(self, image: Image.Image, output_size: tuple[int, int]) -> Image.Image:
         resized = image.convert("RGB").resize(output_size, Image.Resampling.LANCZOS)
@@ -65,6 +106,24 @@ class PoissonGaussianModel:
     seed: int = 0
     name: str = "poisson_gaussian_resize"
 
+    @property
+    def identity(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "implementation": "scaleguard.numpy-pillow",
+            "version": 1,
+            "dependency_versions": {
+                "numpy": np.__version__,
+                "pillow": PIL.__version__,
+            },
+            "preprocessing": {"color_mode": "RGB", "resize": "LANCZOS"},
+            "parameters": {
+                "peak_photons": self.peak_photons,
+                "read_noise_std": self.read_noise_std,
+                "seed": self.seed,
+            },
+        }
+
     def apply(self, image: Image.Image, output_size: tuple[int, int]) -> Image.Image:
         resized = image.convert("RGB").resize(output_size, Image.Resampling.LANCZOS)
         array = np.asarray(resized, dtype=np.float32) / 255.0
@@ -80,6 +139,23 @@ class HazeModel:
     transmission: float = 0.75
     atmospheric_light: float = 0.9
     name: str = "uniform_haze_resize"
+
+    @property
+    def identity(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "implementation": "scaleguard.numpy-pillow",
+            "version": 1,
+            "dependency_versions": {
+                "numpy": np.__version__,
+                "pillow": PIL.__version__,
+            },
+            "preprocessing": {"color_mode": "RGB", "resize": "LANCZOS"},
+            "parameters": {
+                "transmission": self.transmission,
+                "atmospheric_light": self.atmospheric_light,
+            },
+        }
 
     def apply(self, image: Image.Image, output_size: tuple[int, int]) -> Image.Image:
         resized = image.convert("RGB").resize(output_size, Image.Resampling.LANCZOS)
@@ -134,17 +210,17 @@ def build_forward_model(name: str, parameters: dict[str, Any]) -> ForwardModel:
         _reject_unknown(parameters, {"peak_photons", "read_noise_std", "seed"})
         peak_photons = _number(parameters, "peak_photons", 60.0)
         read_noise_std = _number(parameters, "read_noise_std", 0.01)
-        seed = _number(parameters, "seed", 0)
+        seed = parameters.get("seed", 0)
         if peak_photons <= 0:
             raise ConfigurationError("peak_photons must be positive")
         if read_noise_std < 0:
             raise ConfigurationError("read_noise_std must be non-negative")
-        if not seed.is_integer():
-            raise ConfigurationError("measurement seed must be an integer")
+        if type(seed) is not int or not 0 <= seed <= 2**63 - 1:
+            raise ConfigurationError("measurement seed must be an integer between 0 and 2^63-1")
         return PoissonGaussianModel(
             peak_photons=peak_photons,
             read_noise_std=read_noise_std,
-            seed=int(seed),
+            seed=seed,
         )
     if name == "haze":
         _reject_unknown(parameters, {"transmission", "atmospheric_light"})

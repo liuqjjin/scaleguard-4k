@@ -20,7 +20,81 @@ def test_empty_config_uses_valid_cpu_safe_defaults(tmp_path: Path) -> None:
     assert config.coz.mode == "fake"
     assert config.coz.mixed_precision == "fp32"
     assert config.controller.target_factor == 4
+    assert config.fourkagent.llm_provider == "dashscope"
+    assert config.fourkagent.llm_model == "qwen3.7-flash-2026-07-15"
+    assert config.fourkagent.api_key_env == "DASHSCOPE_API_KEY"
     assert config.is_mock is True
+
+
+@pytest.mark.parametrize(
+    ("body", "message"),
+    [
+        (
+            "fourkagent:\n  llm_base_url: https://example.com/compatible-mode/v1\n",
+            "official DashScope",
+        ),
+        (
+            "fourkagent:\n  llm_base_url: http://dashscope.aliyuncs.com/compatible-mode/v1\n",
+            "credential-free HTTPS",
+        ),
+        (
+            (
+                "fourkagent:\n  llm_base_url: "
+                "https://dashscope.aliyuncs.com/compatible-mode/v1?token=secret\n"
+            ),
+            "credential-free HTTPS",
+        ),
+        (
+            "fourkagent:\n  llm_region: ap-southeast-1\n",
+            "does not match",
+        ),
+        (
+            "fourkagent:\n  api_key_env: OPENAI_API_KEY\n",
+            "DASHSCOPE_API_KEY",
+        ),
+        (
+            "fourkagent:\n  llm_model: gpt-4-turbo\n",
+            "Qwen model",
+        ),
+        (
+            "fourkagent:\n  llm_connect_timeout_seconds: 0\n",
+            "llm_connect_timeout_seconds",
+        ),
+        (
+            "fourkagent:\n  llm_max_transport_retries: true\n",
+            "must be int",
+        ),
+        (
+            "fourkagent:\n  llm_temperature: 0.1\n",
+            "must be 0",
+        ),
+    ],
+)
+def test_scheduler_configuration_fails_closed(
+    tmp_path: Path,
+    body: str,
+    message: str,
+) -> None:
+    with pytest.raises(ConfigurationError, match=message):
+        load_config(write_config(tmp_path / "scheduler-invalid.yaml", body))
+
+
+def test_openai_compatibility_requires_an_explicit_consistent_binding(tmp_path: Path) -> None:
+    config = load_config(
+        write_config(
+            tmp_path / "openai-explicit.yaml",
+            """fourkagent:
+  llm_provider: openai
+  llm_base_url: https://api.openai.com/v1
+  llm_region: global
+  llm_model: gpt-4.1-mini
+  api_key_env: OPENAI_API_KEY
+""",
+        )
+    )
+
+    assert config.fourkagent.llm_provider == "openai"
+    assert config.fourkagent.api_key_env == "OPENAI_API_KEY"
 
 
 def test_parse_config_accepts_the_same_strict_bytes_snapshot(tmp_path: Path) -> None:

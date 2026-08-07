@@ -5,6 +5,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from PIL import Image, ImageOps
 
 import scaleguard.images as images
 from scaleguard.errors import ArtifactError
@@ -105,3 +106,32 @@ def test_image_inspection_uses_one_byte_snapshot_for_metadata_and_hash(
 
     assert (artifact.width, artifact.height) == (11, 7)
     assert artifact.sha256 == digest
+
+
+def test_normalize_to_png_applies_exif_orientation_from_one_snapshot(tmp_path: Path) -> None:
+    source = tmp_path / "oriented.jpg"
+    destination = tmp_path / "normalized.png"
+    original = Image.new("RGB", (3, 2))
+    original.putdata(
+        [
+            (255, 0, 0),
+            (0, 255, 0),
+            (0, 0, 255),
+            (255, 255, 0),
+            (0, 255, 255),
+            (255, 0, 255),
+        ]
+    )
+    exif = Image.Exif()
+    exif[274] = 6
+    original.save(source, format="JPEG", quality=100, subsampling=0, exif=exif)
+    with Image.open(source) as encoded:
+        expected = ImageOps.exif_transpose(encoded).convert("RGB").copy()
+
+    normalize_to_png(source, destination)
+
+    with Image.open(destination) as normalized:
+        assert normalized.format == "PNG"
+        assert normalized.mode == "RGB"
+        assert normalized.size == (2, 3)
+        assert normalized.tobytes() == expected.tobytes()

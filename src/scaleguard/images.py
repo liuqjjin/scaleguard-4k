@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import io
-import shutil
+import os
+import tempfile
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from scaleguard.contracts import ImageArtifact
 from scaleguard.errors import ArtifactError, ScaleGuardError
@@ -54,19 +55,72 @@ def inspect_image(path: Path, *, mock: bool, stage: str) -> ImageArtifact:
 
 
 def normalize_to_png(source: Path, destination: Path) -> None:
-    """Decode once and write a canonical RGB PNG."""
+    """Decode one immutable snapshot and write a canonical oriented RGB PNG."""
 
-    destination.parent.mkdir(parents=True, exist_ok=True)
+    resolved_destination = _distinct_destination(source, destination, role="normalized image")
     try:
-        with Image.open(source) as image:
-            image.convert("RGB").save(destination, format="PNG", optimize=False)
-    except (OSError, ValueError) as error:
+        payload, _digest = load_regular_file_snapshot(source, "source image")
+        with Image.open(io.BytesIO(payload)) as image:
+            normalized = ImageOps.exif_transpose(image).convert("RGB")
+            encoded = io.BytesIO()
+            normalized.save(encoded, format="PNG", optimize=False)
+    except (OSError, ValueError, ScaleGuardError) as error:
         raise ArtifactError(f"cannot normalize image {source}: {error}") from error
+    _write_bytes_atomic(resolved_destination, encoded.getvalue())
 
 
 def copy_artifact(source: Path, destination: Path) -> None:
+    resolved_destination = _distinct_destination(source, destination, role="artifact copy")
+    try:
+        payload, _digest = load_regular_file_snapshot(source, "source artifact")
+    except ScaleGuardError as error:
+        raise ArtifactError(f"cannot copy artifact {source}: {error}") from error
+    _write_bytes_atomic(resolved_destination, payload)
+
+
+def _distinct_destination(source: Path, destination: Path, *, role: str) -> Path:
+    try:
+        resolved_source = source.expanduser().resolve()
+        resolved_destination = destination.expanduser().resolve()
+    except (OSError, RuntimeError) as error:
+        raise ArtifactError(f"cannot resolve {role} paths safely: {error}") from error
+    if resolved_source == resolved_destination:
+        raise ArtifactError(f"{role} would overwrite its source: {resolved_source}")
+    return resolved_destination
+
+
+def _write_bytes_atomic(destination: Path, payload: bytes) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(source, destination)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            dir=destination.parent,
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(
+                destination.parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+            )
+            os.fsync(descriptor)
+        except OSError:
+            pass
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+    except Exception:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        raise
 
 
 def image_files(root: Path) -> list[Path]:

@@ -8,6 +8,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from scaleguard.config import PipelineConfig
 from scaleguard.evaluation.calibration import verify_calibration_receipt
@@ -109,6 +110,18 @@ def run_doctor(config: PipelineConfig, project_root: Path) -> list[DoctorCheck]:
             )
         )
     if config.fourkagent.mode == "upstream":
+        scheduler_host = urlsplit(config.fourkagent.llm_base_url).hostname or "invalid"
+        checks.append(
+            DoctorCheck(
+                "remote_scheduler",
+                "pass",
+                (
+                    f"{config.fourkagent.llm_provider}/{config.fourkagent.llm_model} "
+                    f"in {config.fourkagent.llm_region} via {scheduler_host}; "
+                    "network availability is checked only during a real run"
+                ),
+            )
+        )
         fourk_paths: tuple[tuple[str, Path | None, str], ...] = (
             ("4kagent_toolbox", config.fourkagent.toolbox_root, "directory"),
             ("4kagent_hps", config.fourkagent.hps_root, "directory"),

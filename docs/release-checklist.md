@@ -68,7 +68,19 @@ other generated evidence in the repository.
 Run the same checks on every supported Python version in CI. A failed,
 network-dependent, or locally modified check is not a release pass.
 
-## 3. Build and inspect distributions
+## 3. Prepare the package description
+
+- Check every README and documentation link from the candidate revision.
+- Before building, convert every repository-relative link and media target in
+  the package long-description source to an absolute URL under
+  `https://github.com/liuqjjin/scaleguard-4k`. Render that exact source with
+  `readme-renderer`; reject broken targets and any link that would resolve
+  below `pypi.org/` instead of the canonical repository.
+- Do not build or record a distribution digest until this source-level render
+  check passes. A later README edit invalidates the candidate and requires a
+  new build.
+
+## 4. Build and inspect distributions
 
 Build outside the repository so stale files cannot enter the result:
 
@@ -76,6 +88,7 @@ Build outside the repository so stale files cannot enter the result:
 release_dist="$(mktemp -d)"
 uv build --no-build-isolation --out-dir "$release_dist"
 find "$release_dist" -maxdepth 1 -type f -print
+uv run --locked twine check --strict "$release_dist"/*
 
 wheel="$(find "$release_dist" -maxdepth 1 -type f -name '*.whl' -print -quit)"
 unzip -Z1 "$wheel" > "$release_dist/wheel-files.txt"
@@ -114,17 +127,15 @@ unset SCALEGUARD_PROJECT_ROOT
 All three file-validation commands must complete without locating the source
 tree. Keep their inputs outside the installed package and use absolute paths.
 
-Record SHA-256 digests for the exact distributions selected for publication.
-Do not rebuild after recording them.
+Before recording SHA-256 digests, extract the long-description payload from the
+exact built wheel's `METADATA` and render it with `readme-renderer`. Reject the
+candidate if this built payload differs from the reviewed source or contains a
+broken or `pypi.org/...` repository link. Only then record digests for the
+source distribution and wheel selected for publication. Do not rebuild or edit
+release inputs after recording them.
 
-## 4. Review documentation and claims
+## 5. Review claims and evidence boundaries
 
-- Check every README and documentation link from the built revision.
-- Before uploading to PyPI, replace or render every repository-relative link in
-  the package long description as an absolute URL under the selected canonical
-  GitHub repository. Render the exact built `METADATA` with `readme-renderer`
-  and reject any `pypi.org/...` resolution of a repository file. The canonical
-  source URL is `https://github.com/liuqjjin/scaleguard-4k`.
 - Confirm that the README and [results/STATUS.md](results/STATUS.md) name the
   same highest evidence level.
 - Keep mock output visibly labelled and exclude it from quality, latency, VRAM,
@@ -138,7 +149,7 @@ Raising the evidence level requires the immutable records and review described
 in [reproduction.md](reproduction.md). A successful package build or GPU
 process exit is not sufficient.
 
-## 5. Publish or stop
+## 6. Publish or stop
 
 For a numbered release, require a configured canonical remote, tag the exact
 reviewed commit, publish only the digest-matched distributions, attach concise

@@ -3,10 +3,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -26,16 +27,13 @@ def test_fourkagent_production_logger_replaces_image_bytes_with_digest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    checkout = ROOT / "third_party" / "checkouts" / "4KAgent"
-    monkeypatch.syspath_prepend(str(checkout))
-    base_llm = _load(
-        checkout / "llm" / "base_llm.py",
-        "scaleguard_test_private_base_llm",
-    )
+    overlay_root = ROOT / "third_party" / "overlays" / "4kagent"
+    monkeypatch.syspath_prepend(str(overlay_root))
     overlay = _load(
-        ROOT / "third_party" / "overlays" / "4kagent" / "run_native_restoration.py",
+        overlay_root / "run_native_restoration.py",
         "scaleguard_test_private_fourkagent_overlay",
     )
+    base_llm = SimpleNamespace(encode_img=lambda _path: "unredacted")
     overlay._install_redacted_image_logging(base_llm)
 
     messages: list[str] = []
@@ -44,23 +42,11 @@ def test_fourkagent_production_logger_replaces_image_bytes_with_digest(
         def info(self, message: str) -> None:
             messages.append(message)
 
-    def query(
-        _self: object,
-        _img_path_lst: object = None,
-        *_args: object,
-        **_kwargs: object,
-    ) -> tuple[str, str]:
-        return "question", "answer"
-
     private_bytes = b"private image payload"
     image_path = tmp_path / "input.png"
     image_path.write_bytes(private_bytes)
-    probe_llm = type(
-        "ProbeLLM",
-        (base_llm.BaseLLM,),
-        {"query": query},
-    )
-    probe_llm(logger=CaptureLogger())(img_path=image_path)
+    logger = CaptureLogger()
+    logger.info(f"![image]({base_llm.encode_img(image_path)})")
 
     log_text = "".join(messages)
     digest = hashlib.sha256(private_bytes).hexdigest()
@@ -113,3 +99,55 @@ def test_diagnostics_sanitizer_skips_text_with_inline_image_data(
     summary = (destination / "collection-summary.txt").read_text(encoding="utf-8")
     assert "llm_qa.md: contains embedded image data" in summary
     assert encoded not in summary
+
+
+def test_diagnostics_redacts_paths_from_more_than_one_hundred_execution_receipts(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    last_private_input = ""
+    last_private_output = ""
+    for index in range(101):
+        run = source / f"run-{index:03d}"
+        run.mkdir(parents=True)
+        private_input = f"/mnt/private/person-{index:03d}.png"
+        private_output = f"/mnt/private/result-{index:03d}.png"
+        (run / "execution.json").write_text(
+            json.dumps(
+                {
+                    "inputs": {"input_image": {"path": private_input}},
+                    "outputs": [{"path": private_output}],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (run / "worker.log").write_text(
+            f"input={private_input} output={private_output}\n",
+            encoding="utf-8",
+        )
+        last_private_input = private_input
+        last_private_output = private_output
+
+    destination = tmp_path / "staging"
+    subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            str(ROOT / "scripts" / "autodl" / "_sanitize_diagnostics.py"),
+            str(source),
+            str(destination),
+            str(ROOT),
+            str(tmp_path / "cache"),
+        ],
+        check=True,
+        cwd=ROOT,
+    )
+
+    copied_log = destination / "runs" / "run-100" / "worker.log"
+    copied_receipt = destination / "runs" / "run-100" / "execution.json"
+    for copied in (copied_log, copied_receipt):
+        text = copied.read_text(encoding="utf-8")
+        assert last_private_input not in text
+        assert last_private_output not in text
+        assert "$PRIVATE_INPUT_OR_OUTPUT" in text

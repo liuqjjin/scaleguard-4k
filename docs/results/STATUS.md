@@ -1,6 +1,6 @@
 # Project evidence status
 
-Last reviewed: 2026-08-07
+Last reviewed: 2026-08-08
 
 Highest supported completion level: **`STATIC_READY`**
 
@@ -18,6 +18,7 @@ the authoritative claim boundary until a later evidence review updates it.
 | Public CPU path | deterministic mock 4KAgent → trusted-scale controller → mock CoZ path is implemented |
 | Mock provenance | manifests and derived artifacts explicitly record `mock: true` |
 | Controller contracts | continue, stop, rollback, worker failure, and session failure paths have CPU tests |
+| Remote scheduling contract | canonical DashScope endpoint/model/key binding, text-only requests, bounded retries, JSON validation, and redacted evidence have CPU contract tests; no live API result is claimed |
 | Upstream identity | 4KAgent and CoZ commits, root trees, ordered patches, and licenses are locked and audited |
 | Runtime dependency identity | DepictQA is pinned as a 4KAgent transitive perception service |
 | Weight identity | immutable revisions, known hashes, licenses, optional entries, and a manual gate are recorded |
@@ -56,7 +57,7 @@ The remaining user-owned prerequisites are:
 
 1. provision a Linux dual-RTX-4090 AutoDL host with the declared disk capacity;
 2. accept the gated Stable Diffusion 3 terms and authenticate privately;
-3. provide the remote 4KAgent scheduler credential privately;
+3. provide a Beijing-region `DASHSCOPE_API_KEY` privately;
 4. obtain the required DepictQA degradation delta, for which the publisher
    supplies no digest;
 5. provide authorized smoke/integration images; and

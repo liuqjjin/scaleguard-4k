@@ -8,6 +8,7 @@ import contextlib
 import gc
 import hashlib
 import json
+import math
 import os
 import random
 import re
@@ -382,8 +383,12 @@ def run_jsonl(args: argparse.Namespace, protocol: TextIO) -> int:
     loads_object = strict_json.get("loads_object")
     if not callable(loads_object):
         raise RuntimeError("strict JSON helper does not expose loads_object")
+    initialization_started = time.monotonic()
     with contextlib.redirect_stdout(sys.stderr):
         session = CoZSession(args)
+    initialization_duration_seconds = time.monotonic() - initialization_started
+    if not math.isfinite(initialization_duration_seconds) or initialization_duration_seconds < 0.0:
+        raise RuntimeError("CoZ initialization clock produced an invalid duration")
     emit(
         protocol,
         {
@@ -391,6 +396,7 @@ def run_jsonl(args: argparse.Namespace, protocol: TextIO) -> int:
             "schema_version": "1.0",
             "backend": "chain-of-zoom",
             "persistent": True,
+            "initialization_duration_seconds": initialization_duration_seconds,
         },
     )
     for line in sys.stdin:

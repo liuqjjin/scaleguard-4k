@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import queue
 import subprocess
 import threading
@@ -23,6 +24,7 @@ from scaleguard.runtime.process import (
     terminate_process_group,
 )
 from scaleguard.strict_json import StrictJSONError, loads
+from scaleguard.worker_contracts import WorkerContractError, validate_coz_worker_metadata
 
 _MAX_PROTOCOL_RESPONSE_BYTES = 1024 * 1024
 _PROTOCOL_READER_SHUTDOWN_SECONDS = 1.0
@@ -221,6 +223,8 @@ class OneShotCoZSession:
             seed=seed,
             step_index=step_index,
             requested_precision=self.config.mixed_precision,
+            expected_root_sha256=file_sha256(private_input),
+            visible_device_count=len(self.config.visible_devices.split(",")),
         )
         return WorkerResult(
             image=inspect_image(destination, mock=False, stage=f"coz_scale_{step_index}"),
@@ -262,6 +266,11 @@ class PersistentCoZSession:
         self.argv: tuple[str, ...] = ()
         self.worker_dir: Path | None = None
         self.peak_vram_mib: dict[str, int] = {}
+        self.initialization_duration_seconds: float | None = None
+        self._root_sha256: str | None = None
+        self._pending_step: tuple[int, str] | None = None
+        self._next_step_index = 1
+        self._rolled_back = False
 
     def __enter__(self) -> PersistentCoZSession:
         worker_dir = self.run_dir / "workers" / "coz" / "persistent"
@@ -275,9 +284,13 @@ class PersistentCoZSession:
         )
         self.argv = tuple(arguments.argv)
         self.worker_dir = worker_dir
+        private_home = worker_dir / "subprocess-home"
+        private_home.mkdir(mode=0o700, exist_ok=True)
+        private_home.chmod(0o700)
         env = minimal_subprocess_environment(
             {
                 "CUDA_VISIBLE_DEVICES": self.config.visible_devices,
+                "HOME": str(private_home.resolve()),
                 "HF_HUB_DISABLE_TELEMETRY": "1",
                 "HF_HUB_OFFLINE": "1",
                 "PYTHONDONTWRITEBYTECODE": "1",
@@ -303,6 +316,25 @@ class PersistentCoZSession:
             ready = self._read_response(self.runtime.process_timeout_seconds)
             if ready.get("status") != "ready":
                 raise WorkerError(f"CoZ persistent worker did not become ready: {ready}")
+            raw_initialization_duration = ready.get("initialization_duration_seconds")
+            if isinstance(raw_initialization_duration, bool) or not isinstance(
+                raw_initialization_duration,
+                (int, float),
+            ):
+                raise WorkerError(
+                    "CoZ persistent worker returned an invalid initialization_duration_seconds"
+                )
+            try:
+                initialization_duration = float(raw_initialization_duration)
+            except (OverflowError, ValueError) as error:
+                raise WorkerError(
+                    "CoZ persistent worker returned an invalid initialization_duration_seconds"
+                ) from error
+            if not math.isfinite(initialization_duration) or initialization_duration < 0.0:
+                raise WorkerError(
+                    "CoZ persistent worker returned an invalid initialization_duration_seconds"
+                )
+            self.initialization_duration_seconds = initialization_duration
             health = self._request("health")
             if health.get("status") != "ok":
                 raise WorkerError(f"CoZ persistent worker failed health check: {health}")
@@ -321,6 +353,12 @@ class PersistentCoZSession:
         del traceback
         try:
             if self.process is not None and self.process.poll() is None:
+                if self._pending_step is not None:
+                    if exc_type is None:
+                        raise WorkerError(
+                            "CoZ persistent session closed with an undecided candidate"
+                        )
+                    return
                 response = self._request("close")
                 if response.get("status") != "ok" and exc_type is None:
                     raise WorkerError(f"CoZ persistent worker rejected close: {response}")
@@ -345,6 +383,20 @@ class PersistentCoZSession:
         step_index: int,
         seed: int,
     ) -> WorkerResult:
+        if self._pending_step is not None:
+            self._terminate_preserving_error()
+            raise WorkerError("CoZ persistent session already has an undecided candidate")
+        if self._rolled_back:
+            self._terminate_preserving_error()
+            raise WorkerError("CoZ persistent session cannot continue after rollback")
+        if step_index != self._next_step_index:
+            self._terminate_preserving_error()
+            raise WorkerError(
+                f"CoZ persistent session expected step {self._next_step_index}, got {step_index}"
+            )
+        input_sha256 = file_sha256(source)
+        if self._root_sha256 is None:
+            self._root_sha256 = input_sha256
         response = self._request(
             "upscale",
             input=str(source.resolve()),
@@ -353,25 +405,32 @@ class PersistentCoZSession:
             step_index=step_index,
         )
         if response.get("status") != "ok":
+            self._terminate_preserving_error()
             raise WorkerError(
                 f"CoZ persistent step {step_index} failed: "
                 f"{response.get('error_type', 'WorkerError')}: {response.get('message', response)}"
             )
-        output_path = Path(str(response.get("output", "")))
-        if output_path != destination.resolve():
-            expected = destination.resolve()
-            raise ArtifactError(
-                f"CoZ worker returned unexpected output path {output_path}; expected {expected}"
+        try:
+            output_path = Path(str(response.get("output", "")))
+            if output_path != destination.resolve():
+                expected = destination.resolve()
+                raise ArtifactError(
+                    f"CoZ worker returned unexpected output path {output_path}; expected {expected}"
+                )
+            metadata = response.get("metadata")
+            metadata = _validate_step_metadata(
+                metadata,
+                source=source,
+                destination=destination,
+                seed=seed,
+                step_index=step_index,
+                requested_precision=self.config.mixed_precision,
+                expected_root_sha256=self._root_sha256,
+                visible_device_count=len(self.config.visible_devices.split(",")),
             )
-        metadata = response.get("metadata")
-        metadata = _validate_step_metadata(
-            metadata,
-            source=source,
-            destination=destination,
-            seed=seed,
-            step_index=step_index,
-            requested_precision=self.config.mixed_precision,
-        )
+        except (ArtifactError, OSError):
+            self._terminate_preserving_error()
+            raise
         peaks = metadata.get("peak_torch_allocated_mib")
         if isinstance(peaks, dict):
             for device, value in peaks.items():
@@ -380,10 +439,26 @@ class PersistentCoZSession:
                         value,
                         self.peak_vram_mib.get(device, 0),
                     )
-        return WorkerResult(
-            image=inspect_image(destination, mock=False, stage=f"coz_scale_{step_index}"),
-            metadata={**metadata, "backend": self.name, "persistent": True},
-        )
+        try:
+            result_metadata = {**metadata, "backend": self.name, "persistent": True}
+            result_metadata.pop("initialization_duration_seconds", None)
+            if step_index == 1:
+                if self.initialization_duration_seconds is None:
+                    raise ArtifactError(
+                        "CoZ persistent session has no validated initialization duration"
+                    )
+                result_metadata["initialization_duration_seconds"] = (
+                    self.initialization_duration_seconds
+                )
+            result = WorkerResult(
+                image=inspect_image(destination, mock=False, stage=f"coz_scale_{step_index}"),
+                metadata=result_metadata,
+            )
+        except ArtifactError:
+            self._terminate_preserving_error()
+            raise
+        self._pending_step = (step_index, result.image.sha256)
+        return result
 
     def evidence(self) -> ProcessEvidence:
         if self.process is None or self.worker_dir is None or not self.argv:
@@ -402,6 +477,10 @@ class PersistentCoZSession:
         )
 
     def accept(self, candidate: WorkerResult, *, step_index: int) -> None:
+        expected = (step_index, candidate.image.sha256)
+        if self._pending_step != expected:
+            self._terminate_preserving_error()
+            raise WorkerError("CoZ accept does not match the session's pending step and candidate")
         response = self._request(
             "accept",
             step_index=step_index,
@@ -409,12 +488,21 @@ class PersistentCoZSession:
             candidate_sha256=candidate.image.sha256,
         )
         if response.get("status") != "ok":
+            self._terminate_preserving_error()
             raise WorkerError(f"CoZ persistent worker rejected candidate: {response}")
+        self._pending_step = None
+        self._next_step_index += 1
 
     def rollback(self, *, step_index: int) -> None:
+        if self._pending_step is None or self._pending_step[0] != step_index:
+            self._terminate_preserving_error()
+            raise WorkerError("CoZ rollback does not match the session's pending step")
         response = self._request("rollback", step_index=step_index)
         if response.get("status") != "ok":
+            self._terminate_preserving_error()
             raise WorkerError(f"CoZ persistent worker rejected rollback: {response}")
+        self._pending_step = None
+        self._rolled_back = True
 
     def _request(self, operation: str, **payload: Any) -> dict[str, Any]:
         if self.process is None or self.process.stdin is None:
@@ -425,14 +513,22 @@ class PersistentCoZSession:
             self.process.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
             self.process.stdin.flush()
         except (BrokenPipeError, OSError) as error:
+            self._terminate_preserving_error()
             raise WorkerError(
                 f"cannot send {operation} to CoZ persistent worker: {error}"
             ) from error
         response = self._read_response(self.runtime.process_timeout_seconds)
         if response.get("request_id") != request_id:
+            self._terminate_preserving_error()
             raise WorkerError(
                 f"CoZ protocol request mismatch: sent {request_id}, "
                 f"received {response.get('request_id')}"
+            )
+        if response.get("status") not in {"ok", "error"}:
+            self._terminate_preserving_error()
+            raise WorkerError(
+                f"CoZ protocol returned an invalid status for {operation}: "
+                f"{response.get('status')!r}"
             )
         return response
 
@@ -494,10 +590,19 @@ class PersistentCoZSession:
         try:
             response = loads(line)
         except StrictJSONError as error:
-            raise WorkerError(f"invalid JSON from CoZ persistent worker: {line[:500]!r}") from error
+            self._terminate_preserving_error()
+            raise WorkerError("invalid JSON from CoZ persistent worker") from error
         if not isinstance(response, dict):
-            raise WorkerError(f"invalid CoZ protocol response: {response!r}")
+            kind = type(response).__name__
+            self._terminate_preserving_error()
+            raise WorkerError(f"invalid CoZ protocol response type: {kind}")
         return response
+
+    def _terminate_preserving_error(self) -> None:
+        try:
+            self._terminate()
+        except (OSError, subprocess.SubprocessError, WorkerError):
+            pass
 
     def _terminate(self) -> None:
         if self.process is None:
@@ -528,22 +633,30 @@ def _validate_step_metadata(
     seed: int,
     step_index: int,
     requested_precision: str,
+    expected_root_sha256: str,
+    visible_device_count: int,
 ) -> dict[str, Any]:
-    if not isinstance(raw, dict):
-        raise ArtifactError(f"CoZ worker returned invalid metadata: {raw!r}")
-    expected: dict[str, object] = {
-        "step_index": step_index,
-        "seed": seed,
-        "input_sha256": file_sha256(source),
-        "candidate_sha256": file_sha256(destination),
-        "requested_precision": requested_precision,
-        "mock": False,
-    }
-    mismatches = [
-        f"{field}: expected {expected_value!r}, observed {raw.get(field)!r}"
-        for field, expected_value in expected.items()
-        if raw.get(field) != expected_value
-    ]
-    if mismatches:
-        raise ArtifactError("CoZ worker metadata mismatch: " + "; ".join(mismatches))
-    return raw
+    source_artifact = inspect_image(source, mock=False, stage="coz_worker_input")
+    candidate_artifact = inspect_image(
+        destination,
+        mock=False,
+        stage="coz_worker_candidate",
+    )
+    try:
+        return validate_coz_worker_metadata(
+            raw,
+            step_index=step_index,
+            seed=seed,
+            input_sha256=source_artifact.sha256,
+            candidate_sha256=candidate_artifact.sha256,
+            requested_precision=requested_precision,
+            mock=False,
+            visible_device_count=visible_device_count,
+            require_duration=True,
+            exact_fields=True,
+            expected_source_size=(source_artifact.width, source_artifact.height),
+            expected_output_size=(candidate_artifact.width, candidate_artifact.height),
+            expected_root_sha256=expected_root_sha256,
+        )
+    except WorkerContractError as error:
+        raise ArtifactError(f"CoZ worker returned invalid metadata: {error}") from error

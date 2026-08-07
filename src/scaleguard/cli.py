@@ -327,6 +327,17 @@ def _parser() -> argparse.ArgumentParser:
         metavar="RECEIPT",
         help=("validated ablation suite receipt required for research-eligible paired results"),
     )
+    summarize.add_argument(
+        "--metric-receipt",
+        type=Path,
+        action="append",
+        default=[],
+        metavar="RECEIPT",
+        help=(
+            "source-replayed metric receipt; repeat to add verified PSNR, SSIM, "
+            "LPIPS, MUSIQ, or CLIP-IQA effects"
+        ),
+    )
 
     metrics = evaluation_subparsers.add_parser(
         "metrics",
@@ -344,9 +355,11 @@ def _parser() -> argparse.ArgumentParser:
         "--reference",
         type=Path,
         action="append",
-        required=True,
         metavar="IMAGE",
-        help="aligned reference image; repeat in manifest order",
+        help=(
+            "aligned reference image; required for PSNR, SSIM, and LPIPS, optional for "
+            "MUSIQ and CLIP-IQA; repeat in manifest order"
+        ),
     )
     metrics.add_argument(
         "--metric",
@@ -457,7 +470,12 @@ def _run_command(args: argparse.Namespace, project_root: Path) -> int:
         provenance=provenance,
         project_root=project_root,
     )
-    output = controller.run(args.input, args.output, run_id=args.run_id)
+    output = controller.run(
+        args.input,
+        args.output,
+        run_id=args.run_id,
+        overwrite=args.overwrite,
+    )
     if controller.last_run_dir is None:
         raise ScaleGuardError("controller did not retain a run directory")
     manifest = validate_run_manifest(controller.last_run_dir / "manifest.json")
@@ -588,6 +606,7 @@ def _evaluation_command(
             args.output_json,
             artifact_root=artifact_root,
             suite_receipt=args.suite_receipt,
+            metric_receipts=args.metric_receipt,
         )
         print(
             json.dumps(

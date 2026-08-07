@@ -279,6 +279,45 @@
       ],
       "source": "https://huggingface.co/chaofengc/IQA-PyTorch-Weights",
       "notes": "Selected by the AutoDL research profile through optional PyIQA 0.1.16. The weight repository is non-commercial and share-alike; this restriction is separate from the ScaleGuard source license."
+    },
+    {
+      "id": "scaleguard-pyiqa-lpips-v01-alex",
+      "provider": "huggingface",
+      "repo_id": "chaofengc/IQA-PyTorch-Weights",
+      "revision": "0df2df423c65f6a64209309695f3845727431027",
+      "license": "CC-BY-NC-SA-4.0",
+      "gated": false,
+      "required": false,
+      "destination": "metrics/lpips",
+      "files": [
+        "LPIPS_v0.1_alex-df73285e.pth"
+      ],
+      "known_sha256": "df73285e35b22355a2df87cdb6b70b343713b667eddbda73e1977e0c860835c0",
+      "verify_on_download": true,
+      "include": [
+        "LPIPS_v0.1_alex-df73285e.pth"
+      ],
+      "source": "https://github.com/chaofengc/IQA-PyTorch/blob/18dd7a19694e94aac21019170e3f5e63d6b4e19e/pyiqa/archs/lpips_arch.py",
+      "notes": "Optional LPIPS v0.1 linear-layer checkpoint selected by the pinned PyIQA profile. Its SHA-256 is the LFS object identity at the locked weight-repository revision. The separate AlexNet ImageNet backbone remains a user-provided audited input."
+    },
+    {
+      "id": "scaleguard-pyiqa-clipiqa-openai-rn50",
+      "provider": "https",
+      "repo_id": "openai/CLIP",
+      "revision": null,
+      "license": "NOASSERTION",
+      "gated": false,
+      "required": false,
+      "destination": "metrics/clipiqa/RN50.pt",
+      "files": [
+        "RN50.pt"
+      ],
+      "known_sha256": "afeb0e10f9e5a86da6080e35cf09123aca3b358a0c3e3b6c78a7b63bc04b6762",
+      "verify_on_download": true,
+      "url": "https://openaipublic.azureedge.net/clip/models/afeb0e10f9e5a86da6080e35cf09123aca3b358a0c3e3b6c78a7b63bc04b6762/RN50.pt",
+      "sha256": "afeb0e10f9e5a86da6080e35cf09123aca3b358a0c3e3b6c78a7b63bc04b6762",
+      "source": "https://github.com/openai/CLIP/blob/d05afc436d78f1c48dc0dbf8e5980a9d471f35f6/clip/clip.py",
+      "notes": "Optional vanilla CLIPIQA backbone. The official OpenAI CLIP URL is content-addressed by the full expected SHA-256; model-weight terms remain NOASSERTION and must be reviewed separately from the MIT-licensed code."
     }
   ]
 }

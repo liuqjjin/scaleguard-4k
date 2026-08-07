@@ -5,7 +5,7 @@ import importlib
 import importlib.util
 import sys
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -18,6 +18,8 @@ def load_overlay() -> ModuleType:
         / "4kagent"
         / "run_native_restoration.py"
     )
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
     specification = importlib.util.spec_from_file_location(
         "scaleguard_fourkagent_overlay",
         path,
@@ -38,6 +40,80 @@ def write_gzip(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with gzip.open(path, "wb") as handle:
         handle.write(payload)
+
+
+def test_remote_scheduler_messages_are_text_only_and_request_json(overlay: ModuleType) -> None:
+    messages = overlay._scheduler_messages("existing policy", "order these tasks", None)
+
+    assert messages[0]["role"] == "system"
+    assert "JSON" in messages[0]["content"]
+    assert messages[1] == {"role": "user", "content": "order these tasks"}
+    assert "image" not in repr(messages).casefold()
+
+    with pytest.raises(RuntimeError, match="text-only"):
+        overlay._scheduler_messages(None, "prompt", [Path("private.png")])
+
+
+def test_scheduler_structure_parser_requires_exact_unique_task_order(overlay: ModuleType) -> None:
+    class Logger:
+        def _log(self, _message: str, *, level: str) -> None:
+            assert level == "warning"
+
+    def validate(value: object) -> None:
+        assert isinstance(value, dict)
+        assert value["order"] == ["denoise", "deblur"]
+
+    valid, normalized = overlay._safe_literal_check(
+        Logger(),
+        '{"thought":"remove noise first","order":["denoise","deblur"]}',
+        validate,
+    )
+    assert valid is True
+    assert normalized == '{"thought":"remove noise first","order":["denoise","deblur"]}'
+
+    for malformed in (
+        '{"thought":"x","order":["denoise","denoise"]}',
+        '{"thought":"x","order":[]}',
+        '{"thought":"x","order":["denoise"],"extra":true}',
+    ):
+        valid, normalized = overlay._safe_literal_check(Logger(), malformed, validate)
+        assert valid is False
+        assert normalized == ""
+
+
+def test_scheduler_direct_arguments_keep_provider_key_and_retry_budget_bound(
+    overlay: ModuleType,
+) -> None:
+    arguments = {
+        "llm_provider": "dashscope",
+        "llm_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "llm_region": "cn-beijing",
+        "llm_model": "qwen3.7-flash-2026-07-15",
+        "api_key_env": "DASHSCOPE_API_KEY",
+        "llm_connect_timeout_seconds": 10.0,
+        "llm_read_timeout_seconds": 120.0,
+        "llm_max_transport_retries": 4,
+        "llm_max_structure_retries": 2,
+        "llm_max_completion_tokens": 1024,
+        "llm_temperature": 0.0,
+    }
+    overlay._validate_scheduler_arguments(SimpleNamespace(**arguments))
+    with pytest.raises(RuntimeError, match="consistently bound"):
+        overlay._validate_scheduler_arguments(
+            SimpleNamespace(**(arguments | {"api_key_env": "OPENAI_API_KEY"}))
+        )
+    with pytest.raises(RuntimeError, match="retry budget"):
+        overlay._validate_scheduler_arguments(
+            SimpleNamespace(**(arguments | {"llm_max_structure_retries": 1_000_000}))
+        )
+    with pytest.raises(overlay.SchedulerError, match="official DashScope endpoint"):
+        overlay._validate_scheduler_arguments(
+            SimpleNamespace(**(arguments | {"llm_base_url": "https://example.com/v1"}))
+        )
+    with pytest.raises(overlay.SchedulerError, match="temperature must be zero"):
+        overlay._validate_scheduler_arguments(
+            SimpleNamespace(**(arguments | {"llm_temperature": 0.5}))
+        )
 
 
 def test_runtime_view_copies_audited_bpe_to_only_the_two_required_locations(

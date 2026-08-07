@@ -34,8 +34,8 @@
       "must_not_appear_in_commands_or_logs": true
     },
     {
-      "environment_name": "OPENAI_API_KEY",
-      "reason": "Run the locked 4KAgent planner through the configured API-backed LLM",
+      "environment_name": "DASHSCOPE_API_KEY",
+      "reason": "Run the version-pinned Qwen text scheduler through Alibaba Cloud Model Studio in the configured region",
       "alternative": null,
       "must_not_appear_in_commands_or_logs": true
     }

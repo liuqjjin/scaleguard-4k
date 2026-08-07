@@ -169,11 +169,19 @@ def test_minimal_environment_does_not_treat_arbitrary_locale_names_as_safe(
 ) -> None:
     monkeypatch.setenv("LC_VENDOR_API_TOKEN", "locale-secret")
     monkeypatch.setenv("LC_TIME", "C")
+    monkeypatch.setenv("PATH", "/tmp/attacker-bin")
+    monkeypatch.setenv("LD_LIBRARY_PATH", "/tmp/attacker-libraries")
+    monkeypatch.setenv("REQUESTS_CA_BUNDLE", "/tmp/attacker-ca.pem")
+    monkeypatch.setenv("HOME", "/tmp/ambient-home")
 
     environment = minimal_subprocess_environment()
 
     assert "LC_VENDOR_API_TOKEN" not in environment
     assert environment["LC_TIME"] == "C"
+    assert environment["PATH"] == os.defpath
+    assert "LD_LIBRARY_PATH" not in environment
+    assert "REQUESTS_CA_BUNDLE" not in environment
+    assert "HOME" not in environment
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the production runtime uses POSIX venv symlinks")
@@ -211,10 +219,12 @@ def test_gpu_sampler_does_not_pass_ambient_credentials(
 ) -> None:
     monkeypatch.setenv("OPENAI_API_KEY", "sampler-secret")
     monkeypatch.setenv("GITHUB_TOKEN", "github-secret")
-    sampler = _GpuSampler(interval_seconds=0.01)
+    sampler = _GpuSampler(interval_seconds=0.01, visible_devices="0,1")
     observed_environment: dict[str, str] = {}
+    observed_command: list[str] = []
 
-    def run(*_args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+    def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        observed_command.extend(command)
         environment = kwargs.get("env")
         assert isinstance(environment, dict)
         observed_environment.update(environment)
@@ -231,6 +241,7 @@ def test_gpu_sampler_does_not_pass_ambient_credentials(
     sampler._sample_loop()
 
     assert sampler.peaks == {"0": 123}
+    assert observed_command[:3] == ["nvidia-smi", "-i", "0,1"]
     assert "OPENAI_API_KEY" not in observed_environment
     assert "GITHUB_TOKEN" not in observed_environment
 
@@ -414,13 +425,14 @@ def test_unknown_command_placeholder_is_an_actionable_worker_error() -> None:
 
 
 def test_command_evidence_redacts_secret_flags_and_bare_tokens() -> None:
+    fake_bare_token = "sk-" + "fixture-bare-token-123"
     assert redact_argv(
         (
             "worker",
             "--api-key",
             "explicit-secret",
             "--token=inline-secret",
-            "sk-baresecret123",
+            fake_bare_token,
             "--safe=value",
         )
     ) == (

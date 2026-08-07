@@ -147,7 +147,14 @@ External commands are argument vectors, not shell strings. `ProcessRunner`
 phases retain redacted arguments, working directory, exit code, duration,
 stdout, stderr, and sampled GPU memory when `nvidia-smi` is available.
 Persistent CoZ instead retains its protocol log, stderr, worker-reported device
-inventory, and PyTorch peak-allocation metadata.
+inventory, and PyTorch peak-allocation metadata. Its JSONL `ready` response
+records `initialization_duration_seconds` from immediately before session
+construction until the models are ready. The adapter validates that value as a
+finite non-negative duration and binds it only into the first persistent scale
+step's worker metadata. Each step keeps its separate worker-reported
+`duration_seconds`, so later GPU evaluation can distinguish initialization from
+step execution without counting the load time again. These are instrumentation
+fields, not measured performance claims.
 
 Each external leader owns a fresh POSIX session. A short post-leader grace
 permits ordinary shutdown; any remaining group members are terminated with
@@ -213,6 +220,9 @@ see [results status](results/STATUS.md).
   construction and paired-summary review independently verify the exact
   receipt path, bytes, and semantics; see
   [ADR 0011](adr/0011-bind-calibration-and-conditional-observation-evidence.md).
+- The remote planner is a text-only, provider-bound DashScope request with a
+  dated Qwen snapshot, finite transport/structure budgets, and request metadata
+  receipts; see [ADR 0012](adr/0012-bind-the-remote-scheduler-to-dashscope.md).
 - No token, API key, weight, upstream checkout, or private dataset belongs in
   Git.
 
