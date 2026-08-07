@@ -1,12 +1,15 @@
 .DS_Store
 .idea/
 .vscode/
+*.swp
+*.swo
 
 __pycache__/
 *.py[cod]
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+.tox/
 .coverage
 coverage.xml
 htmlcov/
@@ -23,15 +26,20 @@ htmlcov/
 build/
 dist/
 *.egg-info/
+.ipynb_checkpoints/
 
-artifacts/
-outputs/
-runs/
-work/
-/weights
+/artifacts/
+/outputs/
+/runs/
+/results/
+/visualizations/
+/datasets/
+/work/
+/weights/
 checkpoints/
 third_party/checkouts/
 third_party/dependencies/
 
 *.log
 *.tar.gz
+*.zip

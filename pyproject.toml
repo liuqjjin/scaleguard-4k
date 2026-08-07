@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "scaleguard-4k"
 version = "0.1.0.dev0"
-description = "Trusted scale control for 4KAgent and Chain-of-Zoom"
+description = "Evidence-driven scale control for high-resolution image restoration"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -15,7 +15,13 @@ license-files = [
   "third_party/licenses/Chain-of-Zoom-MIT.txt",
 ]
 authors = [{ name = "ScaleGuard-4K contributors" }]
-keywords = ["image-restoration", "super-resolution", "vision-language-models"]
+keywords = [
+  "computational-imaging",
+  "image-quality-assessment",
+  "image-restoration",
+  "super-resolution",
+  "vision-language-models",
+]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "License :: OSI Approved :: Apache Software License",
@@ -34,6 +40,11 @@ dependencies = [
   "Pillow>=10,<13",
   "PyYAML>=6,<7",
 ]
+
+[project.urls]
+Homepage = "https://github.com/liuqjjin/scaleguard-4k"
+Issues = "https://github.com/liuqjjin/scaleguard-4k/issues"
+Repository = "https://github.com/liuqjjin/scaleguard-4k.git"
 
 [project.optional-dependencies]
 metrics = [

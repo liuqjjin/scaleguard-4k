@@ -17,10 +17,9 @@ claim boundary is [results/STATUS.md](results/STATUS.md).
   package version identical in `src/scaleguard/_version.py` and in the
   environment expectations in `src/scaleguard/provenance.py`,
   `scripts/autodl/_common.sh`, and `scripts/bootstrap/autodl.sh`.
-- Before a public numbered release, create or select the canonical GitHub
-  repository, then add its exact URLs to `pyproject.toml` and `CITATION.cff`.
-  The current workspace has no configured remote, so maintainers must not
-  invent an owner, issue tracker, source URL, or release URL in metadata.
+- Keep the canonical repository URL, issue tracker, and source metadata bound
+  to `https://github.com/liuqjjin/scaleguard-4k` in `pyproject.toml` and
+  `CITATION.cff`.
 - Verify that `uv.lock`, `upstream-lock.yaml`, `runtime-dependencies.yaml`,
   `weights-lock.json`, `environments/python-downloads.json`,
   `environments/bootstrap/uv-binary.sha256`, patches, overlays, and environment
@@ -125,8 +124,7 @@ Do not rebuild after recording them.
   the package long description as an absolute URL under the selected canonical
   GitHub repository. Render the exact built `METADATA` with `readme-renderer`
   and reject any `pypi.org/...` resolution of a repository file. The canonical
-  owner is deliberately unset in this source tree, so this gate cannot be
-  completed by inventing URLs.
+  source URL is `https://github.com/liuqjjin/scaleguard-4k`.
 - Confirm that the README and [results/STATUS.md](results/STATUS.md) name the
   same highest evidence level.
 - Keep mock output visibly labelled and exclude it from quality, latency, VRAM,

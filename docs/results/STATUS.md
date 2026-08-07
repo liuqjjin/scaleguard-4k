@@ -1,6 +1,6 @@
 # Project evidence status
 
-Last reviewed: 2026-07-27
+Last reviewed: 2026-08-07
 
 Highest supported completion level: **`STATIC_READY`**
 

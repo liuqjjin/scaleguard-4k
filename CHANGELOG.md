@@ -45,6 +45,8 @@ and intends to use semantic versioning after its first public release.
 - CPU unit, contract, integration, and evaluation tests plus locked CI.
 - Architecture, installation, reproduction, evaluation, limitation,
   development, security, contribution, citation, notice, and status material.
+- Canonical GitHub project metadata and a security-conscious bug report
+  template for the public repository.
 
 ### Changed
 

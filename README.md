@@ -1,14 +1,24 @@
 # ScaleGuard-4K
 
-ScaleGuard-4K joins two upstream systems with a deliberately narrow boundary:
-[4KAgent](https://github.com/taco-group/4KAgent) plans and executes native-scale
-restoration, then a single terminal [Chain-of-Zoom](https://github.com/bryanswkim/Chain-of-Zoom)
-session exposes one 4× candidate at a time. A deterministic controller accepts,
-stops, or rolls back each scale state using same-resolution quality gain,
-low-pass cross-scale consistency, and an optional recorded forward imaging model.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
+[![CI](https://github.com/liuqjjin/scaleguard-4k/actions/workflows/ci.yml/badge.svg)](https://github.com/liuqjjin/scaleguard-4k/actions/workflows/ci.yml)
 
-This repository is an engineering and evaluation layer. It does not reimplement
-either upstream model, and AgenticIR is cited only as part of 4KAgent's lineage.
+> **Trusted scale control for degradation-aware high-resolution image restoration**
+
+ScaleGuard-4K is a research-engineering framework for deciding how far an image
+restoration result can be trusted to scale. Its deterministic controller promotes,
+stops, or rolls back each 1×–16× scale transition using same-resolution quality
+gain, low-pass cross-scale consistency, and an optional recorded forward imaging
+model. Every decision is bound to the exact input, configuration, runtime, and
+generated artifact.
+
+The canonical runtime uses locked adapters for
+[4KAgent](https://github.com/taco-group/4KAgent) and
+[Chain-of-Zoom](https://github.com/bryanswkim/Chain-of-Zoom). They provide the
+restoration and terminal 4× candidate generators; ScaleGuard owns the scale-state
+policy, lifecycle, evidence contracts, calibration, and paired evaluation. Neither
+upstream implementation is redistributed or reimplemented here.
 
 > **Current evidence level: `STATIC_READY`.** The locked CPU/mock path, static
 > checks, contracts, and deployment entry points are ready. No ScaleGuard GPU
@@ -20,9 +30,9 @@ either upstream model, and AgenticIR is cited only as part of 4KAgent's lineage.
 
 ```mermaid
 flowchart LR
-    I["Observed image"] --> A["4KAgent native-scale restoration"]
+    I["Observed image"] --> A["Degradation-aware restoration"]
     A --> T["Trusted base image"]
-    T --> C["CoZ session: upscale_once"]
+    T --> C["Terminal 4× candidate session"]
     C --> G{"Quality and consistency gates"}
     G -->|"continue"| C
     G -->|"stop"| F["One color pass and final re-score"]
@@ -105,10 +115,10 @@ before downloading weights or publishing outputs.
 
 | Requested factor | Controlled path |
 | ---: | --- |
-| 1× | 4KAgent restoration only |
-| 2× | one 4KAgent fidelity bridge |
-| 4× | one CoZ 4× state |
-| 8× | one 4KAgent 2× bridge, then one CoZ 4× state |
+| 1× | restoration only |
+| 2× | one fidelity-preserving 2× bridge |
+| 4× | one terminal 4× state |
+| 8× | one 2× bridge, then one terminal 4× state |
 | 16× | two `upscale_once` calls in the same CoZ session |
 
 The controller compares every CoZ candidate with a bicubic baseline at the same
@@ -117,7 +127,7 @@ the candidate. If a known observation operator is configured, its reconstruction
 error is gated separately; uncalibrated metrics are never summed into a single
 opaque score.
 
-The bundled `gradient_proxy` exists only to exercise CPU control flow. Production
+The bundled `gradient_proxy` exists only to exercise CPU control flow. Real-runtime
 configs use a versioned PyIQA metric, and thresholds still require a held-out
 validation split. See [the evaluation protocol](docs/evaluation-protocol.md) and
 the ADRs in [docs/adr](docs/adr).
@@ -131,7 +141,7 @@ third_party/patches/      auditable upstream fixes
 configs/                  runtime and experiment protocols
 scripts/run_cpu_demo.sh   isolated public CPU/mock demonstration
 scripts/autodl/           two-4090 deployment and diagnostic collection
-tests/                    CPU unit, contract, and integration tests
+tests/                    CPU unit, contract, integration, and evaluation tests
 docs/                     architecture, reproduction, licensing, and results
 ```
 

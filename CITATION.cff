@@ -7,12 +7,14 @@ type: software
 authors:
   - name: ScaleGuard-4K contributors
 version: 0.1.0.dev0
+repository-code: "https://github.com/liuqjjin/scaleguard-4k"
+url: "https://github.com/liuqjjin/scaleguard-4k"
 license: Apache-2.0
 abstract: >-
-  A research-engineering framework that keeps 4KAgent as the high-level
-  degradation-aware restoration controller, runs Chain-of-Zoom as the sole
-  terminal generative super-resolution session, and records explicit
-  quality, cross-scale, and measurement-consistency decisions.
+  A research-engineering framework for evidence-driven scale control under
+  compound image degradations. It records explicit quality, cross-scale, and
+  measurement-consistency decisions for every candidate scale transition,
+  together with reproducible runtime and artifact provenance.
 keywords:
   - image restoration
   - extreme super-resolution
