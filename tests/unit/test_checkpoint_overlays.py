@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
 from types import ModuleType
 
@@ -9,6 +10,8 @@ import pytest
 
 def _load(relative: str, module_name: str) -> ModuleType:
     path = Path(__file__).resolve().parents[2] / relative
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
     specification = importlib.util.spec_from_file_location(module_name, path)
     if specification is None or specification.loader is None:
         raise AssertionError(f"cannot load overlay: {path}")

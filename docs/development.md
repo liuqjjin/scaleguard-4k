@@ -9,8 +9,8 @@ algorithmic core.
 
 Use the uv version in `environments/uv.version` when changing locks or
 bootstrap behavior. The current AutoDL contract installs uv 0.11.16 and
-Python 3.10.18; routine CPU development remains supported on Python 3.10 or
-newer. AutoDL users need a system `python3` with `venv`, not a preinstalled
+Python 3.10.18; routine CPU development remains supported on Python 3.10–3.14.
+AutoDL users need a system `python3` with `venv`, not a preinstalled
 exact uv.
 
 ```bash

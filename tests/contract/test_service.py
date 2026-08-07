@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import multiprocessing
 import os
 import signal
 import socket
@@ -14,6 +15,29 @@ from scaleguard.errors import WorkerError
 from scaleguard.runtime.service import ManagedService, tcp_ready
 
 HOST = "127.0.0.1"
+
+
+def _managed_service_process(
+    port: int,
+    work_dir: str,
+    result_queue: object,
+    release_event: object,
+) -> None:
+    service = ManagedService(
+        service_command(port),
+        cwd=Path(work_dir),
+        log_dir=Path(work_dir) / f"logs-{os.getpid()}",
+        host=HOST,
+        port=port,
+        startup_timeout_seconds=3.0,
+        label="spawn-service",
+    )
+    try:
+        with service:
+            result_queue.put("entered")  # type: ignore[attr-defined]
+            release_event.wait(5.0)  # type: ignore[attr-defined]
+    except WorkerError as error:
+        result_queue.put(f"error:{error}")  # type: ignore[attr-defined]
 
 
 def unused_port() -> int:
@@ -188,3 +212,52 @@ def test_managed_service_rejects_an_empty_command(tmp_path: Path) -> None:
 
     with pytest.raises(WorkerError, match="service command is empty"):
         service.__enter__()
+
+
+def test_managed_service_port_lease_is_spawn_safe_and_released(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("spawn")
+    port = unused_port()
+    first_results = context.Queue()
+    second_results = context.Queue()
+    first_release = context.Event()
+    second_release = context.Event()
+    first = context.Process(
+        target=_managed_service_process,
+        args=(port, str(tmp_path), first_results, first_release),
+    )
+    second = context.Process(
+        target=_managed_service_process,
+        args=(port, str(tmp_path), second_results, second_release),
+    )
+    first.start()
+    try:
+        assert first_results.get(timeout=8.0) == "entered"
+        second.start()
+        outcome = second_results.get(timeout=8.0)
+        assert outcome.startswith("error:")
+        assert "leased by another ScaleGuard run" in outcome
+        second.join(timeout=8.0)
+        assert second.exitcode == 0
+    finally:
+        first_release.set()
+        second_release.set()
+        first.join(timeout=8.0)
+        if first.is_alive():
+            first.kill()
+            first.join(timeout=2.0)
+        if second.is_alive():
+            second.kill()
+            second.join(timeout=2.0)
+
+    assert first.exitcode == 0
+    service = ManagedService(
+        service_command(port),
+        cwd=tmp_path,
+        log_dir=tmp_path / "logs-after-release",
+        host=HOST,
+        port=port,
+        startup_timeout_seconds=3.0,
+        label="after-release",
+    )
+    with service:
+        assert tcp_ready(HOST, port)

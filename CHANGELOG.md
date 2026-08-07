@@ -47,9 +47,25 @@ and intends to use semantic versioning after its first public release.
   development, security, contribution, citation, notice, and status material.
 - Canonical GitHub project metadata and a security-conscious bug report
   template for the public repository.
+- A provider-bound DashScope scheduler transport with a dated Qwen snapshot,
+  finite transport and structure retries, strict JSON/order validation, and
+  credential-free request evidence.
+- Source-replayed calibration receipts, canonical metric/forward-model
+  identities, input-cluster bootstrap intervals, paired effect sizes, missing
+  rates, and systems aggregates for the four-group study.
+- Source-replayed PSNR/SSIM and locked learned-metric receipts, explicit
+  not-applicable full-reference baselines, CoZ initialization/first/steady-step
+  timing, and independently replayed per-GPU host sampling kept separate from
+  worker allocator peaks.
+- Optional content-addressed LPIPS linear-layer and CLIPIQA RN50 weight entries,
+  with the separate AlexNet backbone kept as an explicit hash-bound user input.
+- Node 24 GitHub Actions, strict built-distribution rendering checks, and a
+  compact pull-request verification template for the public repository.
 
 ### Changed
 
+- Limited the declared package support window to the Python 3.10–3.14 versions
+  exercised by the CI matrix.
 - Reserved 4KAgent's outer generative SR for one terminal CoZ phase while
   retaining native restoration, reflection, rollback, and an optional 2×
   fidelity bridge.
@@ -67,6 +83,11 @@ and intends to use semantic versioning after its first public release.
   observation-preserving identity restoration boundary, fixed groups disclose
   their fixed acceptance policy, and only ScaleGuard uses the trusted
   controller.
+- Bound achieved scale, final-image derivation, artifact roles, quality
+  identity, and partial-run contracts to the retained state chain; made
+  no-reference evaluation independent of a reference image.
+- Made output publication explicitly no-clobber by default, with canonical
+  alias checks and a separate atomic overwrite path when requested.
 
 ### Security
 
@@ -84,6 +105,22 @@ and intends to use semantic versioning after its first public release.
   CVE-2026-24747. Enforced the CUDA 12.6 minimum NVIDIA driver separately.
 - Upgraded vulnerable inference dependencies, added lock-level vulnerability
   auditing, and isolated the two unpatched legacy cache/SLURM boundaries.
+- Closed provider/key confusion, Hugging Face option injection, service-port
+  ownership races, evidence-output aliasing, calibration self-signing, and
+  diagnostic path-redaction gaps with adversarial regression tests.
+- Added exclusive run/evidence publication, bounded whole-run execution,
+  a host-local two-GPU topology lease, protocol-desynchronization shutdown,
+  and physical-GPU UUID binding for the prepared two-device runtime.
+- Forced weights-only loading for every canonical PyIQA checkpoint and bound
+  LPIPS, MUSIQ, and CLIPIQA to the exact hashes in the weight lock.
+- Moved the cooperative GPU lease to a fixed per-user host namespace so a
+  different artifact root or checkout cannot bypass runtime exclusivity.
+- Replayed exact 4KAgent and CoZ worker contracts at the manifest boundary,
+  including bounded scheduler retry sequences, artifact dimensions, candidate
+  hashes, persistent-session roots, device inventory, and redacted metadata.
+- Required physical-GPU samples to cover the complete execution window with
+  bounded gaps, rather than accepting a short inventory snapshot as workload
+  evidence.
 
 ### Known limitations
 

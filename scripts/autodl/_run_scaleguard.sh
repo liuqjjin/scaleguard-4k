@@ -25,6 +25,7 @@ fi
 source "${sg_here}/_common.sh"
 # shellcheck disable=SC2154
 sg_here="${sg_script_dir}"
+sg_original_argv=("$@")
 
 [[ $# -ge 1 ]] || sg_die "internal runner requires a stage"
 sg_stage="$1"
@@ -140,6 +141,52 @@ sg_register_sensitive_env_name "${SG_SCHEDULER_API_KEY_ENV}"
 # Preflight/evidence children receive no credentials; doctor and the actual
 # model command receive only the configured scheduler credential.
 sg_make_sensitive_environment_private
+sg_deadline_seconds="${SCALEGUARD_RUN_DEADLINE_SECONDS:-14400}"
+[[ "${sg_deadline_seconds}" =~ ^[0-9]+$ ]] \
+    || sg_die "SCALEGUARD_RUN_DEADLINE_SECONDS must be an integer"
+if [[ "${sg_deadline_seconds}" -lt 60 || "${sg_deadline_seconds}" -gt 86400 ]]; then
+    sg_die "SCALEGUARD_RUN_DEADLINE_SECONDS must be between 60 and 86400"
+fi
+sg_deadline_parent_valid=0
+if [[ -r "/proc/${PPID}/cmdline" && -e "/proc/${PPID}/exe" ]]; then
+    if python3 -I - \
+        "/proc/${PPID}/cmdline" \
+        "/proc/${PPID}/exe" \
+        "${sg_deadline_seconds}s" \
+        "${sg_here}/_run_scaleguard.sh" <<'PY'
+import os
+import pathlib
+import sys
+
+argv = [os.fsdecode(value) for value in pathlib.Path(sys.argv[1]).read_bytes().split(b"\0") if value]
+executable = pathlib.Path(sys.argv[2]).resolve()
+expected = [
+    "--signal=TERM",
+    "--kill-after=30s",
+    sys.argv[3],
+    "/bin/bash",
+    "-p",
+    sys.argv[4],
+]
+is_timeout = executable == pathlib.Path("/usr/bin/timeout").resolve()
+raise SystemExit(0 if is_timeout and argv[1 : 1 + len(expected)] == expected else 1)
+PY
+    then
+        sg_deadline_parent_valid=1
+    fi
+fi
+if [[ "${sg_deadline_parent_valid}" -ne 1 ]]
+then
+    [[ -x /usr/bin/timeout ]] \
+        || sg_die "/usr/bin/timeout is required to enforce the AutoDL run deadline"
+    export SCALEGUARD_RUN_DEADLINE_SECONDS
+    sg_export_private_credentials "${SG_SCHEDULER_API_KEY_ENV}"
+    exec /usr/bin/timeout \
+        --signal=TERM \
+        --kill-after=30s \
+        "${sg_deadline_seconds}s" \
+        /bin/bash -p "${sg_here}/_run_scaleguard.sh" "${sg_original_argv[@]}"
+fi
 if [[ -z "${sg_input}" ]]; then
     for sg_candidate in \
         "${SG_REPO_ROOT}/examples/autodl-smoke.png" \
@@ -213,6 +260,7 @@ sg_write_attempt_pointer() {
         "${sg_pointer_status}" \
         "${sg_start_time}" \
         "${sg_pointer_completed_at}" <<'PY'
+import fcntl
 import hashlib
 import json
 import os
@@ -376,6 +424,37 @@ document = {
     "hardware": hardware,
 }
 output.parent.mkdir(parents=True, exist_ok=True)
+lock_path = output.with_name(f".{output.name}.lock")
+lock_flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_CLOEXEC", 0)
+lock_flags |= getattr(os, "O_NOFOLLOW", 0)
+lock_descriptor = os.open(lock_path, lock_flags, 0o600)
+lock_metadata = os.fstat(lock_descriptor)
+if not stat.S_ISREG(lock_metadata.st_mode) or lock_metadata.st_uid != os.getuid():
+    os.close(lock_descriptor)
+    raise SystemExit(f"unsafe experiment handoff lock: {lock_path}")
+try:
+    fcntl.flock(lock_descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    os.close(lock_descriptor)
+    raise SystemExit(f"experiment handoff is being updated concurrently: {output}")
+
+existing_identity = None
+if output.exists() or output.is_symlink():
+    metadata = output.lstat()
+    if output.is_symlink() or not stat.S_ISREG(metadata.st_mode):
+        raise SystemExit(f"experiment handoff is not a regular file: {output}")
+    existing = json.loads(output.read_text(encoding="utf-8"))
+    if (
+        not isinstance(existing, dict)
+        or existing.get("attempt_dir") != str(attempt)
+        or existing.get("started_at_utc") != started_at
+        or existing.get("status") not in {"running", status_text}
+    ):
+        raise SystemExit(f"refusing to clobber another experiment handoff: {output}")
+    existing_identity = (metadata.st_dev, metadata.st_ino)
+elif status_text != "running":
+    raise SystemExit("experiment handoff must be published as running before completion")
+
 descriptor, temporary_text = tempfile.mkstemp(
     dir=output.parent,
     prefix=f".{output.name}.",
@@ -388,7 +467,18 @@ try:
         handle.write("\n")
         handle.flush()
         os.fsync(handle.fileno())
-    os.replace(temporary, output)
+    if existing_identity is None:
+        try:
+            os.link(temporary, output, follow_symlinks=False)
+        except FileExistsError as error:
+            raise SystemExit(
+                f"experiment handoff appeared concurrently: {output}"
+            ) from error
+    else:
+        current = output.lstat()
+        if (current.st_dev, current.st_ino) != existing_identity:
+            raise SystemExit(f"experiment handoff changed concurrently: {output}")
+        os.replace(temporary, output)
     directory_descriptor = os.open(output.parent, os.O_RDONLY)
     try:
         os.fsync(directory_descriptor)
@@ -396,6 +486,8 @@ try:
         os.close(directory_descriptor)
 finally:
     temporary.unlink(missing_ok=True)
+    fcntl.flock(lock_descriptor, fcntl.LOCK_UN)
+    os.close(lock_descriptor)
 PY
 }
 
@@ -435,10 +527,15 @@ PY
     fi
     sg_write_file_inventory "${SG_RUN_DIR}" "${SG_RUN_DIR}/files.json"
     sg_write_attempt_pointer failed "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    sg_release_gpu_lease
 }
 trap sg_finalize_failed_stage EXIT
 trap 'sg_stop_gpu_monitor; exit 130' INT
 trap 'sg_stop_gpu_monitor; exit 143' TERM
+# The canonical profile maps both physical GPUs into one process topology.
+# Hold this cooperative host lease for the complete audited attempt so two
+# wrappers cannot silently overlap model state, memory, or GPU evidence.
+sg_acquire_gpu_lease "canonical-2gpu"
 sg_write_attempt_pointer running
 
 "${sg_here}/check_gpu.sh" --output "${SG_RUN_DIR}/gpu-preflight"
@@ -475,11 +572,13 @@ sg_reaudit_runtime_environments \
     --config "${sg_config}" \
     --materialization "${SG_RUN_DIR}/materialization-verification.json" \
     --runtime-environments "${sg_runtime_environments}" \
+    --gpu-check "${SG_RUN_DIR}/gpu-preflight/gpu_check.json" \
     --stage-started-at "${sg_start_time}" \
     --output "${SG_RUN_DIR}/runtime-preflight.json"
 
 nvidia-smi > "${SG_RUN_DIR}/nvidia-smi-before.txt" 2>&1
-sg_start_gpu_monitor "${sg_gpu_csv}"
+sg_gpu_sampling_started_at="$(date -u '+%Y-%m-%dT%H:%M:%S.%6NZ')"
+sg_start_gpu_monitor "${sg_gpu_csv}" "${SG_RUN_DIR}/gpu-preflight/gpu_check.json"
 if sg_run_logged_with_private_credentials \
     "${sg_log}" \
     "${SG_SCHEDULER_API_KEY_ENV}" \
@@ -493,6 +592,7 @@ then
 else
     sg_command_rc=$?
 fi
+sg_gpu_sampling_completed_at="$(date -u '+%Y-%m-%dT%H:%M:%S.%6NZ')"
 sg_run_rc="${sg_command_rc}"
 sg_stop_gpu_monitor
 nvidia-smi > "${SG_RUN_DIR}/nvidia-smi-after.txt" 2>&1 || true
@@ -574,14 +674,22 @@ python3 -I - \
     "${sg_dependency_lock}" \
     "$(git rev-parse HEAD)" \
     "${SCALEGUARD_MIN_GPUS:-2}" \
+    "${SG_RUN_DIR}/gpu-preflight/gpu_check.json" \
+    "${SG_RUN_DIR}/runtime-preflight.json" \
+    "${sg_deadline_seconds}" \
+    "${sg_gpu_sampling_started_at}" \
+    "${sg_gpu_sampling_completed_at}" \
+    "${SCALEGUARD_GPU_SAMPLE_INTERVAL_SECONDS:-1}" \
     "${SG_REPO_ROOT}/src" <<'PY'
 import csv
 import hashlib
 import json
 import pathlib
 import sys
+from datetime import datetime, timedelta, timezone
+from itertools import pairwise
 
-sys.path.insert(0, str(pathlib.Path(sys.argv[18]).resolve()))
+sys.path.insert(0, str(pathlib.Path(sys.argv[24]).resolve()))
 
 from scaleguard.strict_json import loads_object
 
@@ -603,7 +711,13 @@ from scaleguard.strict_json import loads_object
     dependency_lock_path,
     git_commit,
     minimum_gpu_count_text,
-) = sys.argv[1:18]
+    gpu_check_path,
+    runtime_preflight_path,
+    deadline_seconds_text,
+    gpu_sampling_started_at,
+    gpu_sampling_completed_at,
+    gpu_sample_interval_text,
+) = sys.argv[1:24]
 
 
 def digest(path: pathlib.Path) -> str:
@@ -623,25 +737,121 @@ def file_entry(path_text: str) -> dict[str, object]:
     }
 
 
+def utc_timestamp(value: str, label: str) -> datetime:
+    if not value.endswith("Z"):
+        raise SystemExit(f"{label} must be a canonical UTC timestamp")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError:
+        raise SystemExit(f"{label} must be an ISO-8601 timestamp") from None
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise SystemExit(f"{label} must be UTC")
+    return parsed.astimezone(timezone.utc)
+
+
+gpu_check_file = pathlib.Path(gpu_check_path).resolve()
+runtime_preflight_file = pathlib.Path(runtime_preflight_path).resolve()
+gpu_check = loads_object(gpu_check_file.read_text(encoding="utf-8"))
+runtime_preflight = loads_object(runtime_preflight_file.read_text(encoding="utf-8"))
+selected_gpus = gpu_check.get("selected_gpus")
+gpu_binding = runtime_preflight.get("gpu_preflight")
+if not isinstance(selected_gpus, list) or not isinstance(gpu_binding, dict):
+    raise SystemExit("GPU preflight binding is missing from runtime evidence")
+
+
+def normalized_gpu(item: object) -> dict[str, object]:
+    if not isinstance(item, dict):
+        raise SystemExit("GPU preflight selected_gpus is malformed")
+    return {
+        "logical_index": item.get("logical_index"),
+        "physical_index": item.get("physical_index"),
+        "uuid": item.get("uuid"),
+        "name": item.get("name"),
+        "memory_total_mib": item.get("memory_total_mib"),
+        "driver_version": item.get("driver_version"),
+    }
+
+
+normalized_selected = [normalized_gpu(item) for item in selected_gpus]
+bound_selected = gpu_binding.get("selected_gpus")
+gpu_receipt_binding_complete = (
+    gpu_check.get("status") == "passed"
+    and gpu_check.get("git_commit") == git_commit
+    and pathlib.Path(str(gpu_binding.get("path", ""))).resolve() == gpu_check_file
+    and gpu_binding.get("sha256") == digest(gpu_check_file)
+    and isinstance(bound_selected, list)
+    and [normalized_gpu(item) for item in bound_selected] == normalized_selected
+)
+expected_by_uuid = {
+    str(item["uuid"]): item
+    for item in normalized_selected
+    if isinstance(item.get("uuid"), str) and item.get("uuid")
+}
+
 peak_by_gpu: dict[str, dict[str, object]] = {}
+baseline_by_uuid: dict[str, int] = {}
+inventory_samples_by_uuid = {uuid: 0 for uuid in expected_by_uuid}
+workload_samples_by_uuid = {uuid: 0 for uuid in expected_by_uuid}
+workload_observed_by_uuid = {uuid: False for uuid in expected_by_uuid}
+sample_times_by_uuid: dict[str, list[datetime]] = {
+    uuid: [] for uuid in expected_by_uuid
+}
 sample_count = 0
+sample_identity_valid = True
+sample_temporal_valid = True
 gpu_path = pathlib.Path(gpu_csv_path)
 if gpu_path.is_file():
     with gpu_path.open(newline="", encoding="utf-8", errors="replace") as handle:
         reader = csv.DictReader(handle)
+        expected_fields = [
+            "timestamp_utc",
+            "sample_kind",
+            "index",
+            "uuid",
+            "name",
+            "memory_used_mib",
+            "memory_total_mib",
+            "utilization_gpu_percent",
+        ]
+        if reader.fieldnames != expected_fields:
+            sample_identity_valid = False
         for row in reader:
             sample_count += 1
             index = (row.get("index") or "").strip()
+            uuid = (row.get("uuid") or "").strip()
+            sample_kind = (row.get("sample_kind") or "").strip()
+            expected = expected_by_uuid.get(uuid)
             try:
+                sample_time = utc_timestamp(
+                    (row.get("timestamp_utc") or "").strip(),
+                    f"GPU sample row {sample_count}",
+                )
                 memory_used = int(float((row.get("memory_used_mib") or "0").strip()))
+                memory_total = int(float((row.get("memory_total_mib") or "0").strip()))
                 utilization = int(float((row.get("utilization_gpu_percent") or "0").strip()))
-            except ValueError:
+            except (ValueError, SystemExit):
+                sample_identity_valid = False
+                sample_temporal_valid = False
                 continue
+            if (
+                expected is None
+                or expected.get("physical_index") != index
+                or expected.get("name") != (row.get("name") or "").strip()
+                or expected.get("memory_total_mib") != memory_total
+                or sample_kind not in {"inventory", "workload"}
+            ):
+                sample_identity_valid = False
+                continue
+            timestamps = sample_times_by_uuid[uuid]
+            if timestamps and sample_time < timestamps[-1]:
+                sample_temporal_valid = False
+            timestamps.append(sample_time)
             current = peak_by_gpu.setdefault(
                 index,
                 {
-                    "uuid": (row.get("uuid") or "").strip(),
-                    "name": (row.get("name") or "").strip(),
+                    "uuid": uuid,
+                    "name": expected["name"],
+                    "memory_total_mib": memory_total,
                     "peak_memory_used_mib": 0,
                     "peak_utilization_percent": 0,
                 },
@@ -652,6 +862,14 @@ if gpu_path.is_file():
             current["peak_utilization_percent"] = max(
                 int(current["peak_utilization_percent"]), utilization
             )
+            if sample_kind == "inventory":
+                inventory_samples_by_uuid[uuid] += 1
+                baseline_by_uuid.setdefault(uuid, memory_used)
+            else:
+                workload_samples_by_uuid[uuid] += 1
+                baseline = baseline_by_uuid.get(uuid)
+                if baseline is not None and (utilization > 0 or memory_used > baseline + 16):
+                    workload_observed_by_uuid[uuid] = True
 
 output = pathlib.Path(output_path)
 output_files = []
@@ -714,7 +932,72 @@ if model_evidence_complete:
         == run_manifest_entry["sha256"]
     )
 minimum_gpu_count = int(minimum_gpu_count_text)
-gpu_sampling_complete = sample_count > 0 and len(peak_by_gpu) >= minimum_gpu_count
+gpu_sample_interval_seconds = float(gpu_sample_interval_text)
+attempt_started = utc_timestamp(started_at, "execution started_at_utc")
+attempt_completed = utc_timestamp(completed_at, "execution completed_at_utc")
+sampling_started = utc_timestamp(
+    gpu_sampling_started_at,
+    "GPU sampling window_started_at_utc",
+)
+sampling_completed = utc_timestamp(
+    gpu_sampling_completed_at,
+    "GPU sampling window_completed_at_utc",
+)
+sampling_duration_seconds = (sampling_completed - sampling_started).total_seconds()
+boundary_tolerance_seconds = max(5.0, gpu_sample_interval_seconds * 1.5)
+maximum_gap_tolerance_seconds = max(1.0, gpu_sample_interval_seconds * 2.0)
+maximum_observed_gap_seconds = 0.0
+boundary_coverage_complete = True
+for uuid in expected_by_uuid:
+    timestamps = sample_times_by_uuid[uuid]
+    if not timestamps:
+        boundary_coverage_complete = False
+        continue
+    if (
+        abs((timestamps[0] - sampling_started).total_seconds())
+        > boundary_tolerance_seconds
+        or abs((timestamps[-1] - sampling_completed).total_seconds())
+        > boundary_tolerance_seconds
+    ):
+        boundary_coverage_complete = False
+    for before, after in pairwise(timestamps):
+        gap = (after - before).total_seconds()
+        if gap < 0:
+            sample_temporal_valid = False
+            continue
+        maximum_observed_gap_seconds = max(maximum_observed_gap_seconds, gap)
+
+attempt_duration_seconds = int(duration_text)
+timestamp_slack = timedelta(seconds=1)
+window_binding_complete = (
+    attempt_completed >= attempt_started
+    and sampling_duration_seconds >= 0.0
+    and sampling_started >= attempt_started - timestamp_slack
+    and sampling_completed <= attempt_completed + timestamp_slack
+    and sampling_duration_seconds <= attempt_duration_seconds + 1.0
+)
+temporal_coverage_complete = (
+    sample_temporal_valid
+    and window_binding_complete
+    and boundary_coverage_complete
+    and maximum_observed_gap_seconds <= maximum_gap_tolerance_seconds
+)
+expected_uuids = set(expected_by_uuid)
+inventory_binding_complete = (
+    gpu_receipt_binding_complete
+    and sample_identity_valid
+    and len(expected_uuids) == minimum_gpu_count == 2
+    and set(baseline_by_uuid) == expected_uuids
+    and all(inventory_samples_by_uuid.get(uuid, 0) == 1 for uuid in expected_uuids)
+    and {str(item.get("uuid")) for item in peak_by_gpu.values()} == expected_uuids
+)
+workload_sampling_complete = (
+    inventory_binding_complete
+    and temporal_coverage_complete
+    and all(workload_samples_by_uuid.get(uuid, 0) > 0 for uuid in expected_uuids)
+    and all(workload_observed_by_uuid.get(uuid, False) for uuid in expected_uuids)
+)
+gpu_sampling_complete = inventory_binding_complete and workload_sampling_complete
 status = (
     "passed"
     if (
@@ -733,7 +1016,8 @@ document = {
     "status": status,
     "status_scope": (
         (
-            "The CLI command, fresh output, and GPU sampling checks passed. "
+            "The CLI command, fresh output, GPU inventory binding, and host-level "
+            "workload-observation checks passed. "
             "Model reproduction level must be established from the ScaleGuard "
             "run manifest and reviewed raw logs."
         )
@@ -745,7 +1029,8 @@ document = {
     ),
     "started_at_utc": started_at,
     "completed_at_utc": completed_at,
-    "duration_seconds": int(duration_text),
+    "duration_seconds": attempt_duration_seconds,
+    "run_deadline_seconds": int(deadline_seconds_text),
     "return_code": return_code,
     "scaleguard_command_return_code": command_return_code,
     "git_commit": git_commit,
@@ -761,7 +1046,21 @@ document = {
     },
     "gpu_sampling": {
         "sample_count": sample_count,
+        "sample_interval_seconds": gpu_sample_interval_seconds,
+        "window_started_at_utc": gpu_sampling_started_at,
+        "window_completed_at_utc": gpu_sampling_completed_at,
+        "window_duration_seconds": sampling_duration_seconds,
+        "boundary_tolerance_seconds": boundary_tolerance_seconds,
+        "maximum_gap_tolerance_seconds": maximum_gap_tolerance_seconds,
+        "maximum_observed_gap_seconds": maximum_observed_gap_seconds,
+        "temporal_coverage_complete": temporal_coverage_complete,
         "minimum_gpu_count": minimum_gpu_count,
+        "preflight_receipt_bound": gpu_receipt_binding_complete,
+        "inventory_binding_complete": inventory_binding_complete,
+        "workload_sampling_complete": workload_sampling_complete,
+        "workload_observed_by_uuid": workload_observed_by_uuid,
+        "workload_samples_by_uuid": workload_samples_by_uuid,
+        "attribution_scope": "physical_gpu_host_level_not_process_attributed",
         "evidence_complete": gpu_sampling_complete,
         "peak_by_physical_index": peak_by_gpu,
         "raw_csv": pathlib.Path(gpu_csv_path).name,
@@ -791,4 +1090,5 @@ fi
 
 sg_note "${sg_stage_label} command passed. Reviewable evidence: ${SG_RUN_DIR}"
 sg_write_attempt_pointer succeeded "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+sg_release_gpu_lease
 trap - EXIT INT TERM

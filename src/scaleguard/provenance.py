@@ -17,6 +17,10 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from scaleguard.config import (
+    DASHSCOPE_BASE_URL,
+    DASHSCOPE_MODEL,
+    DASHSCOPE_PROVIDER,
+    DASHSCOPE_REGION,
     EXPERIMENT_GROUP_SEMANTICS,
     PipelineConfig,
     parse_config,
@@ -167,6 +171,7 @@ RUNTIME_PREFLIGHT_MAX_AGE = timedelta(minutes=15)
 RUNTIME_PREFLIGHT_CLOCK_SKEW = timedelta(minutes=1)
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _GIT_COMMIT = re.compile(r"[0-9a-f]{40}")
+_GPU_UUID = re.compile(r"GPU-[A-Za-z0-9][A-Za-z0-9-]*")
 _WEIGHT_ARTIFACT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _RUNTIME_CHECKOUTS = {
     "fourkagent": ("repositories", "fourkagent", "third_party/checkouts/4KAgent"),
@@ -685,6 +690,114 @@ def _validate_current_lock_set(
         )
         if value.get(relative) != digest:
             raise RuntimePreflightError(f"{label} lock mismatch: {relative}")
+
+
+def _validate_gpu_preflight(
+    value: object,
+    *,
+    receipt_path: Path,
+    commit: str,
+    stage_started_at: datetime,
+    preflight_created_at: datetime,
+) -> tuple[str, dict[str, object]]:
+    """Validate and normalize the GPU inventory bound into one runtime attempt."""
+
+    if not isinstance(value, dict):
+        raise RuntimePreflightError("runtime preflight has no GPU inventory binding")
+    gpu_directory = receipt_path.parent / "gpu-preflight"
+    if gpu_directory.is_symlink() or not gpu_directory.is_dir():
+        raise RuntimePreflightError("GPU preflight directory is missing or unsafe")
+    expected_path = gpu_directory / "gpu_check.json"
+    recorded_path = _absolute_lexical_path(value.get("path"), "GPU preflight receipt")
+    if recorded_path != expected_path:
+        raise RuntimePreflightError("GPU preflight receipt is outside this runtime attempt")
+    document, digest = _load_snapshot(recorded_path, "GPU preflight receipt")
+    if not _valid_digest(value.get("sha256")) or value.get("sha256") != digest:
+        raise RuntimePreflightError("GPU preflight receipt digest mismatch")
+    checked_at = _timestamp(document.get("checked_at_utc"), "GPU preflight checked_at_utc")
+    requirements = document.get("requirements")
+    selected = document.get("selected_gpus")
+    if (
+        document.get("schema_version") != 1
+        or document.get("status") != "passed"
+        or document.get("git_commit") != commit
+        or checked_at < stage_started_at
+        or checked_at > preflight_created_at
+        or not isinstance(requirements, dict)
+        or requirements.get("minimum_gpu_count") != 2
+        or not isinstance(selected, list)
+        or len(selected) != 2
+    ):
+        raise RuntimePreflightError(
+            "GPU preflight is not a current, passed, source-bound dual-GPU inventory"
+        )
+
+    normalized: list[dict[str, object]] = []
+    for logical_index, item in enumerate(selected):
+        if not isinstance(item, dict):
+            raise RuntimePreflightError("GPU preflight selected_gpus is malformed")
+        physical_index = item.get("physical_index")
+        uuid = item.get("uuid")
+        name = item.get("name")
+        memory_total_mib = item.get("memory_total_mib")
+        driver_version = item.get("driver_version")
+        if (
+            item.get("logical_index") != logical_index
+            or physical_index != str(logical_index)
+            or not isinstance(uuid, str)
+            or _GPU_UUID.fullmatch(uuid) is None
+            or not isinstance(name, str)
+            or not name
+            or type(memory_total_mib) is not int
+            or memory_total_mib <= 0
+            or not isinstance(driver_version, str)
+            or not driver_version
+        ):
+            raise RuntimePreflightError(
+                "GPU preflight does not match the canonical logical and physical 0,1 topology"
+            )
+        normalized.append(
+            {
+                "logical_index": logical_index,
+                "physical_index": physical_index,
+                "uuid": uuid,
+                "name": name,
+                "memory_total_mib": memory_total_mib,
+                "driver_version": driver_version,
+            }
+        )
+    if len({str(item["uuid"]) for item in normalized}) != 2:
+        raise RuntimePreflightError("GPU preflight selected a UUID more than once")
+
+    visible = document.get("cuda_visible_devices")
+    selectors = [str(item["physical_index"]) for item in normalized]
+    if visible is not None:
+        if not isinstance(visible, str):
+            raise RuntimePreflightError("GPU preflight CUDA selector binding is malformed")
+        selectors = visible.split(",")
+        if len(selectors) != 2:
+            raise RuntimePreflightError("GPU preflight must bind exactly two CUDA selectors")
+        for selector, gpu in zip(selectors, normalized, strict=True):
+            if selector not in {gpu["physical_index"], gpu["uuid"]}:
+                raise RuntimePreflightError(
+                    "GPU preflight CUDA selectors do not match selected GPU identities"
+                )
+
+    recorded_selected = value.get("selected_gpus")
+    if (
+        value.get("cuda_visible_devices") != visible
+        or not isinstance(recorded_selected, list)
+        or recorded_selected != normalized
+    ):
+        raise RuntimePreflightError("runtime preflight GPU binding differs from its receipt")
+    return digest, {
+        "schema_version": 1,
+        "receipt_path": str(recorded_path),
+        "receipt_sha256": digest,
+        "cuda_visible_devices": visible,
+        "selectors": selectors,
+        "selected_gpus": normalized,
+    }
 
 
 def _validate_installation_identity(
@@ -2225,7 +2338,17 @@ def bind_runtime_config(
     if (
         config.fourkagent.mode != expected_fourkagent_mode
         or config.fourkagent.profile != "FastGen4K_P"
-        or config.fourkagent.llm_model != "gpt-4-turbo"
+        or config.fourkagent.llm_provider != DASHSCOPE_PROVIDER
+        or config.fourkagent.llm_base_url != DASHSCOPE_BASE_URL
+        or config.fourkagent.llm_region != DASHSCOPE_REGION
+        or config.fourkagent.llm_model != DASHSCOPE_MODEL
+        or config.fourkagent.api_key_env != "DASHSCOPE_API_KEY"
+        or config.fourkagent.llm_connect_timeout_seconds != 10.0
+        or config.fourkagent.llm_read_timeout_seconds != 120.0
+        or config.fourkagent.llm_max_transport_retries != 4
+        or config.fourkagent.llm_max_structure_retries != 2
+        or config.fourkagent.llm_max_completion_tokens != 1024
+        or config.fourkagent.llm_temperature != 0.0
         or config.fourkagent.command
         or config.fourkagent.tool_gpu != "0"
         or config.fourkagent.depictqa_visible_devices != "1"
@@ -2359,6 +2482,9 @@ def _runtime_profile_binding(
         "fourkagent": str(
             (project_root / "third_party/overlays/4kagent/run_native_restoration.py").resolve()
         ),
+        "scheduler": str(
+            (project_root / "third_party/overlays/4kagent/scheduler_client.py").resolve()
+        ),
         "depictqa": str(
             (project_root / "third_party/overlays/4kagent/serve_depictqa_eval.py").resolve()
         ),
@@ -2445,6 +2571,13 @@ def validate_runtime_preflight(
     commit = require_clean_git_commit(project_root)
     if receipt.get("project_commit") != commit:
         raise RuntimePreflightError("runtime preflight receipt is bound to another commit")
+    gpu_preflight_digest, gpu_preflight_binding = _validate_gpu_preflight(
+        receipt.get("gpu_preflight"),
+        receipt_path=receipt_path,
+        commit=commit,
+        stage_started_at=stage_started_at,
+        preflight_created_at=created_at,
+    )
 
     config = receipt.get("config")
     if not isinstance(config, dict):
@@ -2520,6 +2653,8 @@ def validate_runtime_preflight(
         "runtime_evidence_verified": True,
         "runtime_preflight_receipt": str(receipt_path),
         "runtime_preflight_sha256": receipt_digest,
+        "gpu_preflight_receipt_sha256": gpu_preflight_digest,
+        "gpu_preflight_binding": gpu_preflight_binding,
         "bootstrap_receipt_sha256": bootstrap_digest,
         "runtime_environment_receipt_sha256": runtime_environment_digests,
         "materialization_receipt_sha256": materialization_digest,
@@ -2550,6 +2685,7 @@ def validate_runtime_preflight(
             lock_digests=lock_digests,
             require_current_scaleguard=require_recent,
         )
+        binding["gpu_preflight"] = gpu_preflight_binding
         result.update(
             {
                 "runtime_profile_bound": True,

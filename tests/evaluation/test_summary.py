@@ -6,9 +6,12 @@ import json
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
+from scaleguard.evaluation import metrics as metrics_module
 from scaleguard.evaluation import summary as summary_module
 from scaleguard.evaluation.evidence import EvaluationEvidenceError, canonical_sha256
+from scaleguard.evaluation.metrics import evaluate_metric_receipt
 from scaleguard.evaluation.summary import EXPERIMENT_GROUPS, summarize_paired_manifests
 from scaleguard.experiments import ExperimentProtocolError
 from scaleguard.manifest import ManifestValidationError
@@ -23,6 +26,26 @@ def _accept_minimal_summary_fixtures(monkeypatch: pytest.MonkeyPatch) -> None:
         "validate_run_manifest",
         lambda path, **_kwargs: json.loads(path.read_text(encoding="utf-8")),
     )
+
+    def verify_calibration(
+        receipt: dict[str, object],
+        config: dict[str, object],
+    ) -> tuple[bool, list[str]]:
+        reasons: list[str] = []
+        metrics = config.get("metrics")
+        thresholds = receipt.get("thresholds")
+        if not isinstance(metrics, dict) or not isinstance(thresholds, dict):
+            return False, ["calibration_evidence_missing"]
+        names = ["min_quality_gain", "max_scale_nrmse", "max_scale_edge_mae"]
+        if metrics.get("measurement_enabled") is True:
+            names.append("max_measurement_nrmse")
+        for name in names:
+            entry = thresholds.get(name)
+            if not isinstance(entry, dict) or entry.get("value") != metrics.get(name):
+                reasons.append(f"threshold_mismatch:{name}")
+        return not reasons, reasons
+
+    monkeypatch.setattr(summary_module, "verify_calibration_document", verify_calibration)
 
 
 def _images(tmp_path: Path) -> tuple[Path, Path]:
@@ -160,8 +183,10 @@ def test_summary_writes_complete_paired_csv_and_json_without_aggregation(
                 }
             }
         },
+        "system_evidence": {"by_sample": {}},
         "issues": [],
     }
+    assert payload["host_gpu_systems"]["verified"] is False
     assert pair["runs"]["AB-fixed"]["metrics"]["quality_gain"] == pytest.approx(2.1)
     body = dict(payload)
     digest = body.pop("summary_sha256")
@@ -172,6 +197,443 @@ def test_summary_writes_complete_paired_csv_and_json_without_aggregation(
     assert len(rows) == 1
     assert rows[0]["complete"] == "True"
     assert rows[0]["scaleguard_quality_gain"] == "3.1"
+    csv_bytes = (tmp_path / "paired.csv").read_bytes()
+    assert payload["csv_output"] == {
+        "path": str((tmp_path / "paired.csv").resolve()),
+        "size_bytes": len(csv_bytes),
+        "sha256": hashlib.sha256(csv_bytes).hexdigest(),
+    }
+
+
+def test_summary_separates_worker_timing_from_replayed_host_gpu_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    groups = _complete_groups(tmp_path)
+    receipt, validated = _validated_suite(tmp_path, groups)
+    uuid_digests = ("a" * 64, "b" * 64)
+    for job in validated["jobs"]:
+        job["system_evidence"] = {
+            "duration_seconds": 42,
+            "gpu_sampling": {
+                "attribution_scope": "physical_gpu_host_level_not_process_attributed",
+                "sample_count": 4,
+                "sample_interval_seconds": 1.0,
+                "peak_by_physical_index": {
+                    "0": {
+                        "physical_index": "0",
+                        "logical_index": 0,
+                        "uuid_sha256": uuid_digests[0],
+                        "name": "NVIDIA GeForce RTX 4090",
+                        "memory_total_mib": 24564,
+                        "peak_memory_used_mib": 2048,
+                        "peak_utilization_percent": 50,
+                    },
+                    "1": {
+                        "physical_index": "1",
+                        "logical_index": 1,
+                        "uuid_sha256": uuid_digests[1],
+                        "name": "NVIDIA GeForce RTX 4090",
+                        "memory_total_mib": 24564,
+                        "peak_memory_used_mib": 3072,
+                        "peak_utilization_percent": 60,
+                    },
+                },
+            },
+        }
+    _accept_suite(monkeypatch, receipt, validated)
+
+    payload = summarize_paired_manifests(
+        groups,
+        tmp_path / "paired.csv",
+        tmp_path / "paired.json",
+        suite_receipt=receipt,
+    )
+
+    host = payload["host_gpu_systems"]
+    assert host["verified"] is True
+    assert host["attribution_scope"] == "physical_gpu_host_level_not_process_attributed"
+    scaleguard = host["by_group"]["ScaleGuard"]
+    assert scaleguard["counts"] == {
+        "validated_non_mock_runs": 1,
+        "observed_runs": 1,
+    }
+    assert scaleguard["wrapper_duration_seconds"]["mean"] == 42.0
+    assert scaleguard["sample_interval_seconds"]["mean"] == 1.0
+    assert (
+        scaleguard["by_gpu_uuid_sha256"][uuid_digests[0]]["peak_memory_used_mib"]["mean"] == 2048.0
+    )
+    assert (
+        scaleguard["by_gpu_uuid_sha256"][uuid_digests[1]]["peak_utilization_percent"]["mean"]
+        == 60.0
+    )
+
+    timing = summary_module._coz_timing_metrics(
+        {
+            "steps": [
+                {
+                    "worker_metadata": {
+                        "backend": "chain_of_zoom_persistent",
+                        "duration_seconds": 11.0,
+                        "initialization_duration_seconds": 30.0,
+                    }
+                },
+                {
+                    "worker_metadata": {
+                        "backend": "chain_of_zoom_persistent",
+                        "duration_seconds": 9.0,
+                    }
+                },
+            ]
+        }
+    )
+    assert timing == {
+        "coz_initialization_seconds": 30.0,
+        "coz_first_step_seconds": 11.0,
+        "coz_steady_step_seconds": 9.0,
+    }
+    assert summary_module._coz_timing_metrics(
+        {
+            "steps": [
+                {
+                    "worker_metadata": {
+                        "backend": "chain_of_zoom_subprocess",
+                        "duration_seconds": 12.5,
+                    }
+                }
+            ]
+        }
+    ) == {
+        "coz_initialization_seconds": None,
+        "coz_first_step_seconds": 12.5,
+        "coz_steady_step_seconds": None,
+    }
+
+
+def test_summary_source_replays_external_metrics_and_marks_a_only_not_applicable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.png"
+    reference = tmp_path / "reference.png"
+    Image.new("RGB", (16, 16), (10, 10, 10)).save(source)
+    Image.new("RGB", (16, 16), (100, 100, 100)).save(reference)
+    groups: dict[str, list[Path]] = {group: [] for group in EXPERIMENT_GROUPS}
+    manifests: list[Path] = []
+    references: list[Path] = []
+    for index, group in enumerate(EXPERIMENT_GROUPS):
+        final = tmp_path / f"final-{index}.png"
+        Image.new("RGB", (16, 16), (40 + index * 10,) * 3).save(final)
+        manifest = write_summary_manifest(
+            tmp_path / f"manifest-{index}.json",
+            run_id=f"external-{index}",
+            source=source,
+            final=final,
+            group=group,
+        )
+        raw = json.loads(manifest.read_text(encoding="utf-8"))
+        raw["input_image"].update({"width": 16, "height": 16})
+        raw["final_image"].update({"width": 16, "height": 16})
+        manifest.write_text(json.dumps(raw), encoding="utf-8")
+        groups[group].append(manifest)
+        manifests.append(manifest)
+        references.append(reference)
+
+    monkeypatch.setattr(
+        metrics_module,
+        "validate_run_manifest",
+        lambda path, **_kwargs: json.loads(path.read_text(encoding="utf-8")),
+    )
+    metric_receipt = tmp_path / "metrics.json"
+    evaluate_metric_receipt(
+        manifests,
+        references,
+        metric_receipt,
+        metric_names=("psnr", "ssim"),
+    )
+    suite_receipt, validated = _validated_suite(tmp_path, groups)
+    _accept_suite(monkeypatch, suite_receipt, validated)
+
+    payload = summarize_paired_manifests(
+        groups,
+        tmp_path / "paired.csv",
+        tmp_path / "paired.json",
+        suite_receipt=suite_receipt,
+        metric_receipts=[metric_receipt],
+    )
+
+    pair = payload["pairs"][0]
+    assert pair["runs"]["A-only"]["external_metrics"]["psnr"] == {
+        "status": "not_applicable",
+        "value": None,
+        "direction": "higher_is_better",
+        "identity_sha256": payload["external_metric_definitions"]["psnr"]["identity_sha256"],
+        "reason": "native_resolution_output_not_comparable_to_4x_reference",
+    }
+    assert pair["runs"]["B-only"]["external_metrics"]["psnr"]["status"] == "measured"
+    a_only_effect = next(
+        effect
+        for effect in payload["external_metric_effects"]
+        if effect["comparison"] == "ScaleGuard - A-only" and effect["metric"] == "psnr"
+    )
+    assert a_only_effect["counts"]["observed_pairs"] == 0
+    assert a_only_effect["counts"]["excluded_by_status"] == {
+        "baseline:not_applicable|scaleguard:measured": 1
+    }
+    b_only_effect = next(
+        effect
+        for effect in payload["external_metric_effects"]
+        if effect["comparison"] == "ScaleGuard - B-only" and effect["metric"] == "psnr"
+    )
+    assert b_only_effect["counts"]["observed_pairs"] == 1
+    assert b_only_effect["improvement_oriented_delta"]["independent_clusters"] == 1
+    assert payload["external_metric_counts"] == {
+        "receipts": 1,
+        "definitions": 2,
+        "measured": 6,
+        "missing": 0,
+        "not_applicable": 2,
+        "unverified": 0,
+        "failed": 0,
+    }
+
+
+def test_summary_rejects_output_alias_and_output_input_overwrite(tmp_path: Path) -> None:
+    source, final = _images(tmp_path)
+    manifest = write_summary_manifest(
+        tmp_path / "manifest.json",
+        run_id="run",
+        source=source,
+        final=final,
+    )
+
+    with pytest.raises(EvaluationEvidenceError, match="resolve to the same path"):
+        summarize_paired_manifests(
+            {"A-only": [manifest]},
+            tmp_path / "same.out",
+            tmp_path / "same.out",
+        )
+    with pytest.raises(EvaluationEvidenceError, match="would overwrite"):
+        summarize_paired_manifests(
+            {"A-only": [manifest]},
+            manifest,
+            tmp_path / "summary.json",
+        )
+    with pytest.raises(EvaluationEvidenceError, match="would overwrite manifest evidence"):
+        summarize_paired_manifests(
+            {"A-only": [manifest]},
+            final,
+            tmp_path / "summary.json",
+        )
+
+    metric_receipt = tmp_path / "metric-receipt.json"
+    metric_receipt.write_text("{}\n", encoding="utf-8")
+    with pytest.raises(EvaluationEvidenceError, match="would overwrite metric receipt"):
+        summarize_paired_manifests(
+            {"A-only": [manifest]},
+            tmp_path / "summary.csv",
+            metric_receipt,
+            metric_receipts=[metric_receipt],
+        )
+
+
+def test_summary_rejects_duplicate_metric_binding_and_manifest_identity_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, final = _images(tmp_path)
+    manifest = write_summary_manifest(
+        tmp_path / "manifest.json",
+        run_id="run",
+        source=source,
+        final=final,
+    )
+    manifest_digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    receipts = [tmp_path / "metrics-1.json", tmp_path / "metrics-2.json"]
+    for receipt in receipts:
+        receipt.write_text("{}\n", encoding="utf-8")
+
+    def verification(path: Path, **_kwargs: object) -> dict[str, object]:
+        return {
+            "path": str(path.resolve()),
+            "size_bytes": path.stat().st_size,
+            "sha256": "a" * 64,
+            "receipt_sha256": "b" * 64,
+            "verified": True,
+            "research_eligible": True,
+            "issues": [],
+            "protected_paths": [str(path.resolve())],
+            "metric_definitions": {
+                "musiq": {
+                    "identity_sha256": "c" * 64,
+                    "direction": "higher_is_better",
+                    "reference_required": False,
+                }
+            },
+            "samples": [
+                {
+                    "manifest_path": str(manifest.resolve()),
+                    "manifest_sha256": manifest_digest,
+                    "run_id": "run",
+                    "metrics": {
+                        "musiq": {
+                            "status": "measured",
+                            "value": 50.0,
+                            "direction": "higher_is_better",
+                            "identity_sha256": "d" * 64,
+                        }
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(summary_module, "verify_metric_receipt", verification)
+    with pytest.raises(EvaluationEvidenceError, match="multiple metric receipt samples"):
+        summarize_paired_manifests(
+            {"A-only": [manifest]},
+            tmp_path / "duplicate.csv",
+            tmp_path / "duplicate.json",
+            metric_receipts=receipts,
+        )
+
+    def drifted(path: Path, **kwargs: object) -> dict[str, object]:
+        payload = verification(path, **kwargs)
+        samples = payload["samples"]
+        assert isinstance(samples, list)
+        samples[0]["manifest_sha256"] = "f" * 64
+        return payload
+
+    monkeypatch.setattr(summary_module, "verify_metric_receipt", drifted)
+    with pytest.raises(EvaluationEvidenceError, match="identity drift"):
+        summarize_paired_manifests(
+            {"A-only": [manifest]},
+            tmp_path / "drift.csv",
+            tmp_path / "drift.json",
+            metric_receipts=[receipts[0]],
+        )
+
+
+def test_summary_rejects_external_metric_definition_conflicts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source, final = _images(tmp_path)
+    manifests = {
+        group: write_summary_manifest(
+            tmp_path / f"{group}.json",
+            run_id=f"run-{group}",
+            source=source,
+            final=final,
+            group=group,
+        )
+        for group in ("A-only", "B-only")
+    }
+    receipts = [tmp_path / "metrics-1.json", tmp_path / "metrics-2.json"]
+    for receipt in receipts:
+        receipt.write_text("{}\n", encoding="utf-8")
+
+    def verification(path: Path, **_kwargs: object) -> dict[str, object]:
+        index = receipts.index(path)
+        group = ("A-only", "B-only")[index]
+        manifest = manifests[group]
+        return {
+            "path": str(path.resolve()),
+            "size_bytes": path.stat().st_size,
+            "sha256": "a" * 64,
+            "receipt_sha256": "b" * 64,
+            "verified": True,
+            "research_eligible": True,
+            "issues": [],
+            "protected_paths": [str(path.resolve())],
+            "metric_definitions": {
+                "musiq": {
+                    "identity_sha256": ("c" if index == 0 else "e") * 64,
+                    "direction": "higher_is_better",
+                    "reference_required": False,
+                }
+            },
+            "samples": [
+                {
+                    "manifest_path": str(manifest.resolve()),
+                    "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+                    "run_id": f"run-{group}",
+                    "metrics": {},
+                }
+            ],
+        }
+
+    monkeypatch.setattr(summary_module, "verify_metric_receipt", verification)
+    with pytest.raises(EvaluationEvidenceError, match="definition conflicts"):
+        summarize_paired_manifests(
+            {group: [manifest] for group, manifest in manifests.items()},
+            tmp_path / "out.csv",
+            tmp_path / "out.json",
+            metric_receipts=receipts,
+        )
+
+
+def test_summary_reports_cluster_bootstrapped_paired_effects_and_systems(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    groups: dict[str, list[Path]] = {group: [] for group in EXPERIMENT_GROUPS}
+    quality_values = {
+        "sample-1": {"A-only": 1.0, "B-only": 1.5, "AB-fixed": 2.0, "ScaleGuard": 3.0},
+        "sample-2": {"A-only": 2.0, "B-only": 3.0, "AB-fixed": 4.0, "ScaleGuard": 6.0},
+    }
+    for sample_index, sample_id in enumerate(("sample-1", "sample-2"), start=1):
+        source = tmp_path / f"source-{sample_index}.bin"
+        final = tmp_path / f"final-{sample_index}.bin"
+        source.write_bytes(f"input-{sample_index}".encode())
+        final.write_bytes(f"output-{sample_index}".encode())
+        for group_index, group in enumerate(EXPERIMENT_GROUPS):
+            groups[group].append(
+                write_summary_manifest(
+                    tmp_path / f"{sample_id}-{group_index}.json",
+                    run_id=f"{sample_id}-{group_index}",
+                    source=source,
+                    final=final,
+                    sample_id=sample_id,
+                    group=group,
+                    metrics={
+                        "quality_gain": quality_values[sample_id][group],
+                        "scale_nrmse": 0.2,
+                        "scale_edge_mae": 0.3,
+                        "measurement_nrmse": 0.4,
+                    },
+                )
+            )
+    receipt, validated = _validated_suite(tmp_path, groups)
+    _accept_suite(monkeypatch, receipt, validated)
+
+    payload = summarize_paired_manifests(
+        groups,
+        tmp_path / "paired.csv",
+        tmp_path / "paired.json",
+        suite_receipt=receipt,
+    )
+
+    effect = next(
+        item
+        for item in payload["paired_effects"]
+        if item["comparison"] == "ScaleGuard - A-only" and item["metric"] == "quality_gain"
+    )
+    assert effect["counts"] == {
+        "all_pairs": 2,
+        "trusted_complete_pairs": 2,
+        "observed_pairs": 2,
+        "missing_or_excluded_pairs": 0,
+        "missing_or_excluded_rate": 0.0,
+    }
+    assert effect["improvement_oriented_delta"]["mean"] == pytest.approx(3.0)
+    assert effect["improvement_oriented_delta"]["independent_clusters"] == 2
+    assert effect["improvement_oriented_delta"]["bootstrap_ci"]["status"] == "estimated"
+    assert effect["paired_standardized_effect_dz"] == pytest.approx(3 / 2**0.5)
+
+    systems = payload["systems_by_group"]["ScaleGuard"]["success_rate"]
+    assert systems["counts"]["observed"] == 2
+    assert systems["mean"] == pytest.approx(1.0)
+    assert systems["bootstrap_ci"]["status"] == "estimated"
 
 
 @pytest.mark.parametrize(
@@ -379,6 +841,34 @@ def test_missing_groups_and_mock_runs_are_explicitly_ineligible(tmp_path: Path) 
         row = next(csv.DictReader(handle))
     assert row["b_only_status"] == "missing"
     assert row["b_only_quality_gain"] == ""
+
+
+def test_mock_pair_count_is_exact_across_multiple_pairs(tmp_path: Path) -> None:
+    source, final = _images(tmp_path)
+    mock_manifest = write_summary_manifest(
+        tmp_path / "mock-pair.json",
+        run_id="mock-pair",
+        source=source,
+        final=final,
+        mock=True,
+        sample_id="sample-mock",
+    )
+    real_manifest = write_summary_manifest(
+        tmp_path / "real-pair.json",
+        run_id="real-pair",
+        source=source,
+        final=final,
+        sample_id="sample-real",
+    )
+
+    payload = summarize_paired_manifests(
+        {"A-only": [mock_manifest, real_manifest]},
+        tmp_path / "paired.csv",
+        tmp_path / "paired.json",
+    )
+
+    assert payload["counts"]["pairs"] == 2
+    assert payload["counts"]["mock_pairs"] == 1
 
 
 def test_summary_rejects_duplicate_pair_group_unknown_group_and_hash_mismatch(

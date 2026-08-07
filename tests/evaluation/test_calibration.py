@@ -9,14 +9,44 @@ import numpy as np
 import pytest
 
 from scaleguard.config import load_config
+from scaleguard.evaluation import calibration as calibration_module
 from scaleguard.evaluation.calibration import (
     CalibrationParameters,
     calibrate_from_manifests,
     verify_calibration_receipt,
 )
 from scaleguard.evaluation.evidence import EvaluationEvidenceError, canonical_sha256
+from scaleguard.manifest import ManifestValidationError
 
 from ._fixtures import write_calibration_manifest
+
+
+@pytest.fixture(autouse=True)
+def _accept_minimal_calibration_fixtures(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        calibration_module,
+        "validate_run_manifest",
+        lambda path, **_kwargs: json.loads(path.read_text(encoding="utf-8")),
+    )
+
+    def identity(
+        manifest: dict[str, Any],
+        **_kwargs: object,
+    ) -> tuple[dict[str, Any], str, str | None]:
+        steps = manifest.get("steps")
+        metrics = steps[0]["metrics"] if isinstance(steps, list) and steps else {}
+        return (
+            {"quality": {"backend": "fixture"}, "measurement": None},
+            str(metrics.get("quality_backend")),
+            metrics.get("measurement_model"),
+        )
+
+    monkeypatch.setattr(calibration_module, "_metric_identity", identity)
+    monkeypatch.setattr(
+        calibration_module,
+        "_expected_metric_identity",
+        lambda _config, recorded, _reasons: dict(recorded),
+    )
 
 
 def _evidence_files(tmp_path: Path) -> tuple[Path, Path]:
@@ -96,6 +126,9 @@ def test_calibration_receipt_is_deterministic_and_hashes_all_inputs(tmp_path: Pa
         "mock_excluded": 0,
         "estimation_samples": 3,
         "measurement_estimation_samples": 0,
+        "independent_input_clusters": 2,
+        "acceptable_input_clusters": 2,
+        "measurement_input_clusters": 0,
     }
     assert one["thresholds"]["min_quality_gain"]["value"] == pytest.approx(0.1)
     assert one["thresholds"]["max_scale_nrmse"]["value"] == pytest.approx(0.7)
@@ -108,7 +141,41 @@ def test_calibration_receipt_is_deterministic_and_hashes_all_inputs(tmp_path: Pa
     assert digest == canonical_sha256(body)
 
 
-def test_insufficient_receipt_excludes_mock_and_never_claims_calibrated(
+def test_repeated_runs_of_one_input_do_not_satisfy_the_independent_sample_minimum(
+    tmp_path: Path,
+) -> None:
+    trusted, candidate = _evidence_files(tmp_path)
+    shared_input = tmp_path / "shared-input.bin"
+    shared_input.write_bytes(b"one independent image")
+    manifests = [
+        write_calibration_manifest(
+            tmp_path / f"seed-{seed}.json",
+            run_id=f"seed-{seed}",
+            trusted=trusted,
+            candidate=candidate,
+            values=[(0.1 + seed, 0.2, 0.3)],
+            input_image=shared_input,
+        )
+        for seed in (1, 2)
+    ]
+    labels = _labels(
+        tmp_path / "labels.csv",
+        [("seed-1", 1, "true"), ("seed-2", 1, "true")],
+    )
+
+    receipt = calibrate_from_manifests(
+        manifests,
+        labels,
+        tmp_path / "receipt.json",
+        parameters=_parameters(minimum_acceptable_samples=2),
+    )
+
+    assert receipt["status"] == "insufficient_data"
+    assert receipt["sample_counts"]["acceptable_input_clusters"] == 1
+    assert "acceptable_input_clusters_below_minimum:1<2" in receipt["issues"]
+
+
+def test_mock_run_is_rejected_from_calibration(
     tmp_path: Path,
 ) -> None:
     trusted, candidate = _evidence_files(tmp_path)
@@ -132,18 +199,39 @@ def test_insufficient_receipt_excludes_mock_and_never_claims_calibrated(
         [("real", 1, "true"), ("mock", 1, "true")],
     )
 
+    with pytest.raises(EvaluationEvidenceError, match="mock run is not eligible"):
+        calibrate_from_manifests(
+            [real, mock],
+            labels,
+            tmp_path / "receipt.json",
+            parameters=_parameters(minimum_acceptable_samples=2),
+        )
+
+
+def test_no_acceptable_samples_produces_an_explicit_insufficient_receipt(
+    tmp_path: Path,
+) -> None:
+    trusted, candidate = _evidence_files(tmp_path)
+    manifest = write_calibration_manifest(
+        tmp_path / "manifest.json",
+        run_id="rejected",
+        trusted=trusted,
+        candidate=candidate,
+        values=[(0.1, 0.2, 0.3)],
+    )
+    labels = _labels(tmp_path / "labels.csv", [("rejected", 1, "false")])
+
     receipt = calibrate_from_manifests(
-        [real, mock],
+        [manifest],
         labels,
         tmp_path / "receipt.json",
-        parameters=_parameters(minimum_acceptable_samples=2),
+        parameters=_parameters(minimum_acceptable_samples=1),
     )
 
     assert receipt["status"] == "insufficient_data"
-    assert receipt["sample_counts"]["acceptable_real"] == 1
-    assert receipt["sample_counts"]["mock_excluded"] == 1
-    assert receipt["thresholds"]["min_quality_gain"]["value"] == pytest.approx(0.1)
-    assert any("below_minimum" in issue for issue in receipt["issues"])
+    assert receipt["thresholds"] == {}
+    assert "no_acceptable_real_samples" in receipt["issues"]
+    assert "acceptable_input_clusters_below_minimum:0<1" in receipt["issues"]
 
 
 @pytest.mark.parametrize(
@@ -348,7 +436,7 @@ def test_verifier_requires_integrity_calibrated_status_backend_and_exact_config(
         [manifest],
         labels,
         receipt_path,
-        parameters=_parameters(),
+        parameters=_parameters(minimum_acceptable_samples=1),
     )
     thresholds = receipt["thresholds"]
     config_path = tmp_path / "config.yaml"
@@ -515,6 +603,83 @@ def test_relative_artifacts_use_the_explicit_artifact_root(tmp_path: Path) -> No
     assert receipt["status"] == "calibrated"
 
 
+def test_calibration_requires_full_manifests_and_protects_all_source_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trusted, candidate = _evidence_files(tmp_path)
+    manifest = write_calibration_manifest(
+        tmp_path / "manifest.json",
+        run_id="run",
+        trusted=trusted,
+        candidate=candidate,
+        values=[(0.1, 0.2, 0.3)],
+    )
+    labels = _labels(tmp_path / "labels.csv", [("run", 1, "true")])
+
+    with pytest.raises(EvaluationEvidenceError, match="would overwrite labels"):
+        calibrate_from_manifests(
+            [manifest],
+            labels,
+            labels,
+            parameters=_parameters(minimum_acceptable_samples=1),
+        )
+
+    def reject(*_args: object, **_kwargs: object) -> None:
+        raise ManifestValidationError("forged runtime evidence")
+
+    monkeypatch.setattr(calibration_module, "validate_run_manifest", reject)
+    with pytest.raises(EvaluationEvidenceError, match="forged runtime evidence"):
+        calibrate_from_manifests(
+            [manifest],
+            labels,
+            tmp_path / "receipt.json",
+            parameters=_parameters(minimum_acceptable_samples=1),
+        )
+
+
+def test_verifier_replays_sources_and_rejects_legacy_schema(tmp_path: Path) -> None:
+    trusted, candidate = _evidence_files(tmp_path)
+    manifest = write_calibration_manifest(
+        tmp_path / "manifest.json",
+        run_id="run",
+        trusted=trusted,
+        candidate=candidate,
+        values=[(0.1, 0.2, 0.3)],
+    )
+    labels = _labels(tmp_path / "labels.csv", [("run", 1, "true")])
+    receipt_path = tmp_path / "receipt.json"
+    receipt = calibrate_from_manifests(
+        [manifest],
+        labels,
+        receipt_path,
+        parameters=_parameters(minimum_acceptable_samples=1),
+    )
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "metrics:\n"
+        "  quality_backend: gradient_proxy\n"
+        f"  min_quality_gain: {receipt['thresholds']['min_quality_gain']['value']}\n"
+        f"  max_scale_nrmse: {receipt['thresholds']['max_scale_nrmse']['value']}\n"
+        f"  max_scale_edge_mae: {receipt['thresholds']['max_scale_edge_mae']['value']}\n",
+        encoding="utf-8",
+    )
+
+    labels.write_text("run_id,step_index,acceptable\nrun,1,false\n", encoding="utf-8")
+    valid, reasons = verify_calibration_receipt(receipt_path, config_path)
+    assert not valid
+    assert any(reason.startswith("source_recompute_") for reason in reasons)
+
+    legacy = deepcopy(receipt)
+    legacy["schema_version"] = "scaleguard.calibration-receipt/v1"
+    legacy.pop("receipt_sha256")
+    legacy["receipt_sha256"] = canonical_sha256(legacy)
+    receipt_path.write_text(json.dumps(legacy), encoding="utf-8")
+    valid, reasons = verify_calibration_receipt(receipt_path, config_path)
+    assert not valid
+    assert "unsupported_schema" in reasons
+
+
 @pytest.mark.parametrize(
     "parameters",
     [
@@ -522,6 +687,9 @@ def test_relative_artifacts_use_the_explicit_artifact_root(tmp_path: Path) -> No
         CalibrationParameters(quality_lower_quantile=-0.1),
         CalibrationParameters(error_upper_quantile=1.1),
         CalibrationParameters(bootstrap_samples=0),
+        CalibrationParameters(bootstrap_seed=-1),
+        CalibrationParameters(bootstrap_seed=True),
+        CalibrationParameters(bootstrap_seed=2**63),
         CalibrationParameters(bootstrap_confidence=1.0),
     ],
 )

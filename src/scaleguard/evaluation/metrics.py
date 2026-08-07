@@ -25,21 +25,31 @@ from PIL import Image, UnidentifiedImageError
 
 from scaleguard import __version__
 from scaleguard.contracts import utc_now
+from scaleguard.errors import ScaleGuardError
 from scaleguard.evaluation.evidence import (
     EvaluationEvidenceError,
     canonical_sha256,
     load_json_object,
     require_text,
+    resolved_distinct_paths,
     sha256_file,
     verify_artifact,
     write_json_atomic,
 )
+from scaleguard.manifest import ManifestValidationError, validate_run_manifest
+from scaleguard.provenance import load_regular_file_snapshot
 
-METRIC_RECEIPT_SCHEMA = "scaleguard.metric-receipt/v1"
+METRIC_RECEIPT_SCHEMA = "scaleguard.metric-receipt/v2"
 SUPPORTED_METRICS = ("psnr", "ssim", "lpips", "musiq", "clipiqa")
 PYIQA_METRICS = ("lpips", "musiq", "clipiqa")
+FULL_REFERENCE_METRICS = ("psnr", "ssim", "lpips")
+NO_REFERENCE_METRICS = ("musiq", "clipiqa")
 PYIQA_VERSION = "0.1.16"
-_CLIPIQA_RN50_SHA256 = "afeb0e10f9e5a86da6080e35cf09123aca3b358a0c3e3b6c78a7b63bc04b6762"
+_PYIQA_WEIGHT_SHA256 = {
+    "lpips": "df73285e35b22355a2df87cdb6b70b343713b667eddbda73e1977e0c860835c0",
+    "musiq": "e95806b9eae5f3814c410f574ba8e552362bd5bc63d758ed5b97860f5d6185aa",
+    "clipiqa": "afeb0e10f9e5a86da6080e35cf09123aca3b358a0c3e3b6c78a7b63bc04b6762",
+}
 _PYIQA_PROFILES: dict[str, dict[str, object]] = {
     "lpips": {
         "model": "LPIPS",
@@ -72,7 +82,7 @@ class _LoadedImage:
 class _LearnedMetric(Protocol):
     metadata: dict[str, Any]
 
-    def score(self, output_path: Path, reference_path: Path) -> float:
+    def score(self, output_path: Path, reference_path: Path | None) -> float:
         """Return the native PyIQA score."""
 
     def close(self) -> None:
@@ -280,12 +290,14 @@ def _offline_environment(torch_home: Path) -> Iterator[None]:
         "TRANSFORMERS_CACHE": str(torch_home / "huggingface" / "transformers"),
         "TORCH_HOME": str(torch_home),
         "XDG_CACHE_HOME": str(torch_home / "xdg"),
+        "TORCH_FORCE_WEIGHTS_ONLY_LOAD": "1",
     }
     with (
         mock.patch.dict(os.environ, environment, clear=False),
         mock.patch.object(socket.socket, "connect", _blocked_network),
         mock.patch.object(socket, "create_connection", _blocked_network),
     ):
+        os.environ.pop("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", None)
         yield
 
 
@@ -337,10 +349,11 @@ class _PyiqaMetricRunner:
         weight_hash = sha256_file(resolved_weight)
         resolved_backbone = expanded_backbone.resolve() if expanded_backbone is not None else None
         backbone_hash = sha256_file(resolved_backbone) if resolved_backbone is not None else None
-        if metric_name == "clipiqa" and weight_hash != _CLIPIQA_RN50_SHA256:
+        expected_weight_hash = _PYIQA_WEIGHT_SHA256[metric_name]
+        if weight_hash != expected_weight_hash:
             raise EvaluationEvidenceError(
-                "CLIPIQA weight must be the pinned OpenAI RN50 checkpoint "
-                f"{_CLIPIQA_RN50_SHA256}, observed {weight_hash}"
+                f"{metric_name} weight must match the pinned canonical checkpoint "
+                f"{expected_weight_hash}, observed {weight_hash}"
             )
 
         self._temporary = tempfile.TemporaryDirectory(prefix="scaleguard-pyiqa-")
@@ -378,9 +391,23 @@ class _PyiqaMetricRunner:
             "name": metric_name,
             "backend": "pyiqa",
             "backend_version": version,
+            "implementation": "pyiqa.create_metric",
             "device": actual_device,
             "requested_device": device,
             "direction": "lower_is_better" if lower_better else "higher_is_better",
+            "dependency_versions": {
+                "pillow": PIL.__version__,
+                "pyiqa": version,
+                "torch": _installed_version("torch"),
+            },
+            "preprocessing": {
+                "image_mode": "RGB uint8",
+                "exif_orientation": "identity_only",
+                "color_management": "no_implicit_conversion",
+                "crop_border": 0,
+                "reference_required": metric_name == "lpips",
+                "implicit_resize": False,
+            },
             "parameters": {
                 "offline": True,
                 "implicit_downloads": False,
@@ -403,6 +430,7 @@ class _PyiqaMetricRunner:
                 ),
             },
         }
+        self.metadata["identity_sha256"] = _metric_identity_sha256(self.metadata)
 
     def _verify_source_files(self) -> None:
         for role, path, expected_hash in self._source_files:
@@ -413,11 +441,13 @@ class _PyiqaMetricRunner:
                     f"expected {expected_hash}, observed {observed_hash}"
                 )
 
-    def score(self, output_path: Path, reference_path: Path) -> float:
+    def score(self, output_path: Path, reference_path: Path | None) -> float:
         try:
             self._verify_source_files()
             with _offline_environment(self._torch_home):
                 if self._metric_name == "lpips":
+                    if reference_path is None:
+                        raise EvaluationEvidenceError("LPIPS requires an aligned reference")
                     raw = self._metric(str(output_path), str(reference_path))
                 else:
                     raw = self._metric(str(output_path))
@@ -444,8 +474,21 @@ def _metric_definition(name: str, *, crop_border: int, device: str) -> dict[str,
             "name": "psnr",
             "backend": "scaleguard.numpy",
             "backend_version": __version__,
+            "implementation": "scaleguard.evaluation.metrics.psnr_rgb",
             "device": "cpu",
             "direction": "higher_is_better",
+            "dependency_versions": {
+                "numpy": np.__version__,
+                "pillow": PIL.__version__,
+            },
+            "preprocessing": {
+                "image_mode": "RGB uint8",
+                "exif_orientation": "identity_only",
+                "color_management": "matching_icc_digest",
+                "crop_border": crop_border,
+                "reference_required": True,
+                "implicit_resize": False,
+            },
             "parameters": {
                 "channels": "RGB",
                 "data_range": 1.0,
@@ -459,8 +502,21 @@ def _metric_definition(name: str, *, crop_border: int, device: str) -> dict[str,
             "name": "ssim",
             "backend": "scaleguard.numpy",
             "backend_version": __version__,
+            "implementation": "scaleguard.evaluation.metrics.ssim_rgb",
             "device": "cpu",
             "direction": "higher_is_better",
+            "dependency_versions": {
+                "numpy": np.__version__,
+                "pillow": PIL.__version__,
+            },
+            "preprocessing": {
+                "image_mode": "RGB uint8",
+                "exif_orientation": "identity_only",
+                "color_management": "matching_icc_digest",
+                "crop_border": crop_border,
+                "reference_required": True,
+                "implicit_resize": False,
+            },
             "parameters": {
                 "channels": "RGB",
                 "data_range": 1.0,
@@ -478,8 +534,22 @@ def _metric_definition(name: str, *, crop_border: int, device: str) -> dict[str,
         "name": name,
         "backend": "pyiqa",
         "backend_version": PYIQA_VERSION,
+        "implementation": "pyiqa.create_metric",
         "device": device,
         "direction": "lower_is_better" if name == "lpips" else "higher_is_better",
+        "dependency_versions": {
+            "pillow": PIL.__version__,
+            "pyiqa": _installed_version("pyiqa"),
+            "torch": _installed_version("torch"),
+        },
+        "preprocessing": {
+            "image_mode": "RGB uint8",
+            "exif_orientation": "identity_only",
+            "color_management": "no_implicit_conversion",
+            "crop_border": 0,
+            "reference_required": name == "lpips",
+            "implicit_resize": False,
+        },
         "parameters": {
             "offline": True,
             "implicit_downloads": False,
@@ -500,11 +570,18 @@ def _provided_file(path: Path | None) -> dict[str, Any] | None:
     }
     if resolved.is_file():
         try:
-            evidence["sha256"] = sha256_file(resolved)
-            evidence["size_bytes"] = resolved.stat().st_size
-        except (EvaluationEvidenceError, OSError) as error:
+            payload, digest = load_regular_file_snapshot(resolved, "metric model file")
+            evidence["sha256"] = digest
+            evidence["size_bytes"] = len(payload)
+        except (ScaleGuardError, OSError) as error:
             evidence["error"] = f"{type(error).__name__}: {error}"
     return evidence
+
+
+def _metric_identity_sha256(definition: Mapping[str, Any]) -> str:
+    identity = dict(definition)
+    identity.pop("identity_sha256", None)
+    return canonical_sha256(identity)
 
 
 def _request_definition(
@@ -522,6 +599,7 @@ def _request_definition(
             "weight": _provided_file(weight),
             "backbone": _provided_file(backbone),
         }
+    definition["identity_sha256"] = _metric_identity_sha256(definition)
     return definition
 
 
@@ -537,6 +615,41 @@ def _prepare_metric_names(metric_names: Sequence[str]) -> tuple[str, ...]:
     return normalized
 
 
+def _manifest_artifact_paths(
+    manifest_path: Path,
+    *,
+    artifact_root: Path | None,
+) -> list[tuple[str, Path]]:
+    manifest, _digest = load_json_object(manifest_path, kind="run manifest")
+    records: list[tuple[str, object]] = [
+        ("input image", manifest.get("input_image")),
+        ("restored image", manifest.get("restored_image")),
+        ("final image", manifest.get("final_image")),
+    ]
+    steps = manifest.get("steps")
+    if isinstance(steps, list):
+        for index, step in enumerate(steps):
+            if isinstance(step, Mapping):
+                records.extend(
+                    (
+                        (f"step {index + 1} trusted image", step.get("trusted_before")),
+                        (f"step {index + 1} candidate image", step.get("candidate")),
+                    )
+                )
+    result: list[tuple[str, Path]] = []
+    for label, record in records:
+        if not isinstance(record, Mapping):
+            continue
+        declared = record.get("path")
+        if not isinstance(declared, str) or not declared:
+            continue
+        path = Path(declared).expanduser()
+        if not path.is_absolute():
+            path = (artifact_root or manifest_path.parent) / path
+        result.append((f"{manifest_path} {label}", path))
+    return result
+
+
 def _installed_version(distribution: str) -> str | None:
     try:
         return importlib.metadata.version(distribution)
@@ -546,7 +659,7 @@ def _installed_version(distribution: str) -> str | None:
 
 def _run_sample(
     manifest_path: Path,
-    reference_path: Path,
+    reference_path: Path | None,
     *,
     artifact_root: Path | None,
     crop_border: int,
@@ -556,7 +669,24 @@ def _run_sample(
     learned: Mapping[str, _LearnedMetric],
     learned_errors: Mapping[str, str],
 ) -> dict[str, Any]:
+    manifest_path = manifest_path.expanduser().resolve()
     manifest, manifest_hash = load_json_object(manifest_path, kind="run manifest")
+    try:
+        validated = validate_run_manifest(manifest_path, artifact_root=artifact_root)
+    except ManifestValidationError as error:
+        raise EvaluationEvidenceError(f"invalid run manifest {manifest_path}: {error}") from error
+    after_validation, after_validation_hash = load_json_object(
+        manifest_path,
+        kind="run manifest",
+    )
+    if (
+        validated != manifest
+        or after_validation != manifest
+        or after_validation_hash != manifest_hash
+    ):
+        raise EvaluationEvidenceError(
+            f"run manifest changed while it was being validated: {manifest_path}"
+        )
     run_id = require_text(manifest, "run_id", context=str(manifest_path))
     status = require_text(manifest, "status", context=str(manifest_path))
     mock_run = manifest.get("mock")
@@ -577,10 +707,16 @@ def _run_sample(
         artifact_root=artifact_root,
     )
     resolved_output = Path(output_evidence["verified_path"])
-    resolved_reference = reference_path.expanduser().resolve()
-    if not resolved_reference.is_file():
-        raise EvaluationEvidenceError(f"reference image is unavailable: {resolved_reference}")
-    reference_hash = sha256_file(resolved_reference)
+    require_reference = any(name in FULL_REFERENCE_METRICS for name in metric_names)
+    resolved_reference: Path | None = None
+    reference_hash: str | None = None
+    if reference_path is not None:
+        resolved_reference = reference_path.expanduser().resolve()
+        if not resolved_reference.is_file():
+            raise EvaluationEvidenceError(f"reference image is unavailable: {resolved_reference}")
+        reference_hash = sha256_file(resolved_reference)
+    elif require_reference:
+        raise EvaluationEvidenceError("an aligned reference is required for PSNR, SSIM, or LPIPS")
 
     input_image, mock_input = _validate_declared_image(
         raw_input,
@@ -592,13 +728,19 @@ def _run_sample(
         output_evidence,
         role="output",
     )
-    reference_image = _load_rgb8(resolved_reference, role="reference")
-    output_pixels, reference_pixels = _validate_pair(
-        output_image,
-        reference_image,
-        crop_border=crop_border,
-        require_ssim_window="ssim" in metric_names,
-    )
+    reference_image: _LoadedImage | None = None
+    output_pixels: _RGBArray | None = None
+    reference_pixels: _RGBArray | None = None
+    if require_reference:
+        if resolved_reference is None:
+            raise AssertionError("reference requirement validation did not hold")
+        reference_image = _load_rgb8(resolved_reference, role="reference")
+        output_pixels, reference_pixels = _validate_pair(
+            output_image,
+            reference_image,
+            crop_border=crop_border,
+            require_ssim_window="ssim" in metric_names,
+        )
 
     issues: list[str] = []
     if mock_run:
@@ -614,8 +756,12 @@ def _run_sample(
         definition = dict(request_definitions[name])
         try:
             if name == "psnr":
+                if output_pixels is None or reference_pixels is None:
+                    raise AssertionError("PSNR reference validation did not hold")
                 value: float | str = psnr_rgb(output_pixels, reference_pixels)
             elif name == "ssim":
+                if output_pixels is None or reference_pixels is None:
+                    raise AssertionError("SSIM reference validation did not hold")
                 value = ssim_rgb(output_pixels, reference_pixels)
             else:
                 definition = dict(learned[name].metadata)
@@ -627,12 +773,13 @@ def _run_sample(
             issues.append(issue)
             results.append({**definition, "status": "failed", "value": None, "issue": detail})
 
-    stable_files = (
+    stable_files: list[tuple[str, Path, str]] = [
         ("manifest", manifest_path.resolve(), manifest_hash),
         ("input", Path(input_evidence["verified_path"]), input_evidence["sha256"]),
         ("output", resolved_output, output_evidence["sha256"]),
-        ("reference", resolved_reference, reference_hash),
-    )
+    ]
+    if resolved_reference is not None and reference_hash is not None:
+        stable_files.append(("reference", resolved_reference, reference_hash))
     for role, path, expected_hash in stable_files:
         observed_hash = sha256_file(path)
         if observed_hash != expected_hash:
@@ -657,11 +804,17 @@ def _run_sample(
             **output_evidence,
             "image_contract": output_image.evidence,
         },
-        "reference_image": {
-            "path": str(resolved_reference),
-            "sha256": reference_hash,
-            "image_contract": reference_image.evidence,
-        },
+        "reference_image": (
+            None
+            if resolved_reference is None
+            else {
+                "path": str(resolved_reference),
+                "sha256": reference_hash,
+                "image_contract": (
+                    reference_image.evidence if reference_image is not None else None
+                ),
+            }
+        ),
         "metrics": results,
         "issues": issues,
     }
@@ -669,7 +822,7 @@ def _run_sample(
 
 def evaluate_metric_receipt(
     manifest_paths: Sequence[Path],
-    reference_paths: Sequence[Path],
+    reference_paths: Sequence[Path | None] | None,
     output_path: Path,
     *,
     metric_names: Sequence[str] = ("psnr", "ssim"),
@@ -683,9 +836,24 @@ def evaluate_metric_receipt(
 
     if not manifest_paths:
         raise EvaluationEvidenceError("at least one manifest/reference pair is required")
-    if len(manifest_paths) != len(reference_paths):
-        raise EvaluationEvidenceError("--manifest and --reference counts must match")
     resolved_metrics = _prepare_metric_names(metric_names)
+    supplied_references = tuple(reference_paths or ())
+    requires_reference = any(name in FULL_REFERENCE_METRICS for name in resolved_metrics)
+    if requires_reference and len(manifest_paths) != len(supplied_references):
+        raise EvaluationEvidenceError(
+            "--manifest and --reference counts must match for full-reference metrics"
+        )
+    if (
+        not requires_reference
+        and supplied_references
+        and (len(manifest_paths) != len(supplied_references))
+    ):
+        raise EvaluationEvidenceError(
+            "when supplied, --reference counts must match --manifest counts"
+        )
+    references: tuple[Path | None, ...] = (
+        supplied_references if supplied_references else tuple(None for _manifest in manifest_paths)
+    )
     if crop_border < 0:
         raise EvaluationEvidenceError("crop_border must be non-negative")
     if not device.strip():
@@ -716,6 +884,30 @@ def evaluate_metric_receipt(
         raise EvaluationEvidenceError(
             "PyIQA backbones supplied for unrequested metrics: " + ", ".join(unrequested_backbones)
         )
+
+    protected_inputs: list[tuple[str, Path]] = [
+        (f"manifest {index}", path) for index, path in enumerate(manifest_paths)
+    ]
+    protected_inputs.extend(
+        (f"reference {index}", path) for index, path in enumerate(references) if path is not None
+    )
+    protected_inputs.extend((f"PyIQA {name} weight", path) for name, path in weights.items())
+    protected_inputs.extend((f"PyIQA {name} backbone", path) for name, path in backbones.items())
+    for manifest_path in manifest_paths:
+        try:
+            protected_inputs.extend(
+                _manifest_artifact_paths(
+                    manifest_path,
+                    artifact_root=artifact_root,
+                )
+            )
+        except EvaluationEvidenceError:
+            # The sample path will produce a structured issue receipt below.
+            pass
+    resolved_output_path = resolved_distinct_paths(
+        {"metric receipt output": output_path},
+        inputs=protected_inputs,
+    )["metric receipt output"]
     request_definitions = {
         name: _request_definition(
             name,
@@ -772,7 +964,7 @@ def evaluate_metric_receipt(
     receipt_issues: list[str] = []
     try:
         for index, (manifest_path, reference_path) in enumerate(
-            zip(manifest_paths, reference_paths, strict=True)
+            zip(manifest_paths, references, strict=True)
         ):
             try:
                 sample = _run_sample(
@@ -789,10 +981,37 @@ def evaluate_metric_receipt(
             except (EvaluationEvidenceError, OSError, ValueError) as error:
                 issue = f"sample_failed:{index}:{type(error).__name__}:{error}"
                 receipt_issues.append(issue)
+                failed_manifest: dict[str, Any] = {
+                    "path": str(manifest_path.expanduser().resolve())
+                }
+                failed_run_id: str | None = None
+                try:
+                    failed_snapshot, failed_digest = load_json_object(
+                        manifest_path.expanduser().resolve(),
+                        kind="run manifest",
+                    )
+                    failed_manifest["sha256"] = failed_digest
+                    raw_failed_run_id = failed_snapshot.get("run_id")
+                    if isinstance(raw_failed_run_id, str) and raw_failed_run_id:
+                        failed_run_id = raw_failed_run_id
+                except (EvaluationEvidenceError, OSError, ValueError):
+                    pass
                 sample = {
                     "index": index,
-                    "manifest": {"path": str(manifest_path.resolve())},
-                    "reference_image": {"path": str(reference_path.resolve())},
+                    "run_id": failed_run_id,
+                    "manifest": failed_manifest,
+                    "reference_image": (
+                        {
+                            "path": str(reference_path.expanduser().resolve()),
+                            "sha256": (
+                                sha256_file(reference_path.expanduser().resolve())
+                                if reference_path.expanduser().resolve().is_file()
+                                else None
+                            ),
+                        }
+                        if reference_path is not None
+                        else None
+                    ),
                     "metrics": [],
                     "issues": [issue],
                 }
@@ -819,6 +1038,7 @@ def evaluate_metric_receipt(
         "schema_version": METRIC_RECEIPT_SCHEMA,
         "created_at": utc_now(),
         "status": "completed" if not receipt_issues else "completed_with_issues",
+        "research_eligible": (not receipt_issues and measured_count == requested_metric_count),
         "contract": {
             "image_mode": "RGB",
             "bits_per_channel": 8,
@@ -851,5 +1071,575 @@ def evaluate_metric_receipt(
         "issues": receipt_issues,
     }
     payload["receipt_sha256"] = canonical_sha256(payload)
-    write_json_atomic(output_path, payload)
+    write_json_atomic(resolved_output_path, payload)
     return payload
+
+
+def _receipt_score_equal(observed: object, replayed: object) -> bool:
+    if observed == "infinity" or replayed == "infinity":
+        return observed == replayed == "infinity"
+    if (
+        isinstance(observed, bool)
+        or not isinstance(observed, (int, float))
+        or isinstance(replayed, bool)
+        or not isinstance(replayed, (int, float))
+    ):
+        return False
+    observed_float = float(observed)
+    replayed_float = float(replayed)
+    return (
+        math.isfinite(observed_float)
+        and math.isfinite(replayed_float)
+        and math.isclose(
+            observed_float,
+            replayed_float,
+            rel_tol=1e-9,
+            abs_tol=1e-10,
+        )
+    )
+
+
+def _receipt_result_identity(raw_result: Mapping[str, Any]) -> str:
+    definition = dict(raw_result)
+    for field in ("identity_sha256", "status", "value", "issue"):
+        definition.pop(field, None)
+    return canonical_sha256(definition)
+
+
+def _receipt_file_path(
+    raw: object,
+    *,
+    context: str,
+    required: bool,
+) -> tuple[Path | None, bool]:
+    if raw is None:
+        if required:
+            raise EvaluationEvidenceError(f"{context} is required")
+        return None, False
+    if not isinstance(raw, Mapping):
+        raise EvaluationEvidenceError(f"{context} must be an object or null")
+    if set(raw) != {"path", "available", "sha256", "size_bytes"}:
+        raise EvaluationEvidenceError(f"{context} has unexpected or missing fields")
+    raw_path = raw.get("path")
+    raw_digest = raw.get("sha256")
+    raw_size = raw.get("size_bytes")
+    if not isinstance(raw_path, str) or not raw_path:
+        raise EvaluationEvidenceError(f"{context}.path must be non-empty")
+    path = Path(raw_path)
+    if not path.is_absolute():
+        raise EvaluationEvidenceError(f"{context}.path must be absolute")
+    if (
+        not isinstance(raw_digest, str)
+        or len(raw_digest) != 64
+        or any(character not in "0123456789abcdef" for character in raw_digest)
+    ):
+        raise EvaluationEvidenceError(f"{context}.sha256 must be a lowercase SHA256")
+    if type(raw_size) is not int or raw_size < 0:
+        raise EvaluationEvidenceError(f"{context}.size_bytes must be non-negative")
+    if raw.get("available") is not True:
+        raise EvaluationEvidenceError(f"{context}.available must be true")
+    resolved = path.resolve()
+    if not resolved.is_file():
+        return resolved, False
+    payload, digest = load_regular_file_snapshot(resolved, context)
+    if digest != raw_digest or len(payload) != raw_size:
+        raise EvaluationEvidenceError(f"{context} identity changed after receipt creation")
+    return resolved, True
+
+
+def _validate_receipt_request(
+    raw: object,
+    *,
+    crop_border: int,
+    requested_device: str,
+    context: str,
+) -> tuple[str, dict[str, Any], Path | None, Path | None, bool]:
+    if not isinstance(raw, dict):
+        raise EvaluationEvidenceError(f"{context} must be an object")
+    name = require_text(raw, "name", context=context).lower()
+    if name not in SUPPORTED_METRICS:
+        raise EvaluationEvidenceError(f"{context}.name is unsupported: {name!r}")
+    identity = raw.get("identity_sha256")
+    if identity != _metric_identity_sha256(raw):
+        raise EvaluationEvidenceError(f"{context}.identity_sha256 is invalid")
+    if name in {"psnr", "ssim"}:
+        expected = _request_definition(
+            name,
+            crop_border=crop_border,
+            device=requested_device,
+            weight=None,
+            backbone=None,
+        )
+        if raw != expected:
+            raise EvaluationEvidenceError(f"{context} definition differs from locked code")
+        return name, raw, None, None, True
+
+    expected_base = _metric_definition(name, crop_border=0, device=requested_device)
+    if set(raw) != {*expected_base, "identity_sha256"}:
+        raise EvaluationEvidenceError(f"{context} has unexpected or missing fields")
+    for field in (
+        "name",
+        "backend",
+        "backend_version",
+        "implementation",
+        "device",
+        "direction",
+        "preprocessing",
+    ):
+        if raw.get(field) != expected_base[field]:
+            raise EvaluationEvidenceError(f"{context}.{field} differs from locked code")
+    dependencies = raw.get("dependency_versions")
+    if not isinstance(dependencies, dict) or set(dependencies) != {
+        "pillow",
+        "pyiqa",
+        "torch",
+    }:
+        raise EvaluationEvidenceError(f"{context}.dependency_versions is invalid")
+    if dependencies.get("pyiqa") != PYIQA_VERSION or not isinstance(
+        dependencies.get("pillow"), str
+    ):
+        raise EvaluationEvidenceError(f"{context}.dependency_versions is unsupported")
+    torch_version = dependencies.get("torch")
+    if torch_version is not None and not isinstance(torch_version, str):
+        raise EvaluationEvidenceError(f"{context}.dependency_versions.torch is invalid")
+    parameters = raw.get("parameters")
+    if not isinstance(parameters, dict):
+        raise EvaluationEvidenceError(f"{context}.parameters must be an object")
+    if set(parameters) != {"offline", "implicit_downloads", "profile", "weight", "backbone"}:
+        raise EvaluationEvidenceError(f"{context}.parameters has unexpected fields")
+    for field in ("offline", "implicit_downloads", "profile"):
+        if parameters.get(field) != expected_base["parameters"][field]:
+            raise EvaluationEvidenceError(f"{context}.parameters.{field} differs from locked code")
+    weight, weight_available = _receipt_file_path(
+        parameters.get("weight"),
+        context=f"{context}.parameters.weight",
+        required=True,
+    )
+    backbone, backbone_available = _receipt_file_path(
+        parameters.get("backbone"),
+        context=f"{context}.parameters.backbone",
+        required=name == "lpips",
+    )
+    if name != "lpips" and parameters.get("backbone") is not None:
+        raise EvaluationEvidenceError(f"{context} declares an unsupported backbone")
+    return name, raw, weight, backbone, weight_available and (name != "lpips" or backbone_available)
+
+
+def _verified_manifest_for_receipt_sample(
+    raw_sample: Mapping[str, Any],
+    *,
+    artifact_root: Path | None,
+    context: str,
+) -> tuple[Path, str, str]:
+    raw_manifest = raw_sample.get("manifest")
+    if not isinstance(raw_manifest, Mapping):
+        raise EvaluationEvidenceError(f"{context}.manifest must be an object")
+    manifest_path_text = require_text(raw_manifest, "path", context=f"{context}.manifest")
+    manifest_path = Path(manifest_path_text)
+    if not manifest_path.is_absolute():
+        raise EvaluationEvidenceError(f"{context}.manifest.path must be absolute")
+    manifest_path = manifest_path.resolve()
+    expected_digest = require_text(raw_manifest, "sha256", context=f"{context}.manifest")
+    snapshot, observed_digest = load_json_object(manifest_path, kind="run manifest")
+    if observed_digest != expected_digest:
+        raise EvaluationEvidenceError(f"{context}.manifest SHA256 changed")
+    try:
+        validated = validate_run_manifest(manifest_path, artifact_root=artifact_root)
+    except ManifestValidationError as error:
+        raise EvaluationEvidenceError(f"{context}.manifest no longer validates: {error}") from error
+    if validated != snapshot:
+        raise EvaluationEvidenceError(f"{context}.manifest changed during validation")
+    run_id = require_text(snapshot, "run_id", context=str(manifest_path))
+    if raw_sample.get("run_id") != run_id:
+        raise EvaluationEvidenceError(f"{context}.run_id differs from the manifest")
+    for role, manifest_field, receipt_field in (
+        ("input", "input_image", "input_image"),
+        ("output", "final_image", "output_image"),
+    ):
+        receipt_artifact = raw_sample.get(receipt_field)
+        if not isinstance(receipt_artifact, Mapping):
+            raise EvaluationEvidenceError(f"{context}.{receipt_field} must be an object")
+        evidence = verify_artifact(
+            snapshot.get(manifest_field),
+            context=f"{context}.{manifest_field}",
+            manifest_path=manifest_path,
+            artifact_root=artifact_root,
+        )
+        if receipt_artifact.get("sha256") != evidence["sha256"]:
+            raise EvaluationEvidenceError(f"{context}.{role} SHA256 differs from manifest")
+        receipt_path = receipt_artifact.get("verified_path")
+        if (
+            not isinstance(receipt_path, str)
+            or Path(receipt_path).resolve() != Path(str(evidence["verified_path"])).resolve()
+        ):
+            raise EvaluationEvidenceError(f"{context}.{role} path differs from manifest")
+    return manifest_path, observed_digest, run_id
+
+
+def verify_metric_receipt(
+    receipt_path: Path,
+    *,
+    artifact_root: Path | None = None,
+) -> dict[str, Any]:
+    """Replay a v2 metric receipt against its immutable source evidence.
+
+    Structural, identity, or score drift raises ``EvaluationEvidenceError``. A
+    learned metric whose locked local files or runtime are unavailable remains
+    auditable, but is explicitly excluded from research aggregation.
+    """
+
+    path = receipt_path.expanduser().resolve()
+    receipt, file_digest = load_json_object(path, kind="metric receipt")
+    if set(receipt) != {
+        "schema_version",
+        "created_at",
+        "status",
+        "research_eligible",
+        "contract",
+        "metric_requests",
+        "runtime",
+        "counts",
+        "samples",
+        "issues",
+        "receipt_sha256",
+    }:
+        raise EvaluationEvidenceError("metric receipt has unexpected or missing fields")
+    if receipt.get("schema_version") != METRIC_RECEIPT_SCHEMA:
+        raise EvaluationEvidenceError(
+            f"unsupported metric receipt schema: {receipt.get('schema_version')!r}"
+        )
+    self_digest = receipt.get("receipt_sha256")
+    if (
+        not isinstance(self_digest, str)
+        or len(self_digest) != 64
+        or any(character not in "0123456789abcdef" for character in self_digest)
+    ):
+        raise EvaluationEvidenceError("metric receipt self digest is invalid")
+    unsigned = dict(receipt)
+    unsigned.pop("receipt_sha256", None)
+    if canonical_sha256(unsigned) != self_digest:
+        raise EvaluationEvidenceError("metric receipt self digest does not match its payload")
+
+    contract = receipt.get("contract")
+    if not isinstance(contract, dict):
+        raise EvaluationEvidenceError("metric receipt contract must be an object")
+    crop_border = contract.get("crop_border")
+    if type(crop_border) is not int or crop_border < 0:
+        raise EvaluationEvidenceError("metric receipt crop_border must be non-negative")
+    expected_contract = {
+        "image_mode": "RGB",
+        "bits_per_channel": 8,
+        "code_value_normalization": "uint8 / 255",
+        "color_management": "no conversion; ICC profile digests must match",
+        "orientation": "stored pixels; EXIF orientation must be absent or identity",
+        "alignment": "exact dimensions; no implicit resize",
+        "crop_border": crop_border,
+    }
+    if contract != expected_contract:
+        raise EvaluationEvidenceError("metric receipt image contract differs from locked code")
+    runtime = receipt.get("runtime")
+    requested_device = (
+        runtime.get("requested_pyiqa_device") if isinstance(runtime, Mapping) else None
+    )
+    if not isinstance(requested_device, str) or not requested_device.strip():
+        raise EvaluationEvidenceError("metric receipt requested device is invalid")
+
+    raw_requests = receipt.get("metric_requests")
+    if not isinstance(raw_requests, list) or not raw_requests:
+        raise EvaluationEvidenceError("metric receipt metric_requests must be non-empty")
+    requests: dict[str, dict[str, Any]] = {}
+    learned_paths: dict[str, tuple[Path | None, Path | None, bool]] = {}
+    protected_paths: set[Path] = {path}
+    for index, raw_request in enumerate(raw_requests):
+        name, definition, weight, backbone, available = _validate_receipt_request(
+            raw_request,
+            crop_border=crop_border,
+            requested_device=requested_device,
+            context=f"metric receipt.metric_requests[{index}]",
+        )
+        if name in requests:
+            raise EvaluationEvidenceError(f"metric receipt duplicates metric {name!r}")
+        requests[name] = definition
+        learned_paths[name] = (weight, backbone, available)
+        if weight is not None:
+            protected_paths.add(weight)
+        if backbone is not None:
+            protected_paths.add(backbone)
+
+    learned: dict[str, _LearnedMetric] = {}
+    replay_issues: list[str] = []
+    for name, (weight, backbone, available) in learned_paths.items():
+        if name not in PYIQA_METRICS:
+            continue
+        if not available or weight is None:
+            replay_issues.append(f"learned_metric_source_unavailable:{name}")
+            continue
+        try:
+            learned[name] = _PyiqaMetricRunner(
+                name,
+                weight_path=weight,
+                backbone_path=backbone,
+                device=requested_device,
+            )
+        except (EvaluationEvidenceError, OSError, ValueError) as error:
+            replay_issues.append(f"learned_metric_replay_unavailable:{name}:{type(error).__name__}")
+
+    raw_samples = receipt.get("samples")
+    if not isinstance(raw_samples, list) or not raw_samples:
+        for runner in learned.values():
+            runner.close()
+        raise EvaluationEvidenceError("metric receipt samples must be non-empty")
+    verified_samples: list[dict[str, Any]] = []
+    measured_count = 0
+    failed_count = 0
+    reconstructed_issues: list[str] = []
+    try:
+        for index, raw_sample in enumerate(raw_samples):
+            context = f"metric receipt.samples[{index}]"
+            if not isinstance(raw_sample, dict):
+                raise EvaluationEvidenceError(f"{context} must be an object")
+            if set(raw_sample) != {
+                "index",
+                "run_id",
+                "run_status",
+                "mock",
+                "manifest",
+                "input_image",
+                "output_image",
+                "reference_image",
+                "metrics",
+                "issues",
+            }:
+                raise EvaluationEvidenceError(f"{context} has unexpected or missing fields")
+            if raw_sample.get("index") != index:
+                raise EvaluationEvidenceError(f"{context}.index is not canonical")
+            manifest_path, manifest_digest, run_id = _verified_manifest_for_receipt_sample(
+                raw_sample,
+                artifact_root=artifact_root,
+                context=context,
+            )
+            protected_paths.add(manifest_path)
+            raw_reference = raw_sample.get("reference_image")
+            reference_path: Path | None = None
+            if raw_reference is not None:
+                if not isinstance(raw_reference, Mapping):
+                    raise EvaluationEvidenceError(f"{context}.reference_image is invalid")
+                reference_text = require_text(
+                    raw_reference,
+                    "path",
+                    context=f"{context}.reference_image",
+                )
+                reference_path = Path(reference_text)
+                if not reference_path.is_absolute() or not reference_path.resolve().is_file():
+                    raise EvaluationEvidenceError(
+                        f"{context}.reference_image is unavailable or non-absolute"
+                    )
+                reference_path = reference_path.resolve()
+                protected_paths.add(reference_path)
+                if raw_reference.get("sha256") != sha256_file(reference_path):
+                    raise EvaluationEvidenceError(f"{context}.reference_image SHA256 changed")
+
+            replay_names = tuple(
+                name for name in requests if name not in PYIQA_METRICS or name in learned
+            )
+            replay = _run_sample(
+                manifest_path,
+                reference_path,
+                artifact_root=artifact_root,
+                crop_border=crop_border,
+                device=requested_device,
+                metric_names=replay_names,
+                request_definitions={name: requests[name] for name in replay_names},
+                learned=learned,
+                learned_errors={},
+            )
+            raw_sample_issues = raw_sample.get("issues")
+            nonreplayable_metric_issues = tuple(
+                f"metric_failed:{name}:"
+                for name in requests
+                if name in PYIQA_METRICS and name not in learned
+            )
+            comparable_sample_issues = (
+                [
+                    issue
+                    for issue in raw_sample_issues
+                    if not issue.startswith(nonreplayable_metric_issues)
+                ]
+                if isinstance(raw_sample_issues, list)
+                and all(isinstance(issue, str) for issue in raw_sample_issues)
+                else None
+            )
+            if (
+                not isinstance(raw_sample_issues, list)
+                or any(not isinstance(issue, str) for issue in raw_sample_issues)
+                or comparable_sample_issues != replay.get("issues")
+            ):
+                raise EvaluationEvidenceError(f"{context}.issues differ on replay")
+            reconstructed_issues.extend(f"sample:{index}:{issue}" for issue in raw_sample_issues)
+            raw_results = raw_sample.get("metrics")
+            if not isinstance(raw_results, list):
+                raise EvaluationEvidenceError(f"{context}.metrics must be a list")
+            result_by_name: dict[str, Mapping[str, Any]] = {}
+            for result_index, raw_result in enumerate(raw_results):
+                if not isinstance(raw_result, Mapping):
+                    raise EvaluationEvidenceError(
+                        f"{context}.metrics[{result_index}] must be an object"
+                    )
+                name = require_text(
+                    raw_result,
+                    "name",
+                    context=f"{context}.metrics[{result_index}]",
+                )
+                if name not in requests or name in result_by_name:
+                    raise EvaluationEvidenceError(
+                        f"{context} contains an unknown or duplicate metric {name!r}"
+                    )
+                if raw_result.get("identity_sha256") != _receipt_result_identity(raw_result):
+                    raise EvaluationEvidenceError(f"{context}.{name} result identity is invalid")
+                result_by_name[name] = raw_result
+            replay_by_name = {str(result["name"]): result for result in replay.get("metrics", [])}
+            for field in (
+                "run_id",
+                "run_status",
+                "mock",
+                "manifest",
+                "input_image",
+                "output_image",
+            ):
+                if raw_sample.get(field) != replay.get(field):
+                    raise EvaluationEvidenceError(f"{context}.{field} differs on replay")
+            for artifact_field in ("input_image", "output_image"):
+                replayed_artifact = replay.get(artifact_field)
+                if not isinstance(replayed_artifact, Mapping):
+                    raise AssertionError("replayed artifacts must be mappings")
+                protected_paths.add(Path(str(replayed_artifact["verified_path"])).resolve())
+            expected_reference = replay.get("reference_image")
+            if raw_sample.get("reference_image") != expected_reference:
+                if reference_path is None:
+                    raise EvaluationEvidenceError(f"{context}.reference_image differs on replay")
+                reference_loaded = _load_rgb8(reference_path, role="reference")
+                full_reference_expected = {
+                    "path": str(reference_path),
+                    "sha256": sha256_file(reference_path),
+                    "image_contract": reference_loaded.evidence,
+                }
+                if raw_sample.get("reference_image") != full_reference_expected:
+                    raise EvaluationEvidenceError(f"{context}.reference_image differs on replay")
+            verified_metrics: dict[str, dict[str, Any]] = {}
+            for name, definition in requests.items():
+                recorded = result_by_name.get(name)
+                if recorded is None:
+                    verified_metrics[name] = {
+                        "status": "missing",
+                        "value": None,
+                        "direction": definition["direction"],
+                        "identity_sha256": definition["identity_sha256"],
+                    }
+                    continue
+                status = recorded.get("status")
+                if status == "failed":
+                    failed_count += 1
+                    verified_metrics[name] = {
+                        "status": "failed",
+                        "value": None,
+                        "direction": recorded.get("direction"),
+                        "identity_sha256": recorded.get("identity_sha256"),
+                    }
+                    continue
+                if status != "measured":
+                    raise EvaluationEvidenceError(f"{context}.{name}.status is invalid")
+                measured_count += 1
+                replayable = name not in PYIQA_METRICS or name in learned
+                if not replayable:
+                    verified_metrics[name] = {
+                        "status": "unverified",
+                        "value": None,
+                        "reported_value": recorded.get("value"),
+                        "direction": recorded.get("direction"),
+                        "identity_sha256": recorded.get("identity_sha256"),
+                    }
+                    continue
+                replayed = replay_by_name.get(name)
+                if replayed is None or replayed.get("status") != "measured":
+                    raise EvaluationEvidenceError(f"{context}.{name} could not be replayed")
+                if recorded.get("identity_sha256") != replayed.get("identity_sha256"):
+                    raise EvaluationEvidenceError(f"{context}.{name} definition drifted")
+                if not _receipt_score_equal(recorded.get("value"), replayed.get("value")):
+                    raise EvaluationEvidenceError(f"{context}.{name} score differs on replay")
+                verified_metrics[name] = {
+                    "status": "measured",
+                    "value": recorded.get("value"),
+                    "direction": recorded.get("direction"),
+                    "identity_sha256": recorded.get("identity_sha256"),
+                }
+            verified_samples.append(
+                {
+                    "manifest_path": str(manifest_path),
+                    "manifest_sha256": manifest_digest,
+                    "run_id": run_id,
+                    "metrics": verified_metrics,
+                }
+            )
+    finally:
+        for runner in learned.values():
+            runner.close()
+
+    expected_requested = len(raw_samples) * len(requests)
+    counts = receipt.get("counts")
+    if not isinstance(counts, dict) or counts != {
+        "samples": len(raw_samples),
+        "samples_with_issues": sum(
+            bool(sample.get("issues")) for sample in raw_samples if isinstance(sample, Mapping)
+        ),
+        "metrics_requested": expected_requested,
+        "metrics_measured": measured_count,
+        "metrics_failed": failed_count,
+        "metrics_not_run": expected_requested - measured_count - failed_count,
+    }:
+        raise EvaluationEvidenceError("metric receipt counts are inconsistent")
+    declared_research = receipt.get("research_eligible")
+    if type(declared_research) is not bool:
+        raise EvaluationEvidenceError("metric receipt research_eligible must be boolean")
+    raw_receipt_issues = receipt.get("issues")
+    if raw_receipt_issues != reconstructed_issues:
+        raise EvaluationEvidenceError("metric receipt issues differ from replayed evidence")
+    expected_status = "completed" if not reconstructed_issues else "completed_with_issues"
+    if receipt.get("status") != expected_status:
+        raise EvaluationEvidenceError("metric receipt status is inconsistent")
+    declared_research_expected = not reconstructed_issues and measured_count == expected_requested
+    if declared_research != declared_research_expected:
+        raise EvaluationEvidenceError("metric receipt research_eligible is inconsistent")
+    source_replay_complete = (
+        not replay_issues
+        and not reconstructed_issues
+        and all(
+            metric["status"] == "measured"
+            for sample in verified_samples
+            for metric in sample["metrics"].values()
+        )
+    )
+    final_receipt_payload, final_file_digest = load_regular_file_snapshot(
+        path,
+        "metric receipt",
+    )
+    if final_file_digest != file_digest:
+        raise EvaluationEvidenceError("metric receipt changed during source replay")
+    return {
+        "path": str(path),
+        "size_bytes": len(final_receipt_payload),
+        "sha256": file_digest,
+        "receipt_sha256": self_digest,
+        "verified": source_replay_complete,
+        "research_eligible": bool(declared_research and source_replay_complete),
+        "issues": replay_issues,
+        "protected_paths": [str(source) for source in sorted(protected_paths)],
+        "metric_definitions": {
+            name: {
+                "identity_sha256": definition["identity_sha256"],
+                "direction": definition["direction"],
+                "reference_required": definition["preprocessing"]["reference_required"],
+            }
+            for name, definition in requests.items()
+        },
+        "samples": verified_samples,
+    }

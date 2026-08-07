@@ -52,7 +52,15 @@ metrics:
   full_reference: [psnr, ssim, lpips]
   no_reference: [musiq, clipiqa]
   consistency: [scale_nrmse, scale_edge_mae, measurement_nrmse]
-  systems: [success_rate, stop_rate, rollback_rate, wall_time_seconds, peak_vram_mib]
+  systems:
+    - success_rate
+    - stop_rate
+    - rollback_rate
+    - wall_time_seconds
+    - coz_initialization_seconds
+    - coz_first_step_seconds
+    - coz_steady_step_seconds
+    - peak_vram_mib
 notes:
   - No numerical result belongs in this file.
   - Thresholds must be calibrated on a validation split disjoint from evaluation.

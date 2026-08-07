@@ -42,6 +42,7 @@ class RuntimeEvidence:
     source_file: Path
     layout_file: Path
     preflight: Path
+    gpu_preflight: Path
     runtime_environments: dict[str, Path]
     commit: str
 
@@ -540,6 +541,30 @@ def runtime_evidence(tmp_path: Path) -> RuntimeEvidence:
     _write_json(materialization, marker_document)
 
     preflight = root / ".runtime" / "receipts" / "runtime-preflight.json"
+    gpu_preflight = preflight.parent / "gpu-preflight" / "gpu_check.json"
+    selected_gpus = [
+        {
+            "logical_index": index,
+            "physical_index": str(index),
+            "uuid": f"GPU-fixture-{index}",
+            "name": "NVIDIA GeForce RTX 4090",
+            "memory_total_mib": 24564,
+            "driver_version": "595.71.05",
+        }
+        for index in range(2)
+    ]
+    _write_json(
+        gpu_preflight,
+        {
+            "schema_version": 1,
+            "checked_at_utc": _NOW,
+            "status": "passed",
+            "git_commit": commit,
+            "requirements": {"minimum_gpu_count": 2},
+            "cuda_visible_devices": "0,1",
+            "selected_gpus": selected_gpus,
+        },
+    )
     runtime_environment_root = preflight.parent / "runtime-environments"
     runtime_environments: dict[str, Path] = {}
     runtime_environment_records: dict[str, dict[str, str]] = {}
@@ -561,6 +586,12 @@ def runtime_evidence(tmp_path: Path) -> RuntimeEvidence:
             "created_at_utc": _NOW,
             "stage_started_at_utc": _NOW,
             "project_commit": commit,
+            "gpu_preflight": {
+                "path": str(gpu_preflight.resolve()),
+                "sha256": sha256(gpu_preflight),
+                "cuda_visible_devices": "0,1",
+                "selected_gpus": selected_gpus,
+            },
             "config": {
                 "path": str(config.resolve()),
                 "sha256": sha256(config),
@@ -597,6 +628,7 @@ def runtime_evidence(tmp_path: Path) -> RuntimeEvidence:
         source_file=source_file,
         layout_file=layout_file,
         preflight=preflight,
+        gpu_preflight=gpu_preflight,
         runtime_environments=runtime_environments,
         commit=commit,
     )
@@ -618,6 +650,18 @@ def _refresh_preflight_record(
 ) -> None:
     preflight = _read_json(evidence.preflight)
     preflight[record_name]["sha256"] = sha256(path)
+    _write_json(evidence.preflight, preflight)
+
+
+def _refresh_gpu_preflight_binding(evidence: RuntimeEvidence) -> None:
+    gpu_document = _read_json(evidence.gpu_preflight)
+    preflight = _read_json(evidence.preflight)
+    preflight["gpu_preflight"] = {
+        "path": str(evidence.gpu_preflight.resolve()),
+        "sha256": sha256(evidence.gpu_preflight),
+        "cuda_visible_devices": gpu_document.get("cuda_visible_devices"),
+        "selected_gpus": gpu_document.get("selected_gpus"),
+    }
     _write_json(evidence.preflight, preflight)
 
 
@@ -678,11 +722,22 @@ def test_runtime_preflight_accepts_a_complete_current_evidence_chain(
     runtime_evidence: RuntimeEvidence,
 ) -> None:
     result = _validate(runtime_evidence)
+    gpu_document = _read_json(runtime_evidence.gpu_preflight)
+    gpu_binding = {
+        "schema_version": 1,
+        "receipt_path": str(runtime_evidence.gpu_preflight.resolve()),
+        "receipt_sha256": sha256(runtime_evidence.gpu_preflight),
+        "cuda_visible_devices": "0,1",
+        "selectors": ["0", "1"],
+        "selected_gpus": gpu_document["selected_gpus"],
+    }
 
     assert result == {
         "runtime_evidence_verified": True,
         "runtime_preflight_receipt": str(runtime_evidence.preflight.resolve()),
         "runtime_preflight_sha256": sha256(runtime_evidence.preflight),
+        "gpu_preflight_receipt_sha256": sha256(runtime_evidence.gpu_preflight),
+        "gpu_preflight_binding": gpu_binding,
         "bootstrap_receipt_sha256": sha256(runtime_evidence.bootstrap),
         "runtime_environment_receipt_sha256": {
             name: sha256(path) for name, path in runtime_evidence.runtime_environments.items()
@@ -699,12 +754,73 @@ def test_runtime_preflight_accepts_a_complete_current_evidence_chain(
     }
 
 
+def test_runtime_preflight_rejects_a_deleted_gpu_receipt(
+    runtime_evidence: RuntimeEvidence,
+) -> None:
+    runtime_evidence.gpu_preflight.unlink()
+
+    with pytest.raises(RuntimePreflightError, match="GPU preflight receipt"):
+        _validate(runtime_evidence)
+
+
+def test_runtime_preflight_rejects_gpu_receipt_tampering(
+    runtime_evidence: RuntimeEvidence,
+) -> None:
+    gpu_document = _read_json(runtime_evidence.gpu_preflight)
+    gpu_document["status"] = "failed"
+    _write_json(runtime_evidence.gpu_preflight, gpu_document)
+
+    with pytest.raises(RuntimePreflightError, match="digest mismatch"):
+        _validate(runtime_evidence)
+
+
+def test_runtime_preflight_rejects_a_rebound_gpu_topology(
+    runtime_evidence: RuntimeEvidence,
+) -> None:
+    gpu_document = _read_json(runtime_evidence.gpu_preflight)
+    selected = gpu_document["selected_gpus"]
+    assert isinstance(selected, list)
+    assert isinstance(selected[1], dict)
+    selected[1]["physical_index"] = "2"
+    gpu_document["cuda_visible_devices"] = "0,2"
+    _write_json(runtime_evidence.gpu_preflight, gpu_document)
+    _refresh_gpu_preflight_binding(runtime_evidence)
+
+    with pytest.raises(RuntimePreflightError, match="logical and physical 0,1 topology"):
+        _validate(runtime_evidence)
+
+
+def test_runtime_execution_binding_contains_the_normalized_gpu_identity(
+    runtime_evidence: RuntimeEvidence,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        provenance,
+        "_runtime_profile_binding",
+        lambda **_kwargs: ({"schema_version": 1}, object()),
+    )
+
+    result = validate_runtime_preflight(
+        runtime_evidence.preflight,
+        config_path=runtime_evidence.config,
+        project_root=runtime_evidence.root,
+        require_runtime_profile=True,
+    )
+
+    gpu_binding = result["gpu_preflight_binding"]
+    assert result["runtime_execution_binding"]["gpu_preflight"] == gpu_binding
+    assert result["runtime_execution_binding_sha256"] == provenance._canonical_sha256(
+        result["runtime_execution_binding"]
+    )
+
+
 def test_runtime_preflight_opens_each_json_receipt_once(
     runtime_evidence: RuntimeEvidence,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     receipt_paths = {
         runtime_evidence.preflight.resolve(),
+        runtime_evidence.gpu_preflight.resolve(),
         runtime_evidence.bootstrap.resolve(),
         runtime_evidence.materialization.resolve(),
         runtime_evidence.marker.resolve(),
@@ -1415,6 +1531,7 @@ def _create_profile_files(
         (root / relative).mkdir(parents=True)
     for relative in (
         "third_party/overlays/4kagent/run_native_restoration.py",
+        "third_party/overlays/4kagent/scheduler_client.py",
         "third_party/overlays/4kagent/serve_depictqa_eval.py",
         "third_party/overlays/chain-of-zoom/coz_session_worker.py",
     ):

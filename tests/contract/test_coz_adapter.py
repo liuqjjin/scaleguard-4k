@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import io
 import json
 import os
@@ -11,6 +12,7 @@ from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -54,6 +56,56 @@ def evidence(argv: Sequence[str], cwd: Path, log_dir: Path, label: str) -> Proce
         stdout_path=str(stdout),
         stderr_path=str(stderr),
     )
+
+
+def worker_metadata(
+    source: Path,
+    output: Path,
+    *,
+    seed: int,
+    step_index: int,
+    root_sha256: str | None = None,
+) -> dict[str, Any]:
+    with Image.open(source) as source_image, Image.open(output) as output_image:
+        source_size = list(source_image.size)
+        output_size = list(output_image.size)
+    placements = {
+        name: {"device": "cuda:0", "dtype": "torch.float32"}
+        for name in (
+            "text_encoder_1",
+            "text_encoder_2",
+            "text_encoder_3",
+            "transformer",
+            "vae",
+            "vlm_first_parameter",
+        )
+    }
+    return {
+        "source_size": source_size,
+        "output_size": output_size,
+        "seed": seed,
+        "step_index": step_index,
+        "root_sha256": root_sha256 or file_sha256(source),
+        "input_sha256": file_sha256(source),
+        "candidate_sha256": file_sha256(output),
+        "prompts": ["fixture prompt"],
+        "duration_seconds": 0.1,
+        "peak_torch_allocated_mib": {"0": 1024, "1": 2048},
+        "requested_precision": "fp32",
+        "actual_precision": {"transformer": "torch.float32", "vae": "torch.float32"},
+        "component_placement": placements,
+        "semantic_anchor": str(source.parent / "semantic_anchor.png"),
+        "gpu_inventory": [
+            {
+                "logical_index": str(index),
+                "uuid": f"GPU-{index}",
+                "name": "fixture-gpu",
+                "memory_total_mib": "24564",
+            }
+            for index in range(2)
+        ],
+        "mock": False,
+    }
 
 
 def test_coz_backend_requires_a_checkout_and_selects_the_configured_session(
@@ -128,17 +180,7 @@ def test_one_shot_coz_contract_builds_a_single_scale_request(
             image.resize((image.width * 4, image.height * 4)).save(output, "PNG")
         metadata.parent.mkdir(parents=True, exist_ok=True)
         metadata.write_text(
-            json.dumps(
-                {
-                    "prompt": "fake prompt",
-                    "seed": 42,
-                    "step_index": 2,
-                    "input_sha256": file_sha256(private_input),
-                    "candidate_sha256": file_sha256(output),
-                    "requested_precision": "fp32",
-                    "mock": False,
-                }
-            ),
+            json.dumps(worker_metadata(private_input, output, seed=42, step_index=2)),
             encoding="utf-8",
         )
         return evidence(argv, cwd, log_dir, label)
@@ -153,15 +195,14 @@ def test_one_shot_coz_contract_builds_a_single_scale_request(
     assert (result.image.width, result.image.height) == (20, 12)
     assert result.image.mock is False
     assert result.metadata == {
+        **worker_metadata(
+            tmp_path / "run/workers/coz/step_02/input.png",
+            destination,
+            seed=42,
+            step_index=2,
+        ),
         "backend": "chain_of_zoom_subprocess",
         "persistent": False,
-        "prompt": "fake prompt",
-        "seed": 42,
-        "step_index": 2,
-        "input_sha256": file_sha256(tmp_path / "run/workers/coz/step_02/input.png"),
-        "candidate_sha256": file_sha256(destination),
-        "requested_precision": "fp32",
-        "mock": False,
     }
     assert result.process is not None
 
@@ -241,13 +282,26 @@ class MemoryStdout:
 
 class MemoryProcess:
     def __init__(self, *, ready: bool = False, wait_returncode: int = 0) -> None:
-        initial = [json.dumps({"status": "ready"}) + "\n"] if ready else []
+        initial = (
+            [
+                json.dumps(
+                    {
+                        "status": "ready",
+                        "initialization_duration_seconds": 0.25,
+                    }
+                )
+                + "\n"
+            ]
+            if ready
+            else []
+        )
         self.stdout = MemoryStdout(initial)
         self.stdin = MemoryStdin(self)
         self.requests: list[dict[str, Any]] = []
         self.returncode: int | None = None
         self.wait_returncode = wait_returncode
         self.pid = 999_999
+        self.root_sha256: str | None = None
 
     def poll(self) -> int | None:
         return self.returncode
@@ -279,18 +333,18 @@ class MemoryStdin:
             output.parent.mkdir(parents=True, exist_ok=True)
             with Image.open(source) as image:
                 image.resize((image.width * 4, image.height * 4)).save(output, "PNG")
+            if self.process.root_sha256 is None:
+                self.process.root_sha256 = file_sha256(source)
             response.update(
                 {
                     "output": str(output.resolve()),
-                    "metadata": {
-                        "prompt": "memory protocol",
-                        "seed": request["seed"],
-                        "step_index": request["step_index"],
-                        "input_sha256": file_sha256(source),
-                        "candidate_sha256": file_sha256(output),
-                        "requested_precision": "fp32",
-                        "mock": False,
-                    },
+                    "metadata": worker_metadata(
+                        source,
+                        output,
+                        seed=request["seed"],
+                        step_index=request["step_index"],
+                        root_sha256=self.process.root_sha256,
+                    ),
                 }
             )
         self.process.stdout.lines.append(json.dumps(response) + "\n")
@@ -329,15 +383,14 @@ def test_persistent_coz_full_protocol_lifecycle_uses_an_in_memory_worker(
     with session:
         result = session.upscale_once(source, destination, step_index=1, seed=41)
         session.accept(result, step_index=1)
-        session.rollback(step_index=1)
 
     assert (result.image.width, result.image.height) == (16, 12)
     assert result.metadata["persistent"] is True
+    assert result.metadata["initialization_duration_seconds"] == 0.25
     assert [request["op"] for request in process.requests] == [
         "health",
         "upscale",
         "accept",
-        "rollback",
         "close",
     ]
     assert popen_calls[0][1]["env"]["CUDA_VISIBLE_DEVICES"] == "0,1"
@@ -357,17 +410,96 @@ def test_persistent_coz_full_protocol_lifecycle_uses_an_in_memory_worker(
     assert process.stdout.closed is True
 
 
+def test_jsonl_worker_ready_response_records_initialization_duration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker_path = (
+        Path(__file__).parents[2]
+        / "third_party"
+        / "overlays"
+        / "chain-of-zoom"
+        / "coz_session_worker.py"
+    )
+    spec = importlib.util.spec_from_file_location("scaleguard_test_coz_worker", worker_path)
+    assert spec is not None
+    assert spec.loader is not None
+    worker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(worker)
+
+    class Session:
+        def __init__(self, _args: object) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(worker, "CoZSession", Session)
+    monkeypatch.setattr(
+        worker.sys,
+        "stdin",
+        io.StringIO('{"request_id":"close-1","op":"close"}\n'),
+    )
+    protocol = io.StringIO()
+    arguments = SimpleNamespace(
+        strict_json_helper=(Path(__file__).parents[2] / "src" / "scaleguard" / "strict_json.py")
+    )
+
+    assert worker.run_jsonl(arguments, protocol) == 0
+
+    ready, closed = [json.loads(line) for line in protocol.getvalue().splitlines()]
+    duration = ready["initialization_duration_seconds"]
+    assert ready["status"] == "ready"
+    assert isinstance(duration, float)
+    assert duration >= 0.0
+    assert closed == {"request_id": "close-1", "status": "ok", "op": "close"}
+
+
+def test_persistent_initialization_duration_is_bound_to_the_first_step_only(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = MemoryProcess(ready=True)
+    monkeypatch.setattr(
+        "scaleguard.backends.coz.subprocess.Popen",
+        lambda *_args, **_kwargs: process,
+    )
+    source = make_image(tmp_path / "source.png", size=(3, 2))
+    first_destination = tmp_path / "candidate-1.png"
+    second_destination = tmp_path / "candidate-2.png"
+    session = bare_persistent_session(tmp_path)
+
+    with session:
+        first = session.upscale_once(source, first_destination, step_index=1, seed=41)
+        session.accept(first, step_index=1)
+        second = session.upscale_once(
+            first.image.path,
+            second_destination,
+            step_index=2,
+            seed=42,
+        )
+        session.accept(second, step_index=2)
+
+    assert first.metadata["initialization_duration_seconds"] == 0.25
+    assert "initialization_duration_seconds" not in second.metadata
+
+
 @pytest.mark.parametrize(
     ("ready_payload", "health_outcome", "message"),
     [
         ({"status": "not-ready"}, {"status": "ok"}, "did not become ready"),
-        ({"status": "ready"}, {"status": "error"}, "failed health check"),
+        (
+            {"status": "ready", "initialization_duration_seconds": 0.25},
+            {"status": "error"},
+            "failed health check",
+        ),
     ],
 )
 def test_persistent_coz_startup_failure_terminates_and_closes_every_stream(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    ready_payload: dict[str, str],
+    ready_payload: dict[str, Any],
     health_outcome: dict[str, str],
     message: str,
 ) -> None:
@@ -391,6 +523,41 @@ def test_persistent_coz_startup_failure_terminates_and_closes_every_stream(
     assert process.stdout.closed is True
     assert session.protocol_log is None
     assert session.stderr_stream is None
+
+
+@pytest.mark.parametrize(
+    "invalid_duration",
+    [None, True, -0.01, "0.25", 10**400],
+)
+def test_persistent_coz_rejects_invalid_initialization_duration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_duration: object,
+) -> None:
+    process = MemoryProcess()
+    process.stdout.lines.append(
+        json.dumps(
+            {
+                "status": "ready",
+                "initialization_duration_seconds": invalid_duration,
+            }
+        )
+        + "\n"
+    )
+    session = bare_persistent_session(tmp_path)
+    terminated: list[bool] = []
+    monkeypatch.setattr(
+        "scaleguard.backends.coz.subprocess.Popen",
+        lambda *_args, **_kwargs: process,
+    )
+    monkeypatch.setattr(session, "_terminate", lambda: terminated.append(True))
+
+    with pytest.raises(WorkerError, match="invalid initialization_duration_seconds"):
+        session.__enter__()
+
+    assert terminated == [True]
+    assert process.stdin.closed is True
+    assert process.stdout.closed is True
 
 
 def test_persistent_coz_nonzero_exit_after_close_invalidates_the_session(
@@ -476,9 +643,13 @@ def test_persistent_response_rejects_closed_or_malformed_protocol(
     process.stdout.lines.append(line)
     session.process = process  # type: ignore[assignment]
     session.protocol_log = io.StringIO()
+    terminated: list[bool] = []
+    monkeypatch.setattr(session, "_terminate", lambda: terminated.append(True))
 
     with pytest.raises(WorkerError, match=message):
         session._read_response(0.1)
+
+    assert terminated == [True]
 
 
 def test_persistent_response_timeout_raises_without_touching_a_gpu_process(
@@ -592,10 +763,13 @@ def test_persistent_scale_and_state_operations_validate_worker_responses(
     )
     with pytest.raises(WorkerError, match="persistent step 1 failed"):
         session.upscale_once(source, candidate, step_index=1, seed=0)
+    session._pending_step = (1, result.image.sha256)
     with pytest.raises(WorkerError, match="rejected candidate"):
         session.accept(result, step_index=1)
+    session._pending_step = (1, result.image.sha256)
     with pytest.raises(WorkerError, match="rejected rollback"):
         session.rollback(step_index=1)
+    session._pending_step = None
 
     monkeypatch.setattr(
         session,
@@ -620,3 +794,27 @@ def test_persistent_scale_and_state_operations_validate_worker_responses(
     )
     with pytest.raises(ArtifactError, match="invalid metadata"):
         session.upscale_once(source, candidate, step_index=1, seed=0)
+
+
+def test_persistent_decision_is_exactly_once_per_pending_candidate(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = make_image(tmp_path / "candidate.png")
+    result = WorkerResult(image=inspect_image(candidate, mock=False, stage="candidate"))
+    session = bare_persistent_session(tmp_path)
+    operations: list[str] = []
+
+    def request(operation: str, **_payload: object) -> dict[str, str]:
+        operations.append(operation)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(session, "_request", request)
+    session._pending_step = (1, result.image.sha256)
+    session.accept(result, step_index=1)
+
+    with pytest.raises(WorkerError, match="does not match the session's pending step"):
+        session.rollback(step_index=1)
+
+    assert operations == ["accept"]

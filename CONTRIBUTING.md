@@ -37,7 +37,7 @@ maintenance cost, license review, and reproducible identity.
 
 ## Development setup
 
-Use Python 3.10 or newer and `uv`:
+Use Python 3.10–3.14 and `uv`:
 
 ```bash
 uv sync --locked --extra dev

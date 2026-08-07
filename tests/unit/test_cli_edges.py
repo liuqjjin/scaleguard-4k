@@ -198,6 +198,7 @@ def test_run_command_requires_the_controller_run_directory(
     source = tmp_path / "input.png"
     source.write_bytes(b"input")
     args = _run_args(tmp_path, source)
+    args.overwrite = True
     config = SimpleNamespace(is_mock=True)
     monkeypatch.setattr(cli, "load_config", lambda _path: config)
     monkeypatch.setattr(cli, "_override_target", lambda value, _target: value)
@@ -205,18 +206,28 @@ def test_run_command_requires_the_controller_run_directory(
 
     class Controller:
         last_run_dir = None
+        received_overwrite: bool | None = None
 
         def __init__(self, *_args: Any, **_kwargs: Any) -> None:
             pass
 
-        def run(self, _source: Path, destination: Path, *, run_id: str) -> Path:
+        def run(
+            self,
+            _source: Path,
+            destination: Path,
+            *,
+            run_id: str,
+            overwrite: bool,
+        ) -> Path:
             del run_id
+            type(self).received_overwrite = overwrite
             return destination
 
     monkeypatch.setattr(cli, "TrustedScaleController", Controller)
 
     with pytest.raises(ScaleGuardError, match="did not retain a run directory"):
         cli._run_command(args, tmp_path)
+    assert Controller.received_overwrite is True
 
 
 @pytest.mark.parametrize(

@@ -30,6 +30,7 @@ def metrics(**overrides: float | None) -> MetricRecord:
         "quality_candidate": 0.4,
         "quality_gain": 0.1,
         "quality_backend": "test",
+        "quality_identity_sha256": "a" * 64,
         "scale_nrmse": 0.02,
         "scale_edge_mae": 0.01,
         "measurement_nrmse": None,

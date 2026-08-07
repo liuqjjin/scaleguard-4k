@@ -7,6 +7,7 @@ import csv
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import stat
@@ -14,7 +15,8 @@ import subprocess
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +37,7 @@ from scaleguard.strict_yaml import loads as load_strict_yaml
 PROTOCOL_SCHEMA = "1.0"
 RECEIPT_SCHEMA = "scaleguard.ablation-suite/v1"
 INTEGRATION_RUNNER = "scripts/autodl/run_experiment.sh"
+PROTOCOL_NAME = "core-ablation"
 GROUP_IDS = EXPERIMENT_GROUPS
 
 
@@ -133,6 +136,21 @@ _PAIRED_REQUIREMENT_KEYS = {
     "no_metric_imputation",
 }
 _METRIC_KEYS = {"full_reference", "no_reference", "consistency", "systems"}
+_METRIC_CONTRACT = {
+    "full_reference": ("psnr", "ssim", "lpips"),
+    "no_reference": ("musiq", "clipiqa"),
+    "consistency": ("scale_nrmse", "scale_edge_mae", "measurement_nrmse"),
+    "systems": (
+        "success_rate",
+        "stop_rate",
+        "rollback_rate",
+        "wall_time_seconds",
+        "coz_initialization_seconds",
+        "coz_first_step_seconds",
+        "coz_steady_step_seconds",
+        "peak_vram_mib",
+    ),
+}
 _BASE_CONFIG_SECTIONS = {"runtime", "fourkagent", "coz", "metrics", "controller"}
 _SAFE_SAMPLE_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._-")
 _DIGEST_PATTERN = re.compile(r"[0-9a-f]{64}")
@@ -151,6 +169,7 @@ _ATTEMPT_FILE_RELATIVE_PATHS = {
 }
 _PARSED_ATTEMPT_FILE_ROLES = {
     "execution",
+    "gpu_samples",
     "run_manifest",
     "model_evidence",
     "gpu_inventory",
@@ -375,6 +394,10 @@ def load_ablation_protocol(path: Path) -> AblationProtocol:
             f"ablation protocol schema_version must be {PROTOCOL_SCHEMA!r}"
         )
     name = _require_text(root["name"], "ablation protocol.name")
+    if name != PROTOCOL_NAME:
+        raise ExperimentProtocolError(
+            f"ablation protocol.name must be the fixed protocol {PROTOCOL_NAME!r}"
+        )
     if root["status"] != "executable":
         raise ExperimentProtocolError("ablation protocol.status must be 'executable'")
     if root["integration_runner"] != INTEGRATION_RUNNER:
@@ -451,6 +474,10 @@ def load_ablation_protocol(path: Path) -> AblationProtocol:
                 f"ablation protocol.metrics.{metric_family} must be a non-empty unique string list"
             )
         metrics[metric_family] = tuple(raw_names)
+    if metrics != _METRIC_CONTRACT:
+        raise ExperimentProtocolError(
+            "ablation protocol.metrics disagrees with the executable metric contract"
+        )
 
     raw_notes = root["notes"]
     if (
@@ -498,6 +525,10 @@ def _load_base_config(path: Path) -> tuple[Path, int, str, dict[str, Any]]:
         raise ExperimentProtocolError("base config.fourkagent.mode must be 'upstream'")
     if sections["coz"].get("mode") != "persistent":
         raise ExperimentProtocolError("base config.coz.mode must be 'persistent'")
+    try:
+        load_config(resolved)
+    except ScaleGuardError as error:
+        raise ExperimentProtocolError(f"invalid base config {resolved}: {error}") from error
     return resolved, len(payload), _sha256_bytes(payload), root
 
 
@@ -699,8 +730,21 @@ def _atomic_write(path: Path, payload: bytes) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
+        _fsync_directory(path.parent)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _copy_input_snapshot(source: _InputSource, destination: Path) -> None:
@@ -727,6 +771,7 @@ def _copy_input_snapshot(source: _InputSource, destination: Path) -> None:
                         f"input changed before snapshotting: {source.path}"
                     )
                 os.replace(temporary, destination)
+                _fsync_directory(destination.parent)
             finally:
                 temporary.unlink(missing_ok=True)
     except OSError as error:
@@ -1488,6 +1533,398 @@ def _validate_attempt_execution(
     return []
 
 
+def _validate_attempt_system_evidence(
+    execution_payload: bytes,
+    gpu_samples_payload: bytes,
+    hardware: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    try:
+        execution = loads_object(execution_payload)
+        duration_seconds = _require_integer(
+            execution.get("duration_seconds"),
+            "wrapper attempt execution.duration_seconds",
+        )
+        if duration_seconds < 0:
+            raise ExperimentProtocolError(
+                "wrapper attempt execution.duration_seconds must be non-negative"
+            )
+        sampling = _require_mapping(
+            execution.get("gpu_sampling"),
+            "wrapper attempt execution.gpu_sampling",
+        )
+        _require_exact_keys(
+            sampling,
+            {
+                "sample_count",
+                "sample_interval_seconds",
+                "window_started_at_utc",
+                "window_completed_at_utc",
+                "window_duration_seconds",
+                "boundary_tolerance_seconds",
+                "maximum_gap_tolerance_seconds",
+                "maximum_observed_gap_seconds",
+                "temporal_coverage_complete",
+                "minimum_gpu_count",
+                "preflight_receipt_bound",
+                "inventory_binding_complete",
+                "workload_sampling_complete",
+                "workload_observed_by_uuid",
+                "workload_samples_by_uuid",
+                "attribution_scope",
+                "evidence_complete",
+                "peak_by_physical_index",
+                "raw_csv",
+            },
+            "wrapper attempt execution.gpu_sampling",
+        )
+        sample_count = _require_integer(
+            sampling["sample_count"],
+            "wrapper attempt execution.gpu_sampling.sample_count",
+        )
+        minimum_gpu_count = _require_integer(
+            sampling["minimum_gpu_count"],
+            "wrapper attempt execution.gpu_sampling.minimum_gpu_count",
+        )
+        interval = sampling["sample_interval_seconds"]
+        if (
+            isinstance(interval, bool)
+            or not isinstance(interval, (int, float))
+            or not math.isfinite(float(interval))
+            or not 0.1 <= float(interval) <= 60.0
+        ):
+            raise ExperimentProtocolError(
+                "wrapper attempt GPU sample interval is outside the audited range"
+            )
+        interval_seconds = float(interval)
+        execution_started_text = _require_text(
+            execution.get("started_at_utc"),
+            "wrapper attempt execution.started_at_utc",
+        )
+        execution_completed_text = _require_text(
+            execution.get("completed_at_utc"),
+            "wrapper attempt execution.completed_at_utc",
+        )
+        window_started_text = _require_text(
+            sampling["window_started_at_utc"],
+            "wrapper attempt GPU sampling window_started_at_utc",
+        )
+        window_completed_text = _require_text(
+            sampling["window_completed_at_utc"],
+            "wrapper attempt GPU sampling window_completed_at_utc",
+        )
+        if not all(
+            value.endswith("Z")
+            for value in (
+                execution_started_text,
+                execution_completed_text,
+                window_started_text,
+                window_completed_text,
+            )
+        ):
+            raise ExperimentProtocolError(
+                "wrapper attempt GPU sampling timestamps must use canonical UTC"
+            )
+        execution_started = _require_timestamp(
+            execution_started_text,
+            "wrapper attempt execution.started_at_utc",
+        )
+        execution_completed = _require_timestamp(
+            execution_completed_text,
+            "wrapper attempt execution.completed_at_utc",
+        )
+        window_started = _require_timestamp(
+            window_started_text,
+            "wrapper attempt GPU sampling window_started_at_utc",
+        )
+        window_completed = _require_timestamp(
+            window_completed_text,
+            "wrapper attempt GPU sampling window_completed_at_utc",
+        )
+        window_duration = sampling["window_duration_seconds"]
+        boundary_tolerance = sampling["boundary_tolerance_seconds"]
+        maximum_gap_tolerance = sampling["maximum_gap_tolerance_seconds"]
+        maximum_observed_gap = sampling["maximum_observed_gap_seconds"]
+        temporal_numbers = {
+            "window_duration_seconds": window_duration,
+            "boundary_tolerance_seconds": boundary_tolerance,
+            "maximum_gap_tolerance_seconds": maximum_gap_tolerance,
+            "maximum_observed_gap_seconds": maximum_observed_gap,
+        }
+        if any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) < 0.0
+            for value in temporal_numbers.values()
+        ):
+            raise ExperimentProtocolError(
+                "wrapper attempt GPU sampling temporal fields must be finite and non-negative"
+            )
+        expected_window_duration = (window_completed - window_started).total_seconds()
+        expected_boundary_tolerance = max(5.0, interval_seconds * 1.5)
+        expected_gap_tolerance = max(1.0, interval_seconds * 2.0)
+        if (
+            expected_window_duration < 0.0
+            or execution_completed < execution_started
+            or window_started < execution_started - timedelta(seconds=1)
+            or window_completed > execution_completed + timedelta(seconds=1)
+            or expected_window_duration > duration_seconds + 1.0
+            or not math.isclose(
+                float(window_duration),
+                expected_window_duration,
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            )
+            or not math.isclose(
+                float(boundary_tolerance),
+                expected_boundary_tolerance,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+            or not math.isclose(
+                float(maximum_gap_tolerance),
+                expected_gap_tolerance,
+                rel_tol=0.0,
+                abs_tol=1e-12,
+            )
+        ):
+            raise ExperimentProtocolError(
+                "wrapper attempt GPU sampling window is not bound to execution"
+            )
+        for field in (
+            "preflight_receipt_bound",
+            "inventory_binding_complete",
+            "workload_sampling_complete",
+            "temporal_coverage_complete",
+            "evidence_complete",
+        ):
+            if sampling[field] is not True:
+                raise ExperimentProtocolError(
+                    f"wrapper attempt execution.gpu_sampling.{field} must be true"
+                )
+        if (
+            sampling["attribution_scope"] != "physical_gpu_host_level_not_process_attributed"
+            or sampling["raw_csv"] != "gpu-samples.csv"
+        ):
+            raise ExperimentProtocolError("wrapper attempt GPU sampling scope is invalid")
+
+        selected_raw = hardware.get("selected_gpus")
+        selected_count = hardware.get("selected_gpu_count")
+        if (
+            not isinstance(selected_raw, list)
+            or type(selected_count) is not int
+            or selected_count != minimum_gpu_count
+            or minimum_gpu_count != 2
+            or len(selected_raw) != selected_count
+        ):
+            raise ExperimentProtocolError(
+                "wrapper attempt GPU sampling does not cover the selected topology"
+            )
+        selected_by_uuid: dict[str, dict[str, Any]] = {}
+        selected_by_physical: dict[str, dict[str, Any]] = {}
+        for raw_gpu in selected_raw:
+            gpu = _require_mapping(raw_gpu, "wrapper attempt selected GPU")
+            uuid = _require_text(gpu.get("uuid"), "wrapper attempt selected GPU uuid")
+            physical = _require_text(
+                gpu.get("physical_index"),
+                "wrapper attempt selected GPU physical index",
+            )
+            selected_by_uuid[uuid] = gpu
+            selected_by_physical[physical] = gpu
+        if len(selected_by_uuid) != 2 or len(selected_by_physical) != 2:
+            raise ExperimentProtocolError("wrapper attempt selected GPU identity is duplicated")
+
+        observed_raw = _require_mapping(
+            sampling["workload_observed_by_uuid"],
+            "wrapper attempt workload observations",
+        )
+        samples_raw = _require_mapping(
+            sampling["workload_samples_by_uuid"],
+            "wrapper attempt workload sample counts",
+        )
+        if set(observed_raw) != set(selected_by_uuid) or set(samples_raw) != set(selected_by_uuid):
+            raise ExperimentProtocolError(
+                "wrapper attempt workload maps do not match selected GPUs"
+            )
+        if any(value is not True for value in observed_raw.values()) or any(
+            type(value) is not int or value <= 0 for value in samples_raw.values()
+        ):
+            raise ExperimentProtocolError("wrapper attempt has incomplete GPU workload evidence")
+
+        peaks_raw = _require_mapping(
+            sampling["peak_by_physical_index"],
+            "wrapper attempt GPU peaks",
+        )
+        if set(peaks_raw) != set(selected_by_physical):
+            raise ExperimentProtocolError("wrapper attempt GPU peaks do not cover selected devices")
+
+        csv_text = gpu_samples_payload.decode("utf-8", errors="strict")
+        reader = csv.DictReader(io.StringIO(csv_text, newline=""))
+        expected_fields = [
+            "timestamp_utc",
+            "sample_kind",
+            "index",
+            "uuid",
+            "name",
+            "memory_used_mib",
+            "memory_total_mib",
+            "utilization_gpu_percent",
+        ]
+        if reader.fieldnames != expected_fields:
+            raise ExperimentProtocolError("wrapper attempt gpu-samples.csv header is invalid")
+        derived_peaks: dict[str, dict[str, Any]] = {}
+        baseline_by_uuid: dict[str, int] = {}
+        derived_inventory_counts = dict.fromkeys(selected_by_uuid, 0)
+        derived_workload_counts = dict.fromkeys(selected_by_uuid, 0)
+        derived_workload_observed = dict.fromkeys(selected_by_uuid, False)
+        sample_times_by_uuid: dict[str, list[datetime]] = {uuid: [] for uuid in selected_by_uuid}
+        observed_rows = 0
+        for index, row in enumerate(reader):
+            if set(row) != set(expected_fields) or any(value is None for value in row.values()):
+                raise ExperimentProtocolError(
+                    f"wrapper attempt gpu-samples.csv row {index} is malformed"
+                )
+            try:
+                timestamp_text = row["timestamp_utc"].strip()
+                if not timestamp_text.endswith("Z"):
+                    raise ValueError("GPU sample timestamp is not canonical UTC")
+                timestamp = datetime.fromisoformat(timestamp_text[:-1] + "+00:00")
+                memory_used = int(float(row["memory_used_mib"]))
+                memory_total = int(float(row["memory_total_mib"]))
+                utilization = int(float(row["utilization_gpu_percent"]))
+            except (TypeError, ValueError) as error:
+                raise ExperimentProtocolError(
+                    f"wrapper attempt gpu-samples.csv row {index} has invalid values"
+                ) from error
+            uuid = row["uuid"].strip()
+            physical = row["index"].strip()
+            sample_kind = row["sample_kind"].strip()
+            selected = selected_by_uuid.get(uuid)
+            if (
+                timestamp.tzinfo is None
+                or selected is None
+                or selected.get("physical_index") != physical
+                or selected.get("name") != row["name"].strip()
+                or selected.get("memory_total_mib") != memory_total
+                or sample_kind not in {"inventory", "workload"}
+                or memory_used < 0
+                or memory_total <= 0
+                or memory_used > memory_total
+                or not 0 <= utilization <= 100
+            ):
+                raise ExperimentProtocolError(
+                    f"wrapper attempt gpu-samples.csv row {index} violates GPU identity"
+                )
+            observed_rows += 1
+            timestamps = sample_times_by_uuid[uuid]
+            timestamp = timestamp.astimezone(timezone.utc)
+            if timestamps and timestamp < timestamps[-1]:
+                raise ExperimentProtocolError(
+                    "wrapper attempt GPU sample timestamps are not monotonic"
+                )
+            timestamps.append(timestamp)
+            peak = derived_peaks.setdefault(
+                physical,
+                {
+                    "uuid": uuid,
+                    "name": selected["name"],
+                    "memory_total_mib": memory_total,
+                    "peak_memory_used_mib": 0,
+                    "peak_utilization_percent": 0,
+                },
+            )
+            peak["peak_memory_used_mib"] = max(peak["peak_memory_used_mib"], memory_used)
+            peak["peak_utilization_percent"] = max(peak["peak_utilization_percent"], utilization)
+            if sample_kind == "inventory":
+                derived_inventory_counts[uuid] += 1
+                baseline_by_uuid.setdefault(uuid, memory_used)
+            else:
+                derived_workload_counts[uuid] += 1
+                baseline = baseline_by_uuid.get(uuid)
+                if baseline is not None and (utilization > 0 or memory_used > baseline + 16):
+                    derived_workload_observed[uuid] = True
+
+        derived_maximum_gap = 0.0
+        for uuid, timestamps in sample_times_by_uuid.items():
+            if not timestamps:
+                raise ExperimentProtocolError(f"wrapper attempt GPU {uuid} has no temporal samples")
+            if (
+                abs((timestamps[0] - window_started).total_seconds()) > expected_boundary_tolerance
+                or abs((timestamps[-1] - window_completed).total_seconds())
+                > expected_boundary_tolerance
+            ):
+                raise ExperimentProtocolError(
+                    "wrapper attempt GPU samples do not cover the sampling window"
+                )
+            for before, after in pairwise(timestamps):
+                gap = (after - before).total_seconds()
+                if gap < 0.0:
+                    raise ExperimentProtocolError(
+                        "wrapper attempt GPU sample timestamps are not monotonic"
+                    )
+                derived_maximum_gap = max(derived_maximum_gap, gap)
+        if derived_maximum_gap > expected_gap_tolerance:
+            raise ExperimentProtocolError(
+                "wrapper attempt GPU sampling exceeds the maximum allowed gap"
+            )
+
+        if (
+            observed_rows != sample_count
+            or set(baseline_by_uuid) != set(selected_by_uuid)
+            or any(count != 1 for count in derived_inventory_counts.values())
+            or derived_workload_counts != samples_raw
+            or derived_workload_observed != observed_raw
+            or derived_peaks != peaks_raw
+            or not math.isclose(
+                float(maximum_observed_gap),
+                derived_maximum_gap,
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            )
+        ):
+            raise ExperimentProtocolError(
+                "wrapper attempt GPU summary does not replay from gpu-samples.csv"
+            )
+
+        normalized_peaks: dict[str, dict[str, Any]] = {}
+        for physical, peak in sorted(derived_peaks.items()):
+            selected = selected_by_physical[physical]
+            normalized_peaks[physical] = {
+                "physical_index": physical,
+                "logical_index": selected["logical_index"],
+                "uuid_sha256": hashlib.sha256(peak["uuid"].encode("utf-8")).hexdigest(),
+                "name": peak["name"],
+                "memory_total_mib": peak["memory_total_mib"],
+                "peak_memory_used_mib": peak["peak_memory_used_mib"],
+                "peak_utilization_percent": peak["peak_utilization_percent"],
+            }
+        return {
+            "duration_seconds": duration_seconds,
+            "gpu_sampling": {
+                "attribution_scope": "physical_gpu_host_level_not_process_attributed",
+                "sample_count": sample_count,
+                "sample_interval_seconds": interval_seconds,
+                "window_started_at_utc": window_started_text,
+                "window_completed_at_utc": window_completed_text,
+                "window_duration_seconds": expected_window_duration,
+                "boundary_tolerance_seconds": expected_boundary_tolerance,
+                "maximum_gap_tolerance_seconds": expected_gap_tolerance,
+                "maximum_observed_gap_seconds": derived_maximum_gap,
+                "temporal_coverage_complete": True,
+                "peak_by_physical_index": normalized_peaks,
+            },
+        }, []
+    except (
+        csv.Error,
+        ExperimentProtocolError,
+        KeyError,
+        OSError,
+        UnicodeDecodeError,
+        ValueError,
+    ) as error:
+        return None, [f"wrapper_attempt_system_evidence_invalid:{error}"]
+
+
 def _validate_attempt_model_evidence(
     model_evidence_payload: bytes,
     runtime_preflight_entry: Mapping[str, Any],
@@ -1674,6 +2111,7 @@ def _inspect_wrapper_attempt(
         "completed_at_utc": pointer["completed_at_utc"],
         "files": {},
         "hardware": None,
+        "system_evidence": None,
         "files_inventory_sha256": None,
     }
     if status_value != "succeeded":
@@ -1729,15 +2167,22 @@ def _inspect_wrapper_attempt(
     )
     evidence["hardware"] = hardware
     issues.extend(hardware_issues)
-    issues.extend(
-        _validate_attempt_execution(
-            file_payloads["execution"],
-            files["runtime_preflight"],
-            file_payloads["runtime_preflight"],
-            job=job,
-            project_commit=project_commit,
-        )
+    execution_issues = _validate_attempt_execution(
+        file_payloads["execution"],
+        files["runtime_preflight"],
+        file_payloads["runtime_preflight"],
+        job=job,
+        project_commit=project_commit,
     )
+    issues.extend(execution_issues)
+    if not execution_issues and hardware is not None:
+        system_evidence, system_issues = _validate_attempt_system_evidence(
+            file_payloads["execution"],
+            file_payloads["gpu_samples"],
+            hardware,
+        )
+        evidence["system_evidence"] = system_evidence
+        issues.extend(system_issues)
     issues.extend(
         _validate_attempt_model_evidence(
             file_payloads["model_evidence"],
@@ -1989,6 +2434,13 @@ def run_ablation_suite(
                 )
                 config_payload = _config_bytes(generated)
                 _atomic_write(config_path, config_payload)
+                try:
+                    load_config(config_path)
+                except ScaleGuardError as error:
+                    raise ExperimentProtocolError(
+                        f"generated config failed full validation for {group.id}, "
+                        f"sample {sample_id}: {error}"
+                    ) from error
                 argv = [
                     str(runner),
                     "--config",
@@ -2590,6 +3042,7 @@ def validate_ablation_suite_receipt(path: Path) -> dict[str, Any]:
                     "identity_sha256": hardware["identity_sha256"],
                     "class_sha256": hardware["class_sha256"],
                 },
+                "system_evidence": copy.deepcopy(attempt["system_evidence"]),
             }
         )
         validation_job = copy.deepcopy(job)

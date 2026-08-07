@@ -28,6 +28,8 @@ MAX_FILE_BYTES = 16 * 1024 * 1024
 MAX_SCANNED_PATHS = 20_000
 MAX_COPIED_FILES = 5_000
 MAX_SKIP_DETAILS = 200
+MAX_PRIVATE_PATHS = 100_000
+MAX_PRIVATE_PATH_LENGTH = 16_384
 SECRET_NAMES = (
     "HF_TOKEN",
     "HF_HUB_TOKEN",
@@ -76,21 +78,41 @@ SECRET_PATTERNS = (
 )
 
 
-def private_paths_from_execution(source: pathlib.Path) -> list[str]:
+def bounded_source_paths(source: pathlib.Path) -> tuple[list[pathlib.Path], bool]:
+    """Snapshot the exact bounded tree used for discovery and copying."""
+
+    paths: list[pathlib.Path] = []
+    for path in source.rglob("*"):
+        if len(paths) >= MAX_SCANNED_PATHS:
+            return paths, True
+        paths.append(path)
+    return paths, False
+
+
+def private_paths_from_execution(
+    source: pathlib.Path,
+    source_paths: list[pathlib.Path] | None = None,
+) -> list[str]:
     """Discover user-selected input/output paths from bounded wrapper receipts."""
 
     values: list[str] = []
-    inspected = 0
-    scanned = 0
-    for receipt_path in source.rglob("*"):
-        scanned += 1
-        if scanned > MAX_SCANNED_PATHS:
-            break
+    seen: set[str] = set()
+    if source_paths is None:
+        source_paths, _truncated = bounded_source_paths(source)
+
+    def append(value: object) -> None:
+        if not isinstance(value, str) or not value or value in seen:
+            return
+        if len(value) > MAX_PRIVATE_PATH_LENGTH:
+            raise ValueError("execution receipt contains an overlong private path")
+        if len(values) >= MAX_PRIVATE_PATHS:
+            raise ValueError("execution receipts exceed the private-path redaction budget")
+        seen.add(value)
+        values.append(value)
+
+    for receipt_path in source_paths:
         if receipt_path.name != "execution.json":
             continue
-        inspected += 1
-        if inspected > 100:
-            break
         if receipt_path.is_symlink() or not receipt_path.is_file():
             continue
         try:
@@ -105,17 +127,13 @@ def private_paths_from_execution(source: pathlib.Path) -> list[str]:
         if isinstance(inputs, dict):
             input_image = inputs.get("input_image")
             if isinstance(input_image, dict):
-                value = input_image.get("path")
-                if isinstance(value, str) and value:
-                    values.append(value)
+                append(input_image.get("path"))
         outputs = receipt.get("outputs")
         if isinstance(outputs, list):
             for output in outputs:
                 if not isinstance(output, dict):
                     continue
-                value = output.get("path")
-                if isinstance(value, str) and value:
-                    values.append(value)
+                append(output.get("path"))
     return values
 
 
@@ -201,6 +219,7 @@ def main() -> int:
     if not source.is_dir():
         parser.error(f"source is not a directory: {source}")
     destination.mkdir(parents=True, exist_ok=True)
+    source_paths, scan_truncated = bounded_source_paths(source)
 
     if args.secret_fd is None:
         replacements = [(os.environ.get(name, ""), f"[REDACTED:{name}]") for name in SECRET_NAMES]
@@ -218,7 +237,11 @@ def main() -> int:
             ),
         ]
     )
-    for private_path in private_paths_from_execution(source):
+    try:
+        private_paths = private_paths_from_execution(source, source_paths)
+    except ValueError as exc:
+        parser.error(str(exc))
+    for private_path in private_paths:
         replacements.append((private_path, "$PRIVATE_INPUT_OR_OUTPUT"))
         try:
             replacements.append(
@@ -255,7 +278,7 @@ def main() -> int:
 
     copied = 0
     copied_bytes = 0
-    scanned = 0
+    scanned = len(source_paths)
     copy_file_limit = min(MAX_COPIED_FILES, args.max_copied_files)
     skipped: list[str] = []
     skipped_count = 0
@@ -266,11 +289,9 @@ def main() -> int:
         if len(skipped) < MAX_SKIP_DETAILS:
             skipped.append(message)
 
-    for path in source.rglob("*"):
-        scanned += 1
-        if scanned > MAX_SCANNED_PATHS:
-            record_skip(f"scan stopped after {MAX_SCANNED_PATHS} paths")
-            break
+    if scan_truncated:
+        record_skip(f"scan stopped after {MAX_SCANNED_PATHS} paths")
+    for path in source_paths:
         if copied >= copy_file_limit:
             record_skip(f"copy stopped after {copy_file_limit} files")
             break
@@ -323,7 +344,7 @@ def main() -> int:
 
     # Normalize already-collected system text as a final defense.
     for path in sorted(destination.rglob("*")):
-        if not path.is_file() or path == summary:
+        if not path.is_file():
             continue
         try:
             text = path.read_text(encoding="utf-8")

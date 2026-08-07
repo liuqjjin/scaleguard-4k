@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
 import shutil
@@ -550,6 +551,122 @@ def test_experiment_wrapper_uses_stage_and_preflight_evidence_arguments() -> Non
     )
 
 
+def test_wrapper_gpu_receipt_fails_closed_when_monitor_stops_early(tmp_path: Path) -> None:
+    runner = PROJECT_ROOT / "scripts" / "autodl" / "_run_scaleguard.sh"
+    runner_text = runner.read_text(encoding="utf-8")
+    execution_section = runner_text.split(
+        'python3 -I - \\\n    "${SG_RUN_DIR}/execution.json"',
+        1,
+    )[1]
+    execution_program = execution_section.split("<<'PY'\n", 1)[1].split(
+        '\nPY\n\nif [[ "${sg_command_rc}"',
+        1,
+    )[0]
+
+    commit = "a" * 40
+    selected_gpus = [
+        {
+            "logical_index": index,
+            "physical_index": str(index),
+            "uuid": f"GPU-{index}",
+            "name": "NVIDIA GeForce RTX 4090",
+            "memory_total_mib": 24564,
+            "driver_version": "560.35.03",
+        }
+        for index in range(2)
+    ]
+    gpu_check = tmp_path / "gpu-check.json"
+    gpu_check.write_text(
+        json.dumps(
+            {
+                "status": "passed",
+                "git_commit": commit,
+                "selected_gpus": selected_gpus,
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime_preflight = tmp_path / "runtime-preflight.json"
+    runtime_preflight.write_text(
+        json.dumps(
+            {
+                "gpu_preflight": {
+                    "path": str(gpu_check.resolve()),
+                    "sha256": hashlib.sha256(gpu_check.read_bytes()).hexdigest(),
+                    "selected_gpus": selected_gpus,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    gpu_samples = tmp_path / "gpu-samples.csv"
+    gpu_samples.write_text(
+        "timestamp_utc,sample_kind,index,uuid,name,memory_used_mib,"
+        "memory_total_mib,utilization_gpu_percent\n"
+        "2026-08-08T00:00:00Z,inventory,0,GPU-0,NVIDIA GeForce RTX 4090,"
+        "1024,24564,0\n"
+        "2026-08-08T00:00:00Z,inventory,1,GPU-1,NVIDIA GeForce RTX 4090,"
+        "2048,24564,0\n"
+        "2026-08-08T00:00:01Z,workload,0,GPU-0,NVIDIA GeForce RTX 4090,"
+        "2048,24564,50\n"
+        "2026-08-08T00:00:01Z,workload,1,GPU-1,NVIDIA GeForce RTX 4090,"
+        "3072,24564,60\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / "config.yaml"
+    source = tmp_path / "input.png"
+    upstream_lock = tmp_path / "upstream-lock.yaml"
+    dependency_lock = tmp_path / "runtime-dependencies.yaml"
+    for path in (config, source, upstream_lock, dependency_lock):
+        path.write_bytes(path.name.encode())
+    execution = tmp_path / "execution.json"
+    missing_output = tmp_path / "output.png"
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-",
+            str(execution),
+            "experiment",
+            "1",
+            "1",
+            "0",
+            "0",
+            "2026-08-08T00:00:00Z",
+            "2026-08-08T00:00:42Z",
+            "42",
+            str(gpu_samples),
+            str(config),
+            str(source),
+            str(missing_output),
+            str(upstream_lock),
+            str(dependency_lock),
+            commit,
+            "2",
+            str(gpu_check),
+            str(runtime_preflight),
+            "60",
+            "2026-08-08T00:00:00Z",
+            "2026-08-08T00:00:42Z",
+            "1",
+            str(PROJECT_ROOT / "src"),
+        ],
+        input=execution_program,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    document = json.loads(execution.read_text(encoding="utf-8"))
+    sampling = document["gpu_sampling"]
+    assert sampling["window_duration_seconds"] == 42.0
+    assert sampling["maximum_observed_gap_seconds"] == 1.0
+    assert sampling["temporal_coverage_complete"] is False
+    assert sampling["workload_sampling_complete"] is False
+    assert sampling["evidence_complete"] is False
+
+
 def test_experiment_pointer_is_machine_readable_and_hash_bound(tmp_path: Path) -> None:
     runner = PROJECT_ROOT / "scripts" / "autodl" / "_run_scaleguard.sh"
     runner_text = runner.read_text(encoding="utf-8")
@@ -607,6 +724,20 @@ def test_experiment_pointer_is_machine_readable_and_hash_bound(tmp_path: Path) -
         path.write_text(content, encoding="utf-8")
 
     pointer = tmp_path / "attempt-pointer.json"
+    subprocess.run(
+        [
+            sys.executable,
+            "-",
+            str(pointer),
+            str(attempt),
+            "running",
+            "2026-07-27T00:00:00Z",
+            "",
+        ],
+        input=pointer_program,
+        text=True,
+        check=True,
+    )
     subprocess.run(
         [
             sys.executable,

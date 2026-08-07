@@ -25,6 +25,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any
 
+from scheduler_client import SchedulerClient, SchedulerError, SchedulerProtocolError
+
 BPE_FILENAME = "bpe_simple_vocab_16e6.txt.gz"
 BPE_SHA256 = "924691ac288e54409236115652ad4aa250f48203de50a9e4722a6ecd48d6804a"
 HPSV2_VERSION = "1.2.0"
@@ -134,8 +136,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--tool-gpu", type=int, required=True)
     parser.add_argument("--bridge-factor", type=int, choices=(1, 2), default=1)
     parser.add_argument("--llm-config", type=Path)
+    parser.add_argument("--llm-provider", required=True)
+    parser.add_argument("--llm-base-url", required=True)
+    parser.add_argument("--llm-region", required=True)
     parser.add_argument("--llm-model", required=True)
     parser.add_argument("--api-key-env", required=True)
+    parser.add_argument("--llm-connect-timeout-seconds", type=float, required=True)
+    parser.add_argument("--llm-read-timeout-seconds", type=float, required=True)
+    parser.add_argument("--llm-max-transport-retries", type=int, required=True)
+    parser.add_argument("--llm-max-structure-retries", type=int, required=True)
+    parser.add_argument("--llm-max-completion-tokens", type=int, required=True)
+    parser.add_argument("--llm-temperature", type=float, required=True)
     return parser.parse_args()
 
 
@@ -145,6 +156,29 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _validate_scheduler_arguments(args: argparse.Namespace) -> None:
+    expected_key = {
+        "dashscope": "DASHSCOPE_API_KEY",
+        "openai": "OPENAI_API_KEY",
+    }.get(args.llm_provider)
+    if expected_key is None or args.api_key_env != expected_key:
+        raise RuntimeError("scheduler provider and credential variable are not consistently bound")
+    if not 0 <= args.llm_max_structure_retries <= 5:
+        raise RuntimeError("scheduler structure retry budget is outside the audited range")
+    SchedulerClient(
+        provider=args.llm_provider,
+        base_url=args.llm_base_url,
+        region=args.llm_region,
+        model=args.llm_model,
+        api_key="scaleguard-argument-validation-only",
+        connect_timeout_seconds=args.llm_connect_timeout_seconds,
+        read_timeout_seconds=args.llm_read_timeout_seconds,
+        max_transport_retries=args.llm_max_transport_retries,
+        max_completion_tokens=args.llm_max_completion_tokens,
+        temperature=args.llm_temperature,
+    )
 
 
 def _install_redacted_image_logging(base_llm_module: Any) -> None:
@@ -494,14 +528,49 @@ def _safe_literal_check(
         candidates.append(body.strip())
     for candidate in candidates:
         try:
-            value = ast.literal_eval(candidate)
+            try:
+                value = json.loads(candidate)
+            except json.JSONDecodeError:
+                value = ast.literal_eval(candidate)
+            if not isinstance(value, dict) or set(value) != {"thought", "order"}:
+                raise ValueError("scheduler object must contain exactly thought and order")
+            if not isinstance(value["thought"], str):
+                raise TypeError("scheduler thought must be text")
+            order = value["order"]
+            if (
+                not isinstance(order, list)
+                or not order
+                or not all(isinstance(task, str) and task for task in order)
+                or len(order) != len(set(order))
+            ):
+                raise TypeError("scheduler order must be a non-empty list of unique task names")
             format_check(value)
-        except (ValueError, SyntaxError, AssertionError) as error:
+        except (ValueError, SyntaxError, TypeError, KeyError, AssertionError) as error:
             last_error = error
             continue
-        return True, repr(value)
+        return True, json.dumps(value, ensure_ascii=True, separators=(",", ":"))
     llm._log(f"Failed to parse a structured response: {last_error}", level="warning")
     return False, ""
+
+
+def _scheduler_messages(
+    system_message: str | None,
+    prompt: str,
+    image_paths: list[Path] | None,
+) -> list[dict[str, str]]:
+    if image_paths:
+        raise RuntimeError("the audited remote scheduler is text-only")
+    instruction = (
+        "Return only one JSON object with exactly the keys thought and order. "
+        "The order value must preserve the task strings from the user prompt. "
+        "Do not use Markdown."
+    )
+    if system_message:
+        instruction = f"{system_message}\n\n{instruction}"
+    return [
+        {"role": "system", "content": instruction},
+        {"role": "user", "content": prompt},
+    ]
 
 
 def _install_locked_quality(
@@ -548,6 +617,7 @@ def _install_locked_quality(
 
 def main() -> int:
     args = parse_args()
+    _validate_scheduler_arguments(args)
     checkout = args.checkout.resolve()
     toolbox_root = args.toolbox_root.resolve()
     runtime_view = args.runtime_view.resolve()
@@ -619,11 +689,58 @@ def main() -> int:
 
     def initialize_gpt(llm: Any, *init_args: object, **init_kwargs: object) -> None:
         original_gpt_init(llm, *init_args, **init_kwargs)
-        llm.api_key = api_key
+        llm.api_key = "scaleguard-managed-credential"
         llm.model = args.llm_model
+        llm._scaleguard_scheduler = SchedulerClient(
+            provider=args.llm_provider,
+            base_url=args.llm_base_url,
+            region=args.llm_region,
+            model=args.llm_model,
+            api_key=api_key,
+            connect_timeout_seconds=args.llm_connect_timeout_seconds,
+            read_timeout_seconds=args.llm_read_timeout_seconds,
+            max_transport_retries=args.llm_max_transport_retries,
+            max_completion_tokens=args.llm_max_completion_tokens,
+            temperature=args.llm_temperature,
+        )
+
+    def query_scheduler(
+        llm: Any,
+        img_path_lst: list[Path] | None = None,
+        prompt: str = "",
+        format_check: Callable[[object], None] | None = None,
+    ) -> tuple[str, str]:
+        if format_check is None:
+            raise RuntimeError("the audited remote scheduler requires a structured response")
+        messages = _scheduler_messages(llm.system_message, prompt, img_path_lst)
+        last_error: Exception | None = None
+        for _attempt in range(args.llm_max_structure_retries + 1):
+            try:
+                reply = llm._scaleguard_scheduler.complete(messages)
+                llm.prompt_tokens += reply.prompt_tokens
+                llm.completion_tokens += reply.completion_tokens
+                valid, normalized = _safe_literal_check(llm, reply.content, format_check)
+                if valid:
+                    return prompt, normalized
+                last_error = ValueError("scheduler response failed its structure contract")
+            except SchedulerProtocolError as error:
+                last_error = error
+                llm._log(f"Scheduler response rejected: {error}", level="warning")
+            except SchedulerError:
+                raise
+        raise RuntimeError("scheduler structure retry budget exhausted") from last_error
+
+    def post_process_scheduler(llm: Any) -> None:
+        llm._log(
+            "Token usage so far: "
+            f"{llm.prompt_tokens} prompt tokens, "
+            f"{llm.completion_tokens} completion tokens"
+        )
 
     pipeline_module.GPT4.__init__ = initialize_gpt
+    pipeline_module.GPT4.query = query_scheduler
     pipeline_module.GPT4._check_syntax = _safe_literal_check
+    pipeline_module.GPT4._post_process = post_process_scheduler
 
     agent_class = pipeline_module.The4KAgent
     executor = pipeline_module.executor
@@ -731,7 +848,7 @@ def main() -> int:
             "perception": str(perception_model_path),
             "quality": str(quality_model_path),
             "hps_root": str(hps_root),
-            "remote_scheduler": args.llm_model,
+            "remote_scheduler": agent.gpt4._scaleguard_scheduler.evidence(),
         },
     }
     args.output_dir.mkdir(parents=True, exist_ok=True)
