@@ -7,7 +7,7 @@ name = "scaleguard-4k"
 version = "0.1.0.dev0"
 description = "Evidence-driven scale control for high-resolution image restoration"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.15"
 license = { file = "LICENSE" }
 license-files = [
   "LICENSE",

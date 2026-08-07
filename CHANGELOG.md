@@ -64,6 +64,8 @@ and intends to use semantic versioning after its first public release.
 
 ### Changed
 
+- Limited the declared package support window to the Python 3.10–3.14 versions
+  exercised by the CI matrix.
 - Reserved 4KAgent's outer generative SR for one terminal CoZ phase while
   retaining native restoration, reflection, rollback, and an optional 2×
   fidelity bridge.

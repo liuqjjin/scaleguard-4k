@@ -12,7 +12,8 @@ Provision a Linux instance with:
 - NVIDIA driver 560.28.03 or newer and `nvidia-smi`, for the locked CUDA 12.6
   PyTorch runtime;
 - at least 150 GiB free on the cache volume;
-- Git and Python 3.10 or newer;
+- Git and a host `python3` 3.10 or newer with `venv` support; the bootstrap
+  installs the evidence runtime at Python 3.10.18;
 - an authorized smoke image and integration image.
 
 The project hook never trusts `uv` from `PATH`. It clears its private bootstrap

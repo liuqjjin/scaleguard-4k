@@ -21,7 +21,7 @@ CSV is not a research conclusion.
 
 ## Reproduce `STATIC_READY`
 
-Start from a clean checkout with Python 3.10 or newer and `uv`:
+Start from a clean checkout with Python 3.10–3.14 and `uv`:
 
 ```bash
 uv sync --locked --extra dev

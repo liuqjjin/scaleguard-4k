@@ -1,6 +1,6 @@
 # ScaleGuard-4K
 
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.10–3.14](https://img.shields.io/badge/python-3.10--3.14-blue.svg)](https://www.python.org/downloads/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-green.svg)](https://github.com/liuqjjin/scaleguard-4k/blob/main/LICENSE)
 [![CI](https://github.com/liuqjjin/scaleguard-4k/actions/workflows/ci.yml/badge.svg)](https://github.com/liuqjjin/scaleguard-4k/actions/workflows/ci.yml)
 
@@ -48,7 +48,7 @@ recursion its own short-lived process/session contract.
 
 ## CPU-verifiable quick start
 
-Python 3.10 or newer and [uv](https://docs.astral.sh/uv/) are required. CI and
+Python 3.10–3.14 and [uv](https://docs.astral.sh/uv/) are required. CI and
 the runtime bootstrap use uv 0.11.16, recorded in
 [`environments/uv.version`](https://github.com/liuqjjin/scaleguard-4k/blob/main/environments/uv.version).
 

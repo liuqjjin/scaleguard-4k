@@ -10,7 +10,7 @@ but has not yet been executed by this project; its status remains
 Requirements:
 
 - Git;
-- Python 3.10 or newer; and
+- Python 3.10–3.14; and
 - [uv](https://docs.astral.sh/uv/).
 
 From the repository root:
