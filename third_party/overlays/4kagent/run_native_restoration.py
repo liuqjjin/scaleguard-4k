@@ -35,6 +35,8 @@ HPSV2_PRETRAINED = "laion2B-s32B-b79K"
 OUTLINES_VERSION = "0.2.1"
 TORCHVISION_VERSION = "0.25.0"
 
+BRIDGE_SUBTASK = "super-resolution_2x"
+
 TOOL_ALLOWLIST: dict[str, frozenset[str]] = {
     "denoising": frozenset({"swinir_15", "swinir_50", "mprnet", "restormer"}),
     "motion deblurring": frozenset({"mprnet", "restormer"}),
@@ -615,6 +617,30 @@ def _install_locked_quality(
     pipeline_module.compute_iqa_metric_score_batch = compute_batch
 
 
+def _append_controlled_bridge(agent: Any, *, bridge_factor: int) -> bool:
+    """Append the controlled 2x bridge and keep the upstream plan invariant intact.
+
+    Upstream ``reschedule`` asserts that the executed subtasks plus the remaining
+    plan equal ``work_mem["plan"]["initial"]``. ``propose`` records that baseline
+    before this overlay appends the bridge, so the bridge has to be registered in
+    both places or the first restoration failure in an 8x run aborts the agent.
+
+    Returns whether the bridge was appended.
+    """
+
+    if bridge_factor != 2 or getattr(agent, "_scaleguard_bridge_attempted", False):
+        return False
+    if BRIDGE_SUBTASK in agent.plan:
+        return False
+    agent.plan.append(BRIDGE_SUBTASK)
+    plan_memory = agent.work_mem.get("plan")
+    if isinstance(plan_memory, dict):
+        initial = plan_memory.get("initial")
+        if isinstance(initial, list) and BRIDGE_SUBTASK not in initial:
+            initial.append(BRIDGE_SUBTASK)
+    return True
+
+
 def main() -> int:
     args = parse_args()
     _validate_scheduler_arguments(args)
@@ -765,8 +791,7 @@ def main() -> int:
         return [task for task in agenda if task not in forbidden]
 
     def append_bridge(agent: Any) -> None:
-        if args.bridge_factor == 2 and not getattr(agent, "_scaleguard_bridge_attempted", False):
-            agent.plan.append("super-resolution_2x")
+        _append_controlled_bridge(agent, bridge_factor=args.bridge_factor)
 
     def propose(agent: Any) -> None:
         original_propose(agent)

@@ -1234,3 +1234,78 @@ def test_summary_calls_the_real_manifest_validator_by_default(
             tmp_path / "out.csv",
             tmp_path / "out.json",
         )
+
+
+def test_summary_excludes_pairs_scored_against_different_references(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A paired delta is only meaningful when both groups used the same reference."""
+
+    source = tmp_path / "source.png"
+    Image.new("RGB", (16, 16), (10, 10, 10)).save(source)
+    shared_reference = tmp_path / "reference-shared.png"
+    other_reference = tmp_path / "reference-other.png"
+    Image.new("RGB", (16, 16), (100, 100, 100)).save(shared_reference)
+    Image.new("RGB", (16, 16), (200, 200, 200)).save(other_reference)
+
+    groups: dict[str, list[Path]] = {group: [] for group in EXPERIMENT_GROUPS}
+    manifests: list[Path] = []
+    references: list[Path] = []
+    for index, group in enumerate(EXPERIMENT_GROUPS):
+        final = tmp_path / f"final-{index}.png"
+        Image.new("RGB", (16, 16), (40 + index * 10,) * 3).save(final)
+        manifest = write_summary_manifest(
+            tmp_path / f"manifest-{index}.json",
+            run_id=f"reference-{index}",
+            source=source,
+            final=final,
+            group=group,
+        )
+        raw = json.loads(manifest.read_text(encoding="utf-8"))
+        raw["input_image"].update({"width": 16, "height": 16})
+        raw["final_image"].update({"width": 16, "height": 16})
+        manifest.write_text(json.dumps(raw), encoding="utf-8")
+        groups[group].append(manifest)
+        manifests.append(manifest)
+        # B-only is scored against a different reference than ScaleGuard.
+        references.append(other_reference if group == "B-only" else shared_reference)
+
+    monkeypatch.setattr(
+        metrics_module,
+        "validate_run_manifest",
+        lambda path, **_kwargs: json.loads(path.read_text(encoding="utf-8")),
+    )
+    metric_receipt = tmp_path / "metrics.json"
+    evaluate_metric_receipt(
+        manifests,
+        references,
+        metric_receipt,
+        metric_names=("psnr",),
+    )
+    suite_receipt, validated = _validated_suite(tmp_path, groups)
+    _accept_suite(monkeypatch, suite_receipt, validated)
+
+    payload = summarize_paired_manifests(
+        groups,
+        tmp_path / "paired.csv",
+        tmp_path / "paired.json",
+        suite_receipt=suite_receipt,
+        metric_receipts=[metric_receipt],
+    )
+
+    b_only_effect = next(
+        effect
+        for effect in payload["external_metric_effects"]
+        if effect["comparison"] == "ScaleGuard - B-only" and effect["metric"] == "psnr"
+    )
+    assert b_only_effect["counts"]["observed_pairs"] == 0
+    assert b_only_effect["counts"]["excluded_by_status"] == {"reference_mismatch": 1}
+
+    # AB-fixed shares ScaleGuard's reference and is still compared.
+    ab_effect = next(
+        effect
+        for effect in payload["external_metric_effects"]
+        if effect["comparison"] == "ScaleGuard - AB-fixed" and effect["metric"] == "psnr"
+    )
+    assert ab_effect["counts"]["observed_pairs"] == 1

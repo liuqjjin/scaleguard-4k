@@ -1104,6 +1104,7 @@ def _bind_metric_receipts(
                     }
                 observed_metrics[name] = metric
             record["external_metrics"] = observed_metrics
+            record["metric_reference_sha256"] = sample.get("reference_sha256")
             record["metric_receipt"] = {
                 "path": verified["path"],
                 "sha256": verified["sha256"],
@@ -1212,6 +1213,13 @@ def _external_metric_effects(
                     treatment_metric, Mapping
                 ):
                     raise AssertionError("measured external metrics must be mappings")
+                baseline_reference = baseline.get("metric_reference_sha256")
+                treatment_reference = treatment.get("metric_reference_sha256")
+                if baseline_reference != treatment_reference:
+                    excluded_statuses["reference_mismatch"] = (
+                        excluded_statuses.get("reference_mismatch", 0) + 1
+                    )
+                    continue
                 baseline_value = baseline_metric.get("value")
                 treatment_value = treatment_metric.get("value")
                 if (

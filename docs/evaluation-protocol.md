@@ -65,6 +65,22 @@ A-only is the native-resolution restoration-component baseline. Its output is
 not secretly resized to 4x: full-reference metrics at the 4x target are marked
 not applicable for that group.
 
+### Coverage boundary of the 4x suite
+
+Every group in this suite runs a single terminal transition
+(`target_factor: 4`, `max_coz_steps: 1`). With one planned step the controller
+reaches `stop` or `rollback` on the first candidate, so `continue` is not
+exercised and no candidate is ever promoted and then re-evaluated at a higher
+scale.
+
+The suite therefore supports conclusions about gating a single terminal
+transition. It does not support a conclusion about recursive scale control.
+A claim about accumulated drift across successive transitions requires a
+separate 16x protocol (`target_factor: 16`, `max_coz_steps: 2`), where the
+first candidate can be promoted by `continue` and the second is judged against
+it. That protocol is not part of this suite and has no runner contract yet;
+adding one is a prerequisite for any recursive-control claim.
+
 Plan an authorized suite without starting a model:
 
 ```bash
@@ -242,6 +258,16 @@ The declared protocol includes:
 - systems: success rate, wall time, CoZ initialization versus first/steady-step
   time, worker allocator peaks, and host-level sampled memory/utilization for
   each preflight-bound physical GPU.
+
+Research question 3 asks whether gating reduces *harmful* transitions. The
+implemented decision metrics are `stop_rate` and `rollback_rate`, which count
+what the controller decided, not whether each decision was correct. A harmful
+transition is a candidate that a reviewer judges worse than its trusted input;
+scoring one requires a per-candidate reviewer label, and the summary has no such
+field today. The calibration corpus carries an `acceptable` label per scale
+step, but it feeds threshold estimation and is not joined into the paired
+summary. Until a labelled decision-outcome join exists, report the decision
+rates as decision rates and do not present them as a harm reduction.
 
 The metric harness consumes completed run manifests. PSNR, SSIM, and LPIPS
 require one aligned reference per manifest; MUSIQ and CLIPIQA can run without a

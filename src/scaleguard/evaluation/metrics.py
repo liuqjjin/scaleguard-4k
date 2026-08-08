@@ -1421,6 +1421,7 @@ def verify_metric_receipt(
             protected_paths.add(manifest_path)
             raw_reference = raw_sample.get("reference_image")
             reference_path: Path | None = None
+            reference_sha256: str | None = None
             if raw_reference is not None:
                 if not isinstance(raw_reference, Mapping):
                     raise EvaluationEvidenceError(f"{context}.reference_image is invalid")
@@ -1436,7 +1437,8 @@ def verify_metric_receipt(
                     )
                 reference_path = reference_path.resolve()
                 protected_paths.add(reference_path)
-                if raw_reference.get("sha256") != sha256_file(reference_path):
+                reference_sha256 = sha256_file(reference_path)
+                if raw_reference.get("sha256") != reference_sha256:
                     raise EvaluationEvidenceError(f"{context}.reference_image SHA256 changed")
 
             replay_names = tuple(
@@ -1577,6 +1579,7 @@ def verify_metric_receipt(
                     "manifest_path": str(manifest_path),
                     "manifest_sha256": manifest_digest,
                     "run_id": run_id,
+                    "reference_sha256": reference_sha256,
                     "metrics": verified_metrics,
                 }
             )
