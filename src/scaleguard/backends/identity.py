@@ -25,7 +25,7 @@ class IdentityRestorationBackend:
     ) -> WorkerResult:
         del run_dir
         if bridge_factor != 1:
-            raise WorkerError("identity restoration supports only a 1x fidelity bridge")
+            raise WorkerError("identity restoration requires bridge_factor=1")
         normalize_to_png(source, destination)
         return WorkerResult(
             image=inspect_image(

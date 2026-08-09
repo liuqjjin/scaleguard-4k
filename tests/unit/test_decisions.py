@@ -8,6 +8,7 @@ from scaleguard.backends.fake import FakeRestorationBackend, FakeScaleBackend
 from scaleguard.config import ControllerConfig, MetricConfig, PipelineConfig, RuntimeConfig
 from scaleguard.contracts import Decision, MetricRecord
 from scaleguard.controller.trusted_scale import TrustedScaleController
+from scaleguard.decisions import decide_scale_step
 
 
 def controller(tmp_path: Path) -> TrustedScaleController:
@@ -45,7 +46,7 @@ def test_all_gates_passed_continues_before_the_target(tmp_path: Path) -> None:
 
     assert decision is Decision.CONTINUE
     assert accepted is True
-    assert reason == "all gates passed"
+    assert reason == "all_gates_passed: all gates passed"
 
 
 def test_all_gates_passed_stops_and_accepts_at_the_target(tmp_path: Path) -> None:
@@ -53,7 +54,23 @@ def test_all_gates_passed_stops_and_accepts_at_the_target(tmp_path: Path) -> Non
 
     assert decision is Decision.STOP
     assert accepted is True
-    assert reason == "target scale accepted"
+    assert reason == "target_scale_accepted: target scale accepted"
+
+
+def test_fixed_policy_uses_the_same_canonical_decision_function(tmp_path: Path) -> None:
+    instance = controller(tmp_path)
+
+    decision, accepted, reason = decide_scale_step(
+        metrics(scale_nrmse=999.0),
+        instance.config.metrics,
+        acceptance_policy="fixed",
+        step_index=1,
+        total_steps=2,
+    )
+
+    assert decision is Decision.CONTINUE
+    assert accepted is True
+    assert reason.startswith("fixed_policy_accepted: ")
 
 
 def test_low_quality_gain_stops_without_accepting_the_candidate(tmp_path: Path) -> None:

@@ -597,7 +597,7 @@ def test_manifest_rejects_restoration_bridge_dimension_drift(
 @pytest.mark.parametrize(
     ("case", "message"),
     [
-        ("terminal_then_step", "appears after a terminal decision"),
+        ("terminal_then_step", "decision or acceptance disagrees"),
         ("chain", "does not continue the accepted artifact chain"),
         ("trusted_scale", "dimensions disagree with input_scale"),
         ("candidate_dimensions", "candidate dimensions are not exactly 4x"),
@@ -651,6 +651,40 @@ def test_manifest_rejects_scale_step_state_machine_contradictions(
         step["decision"] = "stop"
     elif case == "timestamps":
         step["finished_at"] = "2000-01-01T00:00:00Z"
+    _write_manifest(path, payload)
+
+    with pytest.raises(ManifestValidationError, match=message):
+        validate_run_manifest(path)
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("scale_failure_as_stop", "decision or acceptance disagrees"),
+        ("quality_failure_as_rollback", "decision or acceptance disagrees"),
+        ("reason", "reason disagrees"),
+    ],
+)
+def test_manifest_replays_the_canonical_scale_decision(
+    tmp_path: Path,
+    make_image: Callable[..., Path],
+    case: str,
+    message: str,
+) -> None:
+    path, payload = _generated_manifest(tmp_path, make_image)
+    step = payload["steps"][0]
+    if case == "scale_failure_as_stop":
+        step["metrics"]["scale_nrmse"] = 11.0
+        step["accepted"] = False
+        step["decision"] = "stop"
+        step["reason"] = "quality_gain_below_minimum: forged"
+    elif case == "quality_failure_as_rollback":
+        payload["config"]["metrics"]["min_quality_gain"] = 1.0
+        step["accepted"] = False
+        step["decision"] = "rollback"
+        step["reason"] = "scale_nrmse_exceeded: forged"
+    else:
+        step["reason"] = "all_gates_passed: forged explanation"
     _write_manifest(path, payload)
 
     with pytest.raises(ManifestValidationError, match=message):

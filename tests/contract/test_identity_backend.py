@@ -38,13 +38,13 @@ def test_identity_backend_preserves_observation_without_an_algorithmic_claim(
     assert result.process is None
 
 
-def test_identity_backend_rejects_a_fidelity_bridge(
+def test_identity_backend_rejects_a_controlled_bridge(
     tmp_path: Path,
     make_image: Callable[..., Path],
 ) -> None:
     source = make_image(tmp_path / "source.png")
 
-    with pytest.raises(WorkerError, match="only a 1x"):
+    with pytest.raises(WorkerError, match="requires bridge_factor=1"):
         IdentityRestorationBackend().restore(
             source,
             tmp_path / "output.png",

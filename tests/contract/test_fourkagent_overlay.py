@@ -400,6 +400,28 @@ def test_controlled_bridge_is_appended_at_most_once(overlay: ModuleType) -> None
     assert agent.work_mem["plan"]["initial"].count(overlay.BRIDGE_SUBTASK) == 1
 
 
+def test_controlled_bridge_remains_terminal_after_upstream_rescheduling(
+    overlay: ModuleType,
+) -> None:
+    agent = SimpleNamespace(
+        plan=[overlay.BRIDGE_SUBTASK, "denoising"],
+        work_mem={"plan": {"initial": ["denoising", overlay.BRIDGE_SUBTASK]}},
+    )
+
+    assert overlay._append_controlled_bridge(agent, bridge_factor=2) is True
+    assert agent.plan == ["denoising", overlay.BRIDGE_SUBTASK]
+
+
+def test_controlled_bridge_rejects_a_duplicated_live_plan(overlay: ModuleType) -> None:
+    agent = SimpleNamespace(
+        plan=[overlay.BRIDGE_SUBTASK, "denoising", overlay.BRIDGE_SUBTASK],
+        work_mem={"plan": {"initial": ["denoising", overlay.BRIDGE_SUBTASK]}},
+    )
+
+    with pytest.raises(RuntimeError, match="more than once"):
+        overlay._append_controlled_bridge(agent, bridge_factor=2)
+
+
 def test_no_bridge_is_appended_when_the_scale_plan_does_not_request_one(
     overlay: ModuleType,
 ) -> None:

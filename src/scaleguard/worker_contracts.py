@@ -244,9 +244,11 @@ def _validate_execution_path(value: object, *, bridge_factor: int) -> None:
     if forbidden.intersection(subtasks):
         raise WorkerContractError("4KAgent execution_path contains a forbidden terminal task")
     bridge_count = subtasks.count("super-resolution_2x")
-    maximum_bridges = 1 if bridge_factor == 2 else 0
-    if bridge_count > maximum_bridges:
+    expected_bridge_count = 1 if bridge_factor == 2 else 0
+    if bridge_count != expected_bridge_count:
         raise WorkerContractError("4KAgent execution_path has an invalid 2x bridge count")
+    if bridge_count and subtasks[-1] != "super-resolution_2x":
+        raise WorkerContractError("4KAgent 2x bridge must be the final executed subtask")
 
 
 def _validate_depictqa_evidence(

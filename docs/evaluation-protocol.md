@@ -38,6 +38,10 @@ on the reported evaluation set. If a public upstream split is incomplete or
 ambiguous, mark that dataset blocked rather than reconstructing the missing
 members silently.
 
+For a research-eligible paired summary, this separation is also checked in
+code: every evaluation input SHA-256 is compared with the input identities in
+the source-replayed calibration receipt, and any overlap excludes the pair.
+
 ## Paired experiment groups
 
 `configs/experiments/ablation.yaml` declares four groups:
@@ -396,8 +400,9 @@ verified full input SHA-256 and seed. The summary:
 - independently revalidates the passed suite, every raw wrapper attempt,
   manifest path/hash binding, and within-sample hardware identity;
 - maps each repeated `--metric-receipt` sample by the exact resolved manifest
-  path, manifest SHA-256, and run ID, rejecting duplicates, identity drift, and
-  conflicting metric definitions;
+  path, manifest SHA-256, and run ID; complementary metric sets for one
+  manifest are merged, while a duplicate metric name, identity drift, or
+  conflicting definition fails the summary;
 - marks a pair research-eligible only when all four real successful groups are
   complete, issue-free, and exactly present in that verified suite receipt;
 - records all source-manifest hashes; and
@@ -432,7 +437,7 @@ then explicitly marked `research_eligible: false`.
 ## Statistical reporting
 
 The summary already implements paired effects, standardized effect sizes,
-cluster-bootstrap intervals, missing rates, success rate, wall time, CoZ
+cluster-bootstrap intervals, missing rates, per-manifest completion indicators, wall time, CoZ
 initialization/first/steady-step timing, worker allocator peaks, and replayed
 host-level per-GPU aggregates. For a completed study, reporting must still:
 
@@ -449,6 +454,12 @@ host-level per-GPU aggregates. For a completed study, reporting must still:
 
 Do not select the best seed after viewing evaluation outputs. If multiple seeds
 are part of the protocol, declare them in advance and report their distribution.
+
+The independently replayed suite reader currently promotes only an all-passed
+suite. Its `success_rate` field is therefore a per-manifest diagnostic, not a
+study-wide stability estimate. Failed jobs remain in the raw suite receipt and
+must be reported separately until failed-job receipts have an independent
+replay contract.
 
 ## Promotion criteria
 
