@@ -34,7 +34,13 @@ def write_summary_calibration_receipt(path: Path) -> Path:
         "status": "calibrated",
         "inputs": {
             "labels": {"path": "labels.csv", "sha256": "1" * 64},
-            "manifests": [{"run_id": "calibration-run", "sha256": "2" * 64}],
+            "manifests": [
+                {
+                    "run_id": "calibration-run",
+                    "sha256": "2" * 64,
+                    "input_sha256": "3" * 64,
+                }
+            ],
         },
         "sample_counts": {"acceptable_real": 1},
         "metric_backend": {

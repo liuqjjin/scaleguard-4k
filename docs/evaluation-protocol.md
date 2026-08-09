@@ -38,6 +38,10 @@ on the reported evaluation set. If a public upstream split is incomplete or
 ambiguous, mark that dataset blocked rather than reconstructing the missing
 members silently.
 
+For a research-eligible paired summary, this separation is also checked in
+code: every evaluation input SHA-256 is compared with the input identities in
+the source-replayed calibration receipt, and any overlap excludes the pair.
+
 ## Paired experiment groups
 
 `configs/experiments/ablation.yaml` declares four groups:
@@ -64,6 +68,22 @@ clean, fixed Git HEAD and a real base configuration with
 A-only is the native-resolution restoration-component baseline. Its output is
 not secretly resized to 4x: full-reference metrics at the 4x target are marked
 not applicable for that group.
+
+### Coverage boundary of the 4x suite
+
+Every group in this suite runs a single terminal transition
+(`target_factor: 4`, `max_coz_steps: 1`). With one planned step the controller
+reaches `stop` or `rollback` on the first candidate, so `continue` is not
+exercised and no candidate is ever promoted and then re-evaluated at a higher
+scale.
+
+The suite therefore supports conclusions about gating a single terminal
+transition. It does not support a conclusion about recursive scale control.
+A claim about accumulated drift across successive transitions requires a
+separate 16x protocol (`target_factor: 16`, `max_coz_steps: 2`), where the
+first candidate can be promoted by `continue` and the second is judged against
+it. That protocol is not part of this suite and has no runner contract yet;
+adding one is a prerequisite for any recursive-control claim.
 
 Plan an authorized suite without starting a model:
 
@@ -243,6 +263,16 @@ The declared protocol includes:
   time, worker allocator peaks, and host-level sampled memory/utilization for
   each preflight-bound physical GPU.
 
+Research question 3 asks whether gating reduces *harmful* transitions. The
+implemented decision metrics are `stop_rate` and `rollback_rate`, which count
+what the controller decided, not whether each decision was correct. A harmful
+transition is a candidate that a reviewer judges worse than its trusted input;
+scoring one requires a per-candidate reviewer label, and the summary has no such
+field today. The calibration corpus carries an `acceptable` label per scale
+step, but it feeds threshold estimation and is not joined into the paired
+summary. Until a labelled decision-outcome join exists, report the decision
+rates as decision rates and do not present them as a harm reduction.
+
 The metric harness consumes completed run manifests. PSNR, SSIM, and LPIPS
 require one aligned reference per manifest; MUSIQ and CLIPIQA can run without a
 reference. It fully validates each manifest and verifies the declared input,
@@ -370,8 +400,9 @@ verified full input SHA-256 and seed. The summary:
 - independently revalidates the passed suite, every raw wrapper attempt,
   manifest path/hash binding, and within-sample hardware identity;
 - maps each repeated `--metric-receipt` sample by the exact resolved manifest
-  path, manifest SHA-256, and run ID, rejecting duplicates, identity drift, and
-  conflicting metric definitions;
+  path, manifest SHA-256, and run ID; complementary metric sets for one
+  manifest are merged, while a duplicate metric name, identity drift, or
+  conflicting definition fails the summary;
 - marks a pair research-eligible only when all four real successful groups are
   complete, issue-free, and exactly present in that verified suite receipt;
 - records all source-manifest hashes; and
@@ -406,7 +437,7 @@ then explicitly marked `research_eligible: false`.
 ## Statistical reporting
 
 The summary already implements paired effects, standardized effect sizes,
-cluster-bootstrap intervals, missing rates, success rate, wall time, CoZ
+cluster-bootstrap intervals, missing rates, per-manifest completion indicators, wall time, CoZ
 initialization/first/steady-step timing, worker allocator peaks, and replayed
 host-level per-GPU aggregates. For a completed study, reporting must still:
 
@@ -423,6 +454,12 @@ host-level per-GPU aggregates. For a completed study, reporting must still:
 
 Do not select the best seed after viewing evaluation outputs. If multiple seeds
 are part of the protocol, declare them in advance and report their distribution.
+
+The independently replayed suite reader currently promotes only an all-passed
+suite. Its `success_rate` field is therefore a per-manifest diagnostic, not a
+study-wide stability estimate. Failed jobs remain in the raw suite receipt and
+must be reported separately until failed-job receipts have an independent
+replay contract.
 
 ## Promotion criteria
 

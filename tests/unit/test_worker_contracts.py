@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+import scaleguard.worker_contracts as worker_contracts
 from scaleguard.config import FourKAgentConfig
 from scaleguard.worker_contracts import (
     WorkerContractError,
@@ -174,6 +175,40 @@ def test_scheduler_contract_accepts_a_bounded_protocol_retry() -> None:
     )
 
     assert validate_scheduler_evidence(evidence, config=FourKAgentConfig()) == evidence
+
+
+@pytest.mark.parametrize(
+    ("subtasks", "bridge_factor", "message"),
+    [
+        (["denoising"], 2, "invalid 2x bridge count"),
+        (["super-resolution_2x"], 1, "invalid 2x bridge count"),
+        (
+            ["super-resolution_2x", "denoising"],
+            2,
+            "must be the final executed subtask",
+        ),
+    ],
+)
+def test_fourkagent_execution_path_binds_the_terminal_bridge(
+    subtasks: list[str],
+    bridge_factor: int,
+    message: str,
+) -> None:
+    with pytest.raises(WorkerContractError, match=message):
+        worker_contracts._validate_execution_path(
+            {"subtasks": subtasks, "tools": ["tool"] * len(subtasks)},
+            bridge_factor=bridge_factor,
+        )
+
+
+def test_fourkagent_execution_path_accepts_one_terminal_bridge() -> None:
+    worker_contracts._validate_execution_path(
+        {
+            "subtasks": ["denoising", "super-resolution_2x"],
+            "tools": ["restormer", "swinir_2x_gan"],
+        },
+        bridge_factor=2,
+    )
 
 
 def test_scheduler_contract_rejects_excessive_protocol_retries() -> None:

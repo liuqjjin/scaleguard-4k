@@ -51,7 +51,10 @@ The 4KAgent adapter imports the pinned checkout and filters generated
 `super-resolution*` agenda entries before execution. It preserves 4KAgent's
 perception, native-resolution restoration, tool selection, reflection,
 rollback, and rescheduling. For a requested 2× or 8× result, it may append at
-most one existing 2× fidelity bridge.
+most one existing 2× bridge. The audited allowlist restricts that bridge to
+`swinir_2x_gan` and `swinir_2x_psnr`; the GAN variant is perception-oriented,
+and the locked profile prefers perception, so the bridge is not assumed to be
+fidelity-preserving until measured.
 
 After 4KAgent finishes, ScaleGuard enters one terminal CoZ phase. A 16× target
 uses two `upscale_once` requests in the same CoZ session, with an explicit
@@ -63,7 +66,7 @@ The discrete factor policy is:
 | Requested factor | 4KAgent bridge | CoZ transitions | Realized path |
 | ---: | ---: | ---: | --- |
 | 1× | 1× | 0 | restoration only |
-| 2× | 2× | 0 | one fidelity bridge |
+| 2× | 2× | 0 | one controlled bridge |
 | 4× | 1× | 1 | one terminal 4× state |
 | 8× | 2× | 1 | one 2× bridge, then one terminal 4× state |
 | 16× | 1× | 2 | two controlled 4× states in one session |
