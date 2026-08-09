@@ -31,6 +31,7 @@ from scaleguard.contracts import (
     utc_now,
 )
 from scaleguard.controller.policy import build_scale_plan
+from scaleguard.decisions import decide_scale_step
 from scaleguard.errors import ScaleGuardError
 from scaleguard.evaluation.calibration import verify_calibration_document
 from scaleguard.images import assert_scale, inspect_image, normalize_to_png
@@ -331,6 +332,7 @@ class TrustedScaleController:
                                         decision=Decision.ROLLBACK,
                                         accepted=False,
                                         reason=(
+                                            "scale_worker_failure: "
                                             f"scale worker failure: {type(error).__name__}: {error}"
                                         ),
                                         started_at=started_at,
@@ -367,7 +369,10 @@ class TrustedScaleController:
                                 metrics=None,
                                 decision=Decision.ROLLBACK,
                                 accepted=False,
-                                reason=(f"scale session failure: {type(error).__name__}: {error}"),
+                                reason=(
+                                    "scale_session_failure: "
+                                    f"scale session failure: {type(error).__name__}: {error}"
+                                ),
                                 started_at=session_started_at,
                                 finished_at=utc_now(),
                             )
@@ -681,56 +686,13 @@ class TrustedScaleController:
         step_index: int,
         total_steps: int,
     ) -> tuple[Decision, bool, str]:
-        if self.config.controller.acceptance_policy == "fixed":
-            decision = Decision.STOP if step_index >= total_steps else Decision.CONTINUE
-            return (
-                decision,
-                True,
-                (
-                    "fixed ablation policy accepted the candidate; "
-                    "gates were recorded but not enforced"
-                ),
-            )
-        thresholds = self.config.metrics
-        if metrics.scale_nrmse > thresholds.max_scale_nrmse:
-            return (
-                Decision.ROLLBACK,
-                False,
-                (f"scale_nrmse={metrics.scale_nrmse:.6f} exceeds {thresholds.max_scale_nrmse:.6f}"),
-            )
-        if metrics.scale_edge_mae > thresholds.max_scale_edge_mae:
-            return (
-                Decision.ROLLBACK,
-                False,
-                (
-                    f"scale_edge_mae={metrics.scale_edge_mae:.6f} exceeds "
-                    f"{thresholds.max_scale_edge_mae:.6f}"
-                ),
-            )
-        if (
-            metrics.measurement_nrmse is not None
-            and metrics.measurement_nrmse > thresholds.max_measurement_nrmse
-        ):
-            return (
-                Decision.ROLLBACK,
-                False,
-                (
-                    f"measurement_nrmse={metrics.measurement_nrmse:.6f} exceeds "
-                    f"{thresholds.max_measurement_nrmse:.6f}"
-                ),
-            )
-        if metrics.quality_gain < thresholds.min_quality_gain:
-            return (
-                Decision.STOP,
-                False,
-                (
-                    f"quality_gain={metrics.quality_gain:.6f} is below "
-                    f"{thresholds.min_quality_gain:.6f}"
-                ),
-            )
-        if step_index >= total_steps:
-            return Decision.STOP, True, "target scale accepted"
-        return Decision.CONTINUE, True, "all gates passed"
+        return decide_scale_step(
+            metrics,
+            self.config.metrics,
+            acceptance_policy=self.config.controller.acceptance_policy,
+            step_index=step_index,
+            total_steps=total_steps,
+        )
 
     @staticmethod
     def _record_phase(recorder: ManifestRecorder, event: PhaseEvent) -> None:

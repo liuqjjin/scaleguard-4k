@@ -35,6 +35,8 @@ HPSV2_PRETRAINED = "laion2B-s32B-b79K"
 OUTLINES_VERSION = "0.2.1"
 TORCHVISION_VERSION = "0.25.0"
 
+BRIDGE_SUBTASK = "super-resolution_2x"
+
 TOOL_ALLOWLIST: dict[str, frozenset[str]] = {
     "denoising": frozenset({"swinir_15", "swinir_50", "mprnet", "restormer"}),
     "motion deblurring": frozenset({"mprnet", "restormer"}),
@@ -615,6 +617,39 @@ def _install_locked_quality(
     pipeline_module.compute_iqa_metric_score_batch = compute_batch
 
 
+def _append_controlled_bridge(agent: Any, *, bridge_factor: int) -> bool:
+    """Append the controlled 2x bridge and keep the upstream plan invariant intact.
+
+    Upstream ``reschedule`` asserts that the executed subtasks plus the remaining
+    plan equal ``work_mem["plan"]["initial"]``. ``propose`` records that baseline
+    before this overlay appends the bridge, so the bridge has to be registered in
+    both places or the first restoration failure in an 8x run aborts the agent.
+
+    Returns whether the live plan changed.
+    """
+
+    if bridge_factor != 2:
+        return False
+    bridge_count = agent.plan.count(BRIDGE_SUBTASK)
+    if bridge_count > 1:
+        raise RuntimeError("controlled 2x bridge appears more than once in the live plan")
+    if bridge_count == 1:
+        if agent.plan[-1] != BRIDGE_SUBTASK:
+            agent.plan.remove(BRIDGE_SUBTASK)
+            agent.plan.append(BRIDGE_SUBTASK)
+            return True
+        return False
+    if getattr(agent, "_scaleguard_bridge_attempted", False):
+        return False
+    agent.plan.append(BRIDGE_SUBTASK)
+    plan_memory = agent.work_mem.get("plan")
+    if isinstance(plan_memory, dict):
+        initial = plan_memory.get("initial")
+        if isinstance(initial, list) and BRIDGE_SUBTASK not in initial:
+            initial.append(BRIDGE_SUBTASK)
+    return True
+
+
 def main() -> int:
     args = parse_args()
     _validate_scheduler_arguments(args)
@@ -764,9 +799,8 @@ def main() -> int:
         }
         return [task for task in agenda if task not in forbidden]
 
-    def append_bridge(agent: Any) -> None:
-        if args.bridge_factor == 2 and not getattr(agent, "_scaleguard_bridge_attempted", False):
-            agent.plan.append("super-resolution_2x")
+    def append_bridge(agent: Any) -> bool:
+        return _append_controlled_bridge(agent, bridge_factor=args.bridge_factor)
 
     def propose(agent: Any) -> None:
         original_propose(agent)
@@ -774,7 +808,12 @@ def main() -> int:
 
     def reschedule(agent: Any) -> None:
         original_reschedule(agent)
-        append_bridge(agent)
+        plan_changed = append_bridge(agent)
+        adjusted = agent.work_mem["plan"]["adjusted"]
+        if plan_changed and adjusted:
+            done_subtasks, _ = agent._get_execution_path(Path(agent.cur_node["img_path"]))
+            adjusted[-1]["new"] = f"{done_subtasks} + {agent.plan}"
+            agent._dump_summary()
 
     def execute(agent: Any, cache: Path | None) -> bool:
         if agent.plan and agent.plan[0] == "super-resolution_2x":
@@ -815,9 +854,13 @@ def main() -> int:
     ]
     if forbidden_executed:
         raise RuntimeError(f"forbidden 4KAgent tasks executed: {forbidden_executed}")
-    bridges = [task for task in executed if task == "super-resolution_2x"]
-    if len(bridges) > (1 if args.bridge_factor == 2 else 0):
-        raise RuntimeError(f"unexpected 2x bridge count in execution path: {len(bridges)}")
+    bridge_positions = [index for index, task in enumerate(executed) if task == BRIDGE_SUBTASK]
+    expected_bridge_positions = [len(executed) - 1] if args.bridge_factor == 2 else []
+    if bridge_positions != expected_bridge_positions:
+        raise RuntimeError(
+            "2x bridge must execute exactly once and last when requested; "
+            f"observed positions: {bridge_positions}"
+        )
     if _git_status(checkout) != status_before:
         raise RuntimeError("4KAgent execution mutated the audited checkout")
     if _ignored_artifacts(checkout) != ignored_before:

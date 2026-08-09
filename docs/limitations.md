@@ -36,9 +36,12 @@ Supported requested factors are 1×, 2×, 4×, 8×, and 16×. At most two CoZ 4�
 steps are allowed. There is no arbitrary target-dimension optimizer, fractional
 scale policy, or unbounded recursive zoom.
 
-The 2× and 8× paths use 4KAgent's existing 2× fidelity bridge. The bridge and
-CoZ may have different fidelity/perception behavior; this must be evaluated,
-not assumed equivalent across factors.
+The 2× and 8× paths use 4KAgent's existing 2× bridge. The audited allowlist
+admits `swinir_2x_gan` and `swinir_2x_psnr`, and the locked profile expresses a
+perception preference, so the selected bridge tool may be perception-oriented
+rather than fidelity-preserving. The bridge and CoZ may also differ in
+fidelity/perception behavior; both must be evaluated, not assumed equivalent
+across factors.
 
 ## Quality gate is not yet calibrated
 

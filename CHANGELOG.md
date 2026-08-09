@@ -11,7 +11,7 @@ and intends to use semantic versioning after its first public release.
 
 - Deterministic Trusted Scale Controller with explicit continue, stop, and
   rollback decisions for one-step CoZ states.
-- Discrete 1×/2×/4×/8×/16× factor policy with at most one 4KAgent fidelity
+- Discrete 1×/2×/4×/8×/16× factor policy with at most one controlled 2×
   bridge and two CoZ transitions.
 - Fake CPU backends, command adapters, pinned-upstream adapters, and persistent
   CoZ JSON-lines session.
@@ -61,6 +61,9 @@ and intends to use semantic versioning after its first public release.
   with the separate AlexNet backbone kept as an explicit hash-bound user input.
 - Node 24 GitHub Actions, strict built-distribution rendering checks, and a
   compact pull-request verification template for the public repository.
+- Five project-native conceptual figures for the task, agent workflow, trusted
+  scale controller, and state transitions, each labelled as synthetic rather
+  than model output.
 
 ### Changed
 
@@ -68,7 +71,7 @@ and intends to use semantic versioning after its first public release.
   exercised by the CI matrix.
 - Reserved 4KAgent's outer generative SR for one terminal CoZ phase while
   retaining native restoration, reflection, rollback, and an optional 2×
-  fidelity bridge.
+  controlled bridge.
 - Patched the pinned CoZ full-image path to initialize one-step scheduling,
   move VLM inputs to the model device, restrict VAE state loading, and stream
   Gaussian latent fusion.
@@ -88,6 +91,14 @@ and intends to use semantic versioning after its first public release.
   no-reference evaluation independent of a reference image.
 - Made output publication explicitly no-clobber by default, with canonical
   alias checks and a separate atomic overwrite path when requested.
+- Kept the controlled 2× bridge terminal after every restoration reschedule
+  and replayed its exact count and position at both worker and manifest
+  boundaries.
+- Moved scale-step decisions into one canonical function shared by execution
+  and manifest replay, including stable reason codes for stop and rollback.
+- Allowed complementary full-reference and no-reference metric receipts to
+  bind one manifest while rejecting duplicate metrics, mismatched references,
+  and calibration/evaluation input overlap.
 
 ### Security
 

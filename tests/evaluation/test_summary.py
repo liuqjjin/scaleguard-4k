@@ -437,7 +437,7 @@ def test_summary_rejects_output_alias_and_output_input_overwrite(tmp_path: Path)
         )
 
 
-def test_summary_rejects_duplicate_metric_binding_and_manifest_identity_drift(
+def test_summary_merges_complementary_receipts_and_rejects_duplicate_metrics(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -454,6 +454,7 @@ def test_summary_rejects_duplicate_metric_binding_and_manifest_identity_drift(
         receipt.write_text("{}\n", encoding="utf-8")
 
     def verification(path: Path, **_kwargs: object) -> dict[str, object]:
+        metric = "musiq" if path == receipts[0] else "clipiqa"
         return {
             "path": str(path.resolve()),
             "size_bytes": path.stat().st_size,
@@ -464,7 +465,7 @@ def test_summary_rejects_duplicate_metric_binding_and_manifest_identity_drift(
             "issues": [],
             "protected_paths": [str(path.resolve())],
             "metric_definitions": {
-                "musiq": {
+                metric: {
                     "identity_sha256": "c" * 64,
                     "direction": "higher_is_better",
                     "reference_required": False,
@@ -475,8 +476,9 @@ def test_summary_rejects_duplicate_metric_binding_and_manifest_identity_drift(
                     "manifest_path": str(manifest.resolve()),
                     "manifest_sha256": manifest_digest,
                     "run_id": "run",
+                    "reference_sha256": None,
                     "metrics": {
-                        "musiq": {
+                        metric: {
                             "status": "measured",
                             "value": 50.0,
                             "direction": "higher_is_better",
@@ -488,7 +490,21 @@ def test_summary_rejects_duplicate_metric_binding_and_manifest_identity_drift(
         }
 
     monkeypatch.setattr(summary_module, "verify_metric_receipt", verification)
-    with pytest.raises(EvaluationEvidenceError, match="multiple metric receipt samples"):
+    merged = summarize_paired_manifests(
+        {"A-only": [manifest]},
+        tmp_path / "complementary.csv",
+        tmp_path / "complementary.json",
+        metric_receipts=receipts,
+    )
+    run = merged["pairs"][0]["runs"]["A-only"]
+    assert set(run["external_metrics"]) == {"musiq", "clipiqa"}
+    assert set(run["metric_receipts_by_metric"]) == {"musiq", "clipiqa"}
+
+    def duplicate(path: Path, **_kwargs: object) -> dict[str, object]:
+        return verification(receipts[0], **_kwargs) | {"path": str(path.resolve())}
+
+    monkeypatch.setattr(summary_module, "verify_metric_receipt", duplicate)
+    with pytest.raises(EvaluationEvidenceError, match="same metric"):
         summarize_paired_manifests(
             {"A-only": [manifest]},
             tmp_path / "duplicate.csv",
@@ -557,7 +573,15 @@ def test_summary_rejects_external_metric_definition_conflicts(
                     "manifest_path": str(manifest.resolve()),
                     "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
                     "run_id": f"run-{group}",
-                    "metrics": {},
+                    "reference_sha256": None,
+                    "metrics": {
+                        "musiq": {
+                            "status": "measured",
+                            "value": 50.0,
+                            "direction": "higher_is_better",
+                            "identity_sha256": "d" * 64,
+                        }
+                    },
                 }
             ],
         }
@@ -723,6 +747,43 @@ def test_summary_revalidates_calibration_receipt_semantics_not_self_report(
     assert any(
         "quality_calibration_receipt_invalid:threshold_mismatch:max_scale_nrmse" in issue
         for issue in summary["pairs"][0]["issues"]
+    )
+
+
+def test_summary_rejects_calibration_evaluation_input_overlap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    groups = _complete_groups(tmp_path)
+    source = tmp_path / "source.bin"
+    source_digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    receipt_path = tmp_path / "quality-calibration.json"
+    calibration = json.loads(receipt_path.read_text(encoding="utf-8"))
+    calibration["inputs"]["manifests"][0]["input_sha256"] = source_digest
+    _resign_receipt(receipt_path, calibration)
+    receipt_digest = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
+    for paths in groups.values():
+        manifest_path = paths[0]
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["provenance"]["quality_calibration_receipt_size_bytes"] = (
+            receipt_path.stat().st_size
+        )
+        manifest["provenance"]["quality_calibration_receipt_sha256"] = receipt_digest
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    suite_receipt, validated = _validated_suite(tmp_path, groups)
+    _accept_suite(monkeypatch, suite_receipt, validated)
+
+    summary = summarize_paired_manifests(
+        groups,
+        tmp_path / "paired.csv",
+        tmp_path / "paired.json",
+        suite_receipt=suite_receipt,
+    )
+
+    assert summary["counts"]["research_eligible_pairs"] == 0
+    assert all(
+        f"{group}:calibration_evaluation_input_overlap" in summary["pairs"][0]["issues"]
+        for group in EXPERIMENT_GROUPS
     )
 
 
@@ -1234,3 +1295,78 @@ def test_summary_calls_the_real_manifest_validator_by_default(
             tmp_path / "out.csv",
             tmp_path / "out.json",
         )
+
+
+def test_summary_excludes_pairs_scored_against_different_references(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A paired delta is only meaningful when both groups used the same reference."""
+
+    source = tmp_path / "source.png"
+    Image.new("RGB", (16, 16), (10, 10, 10)).save(source)
+    shared_reference = tmp_path / "reference-shared.png"
+    other_reference = tmp_path / "reference-other.png"
+    Image.new("RGB", (16, 16), (100, 100, 100)).save(shared_reference)
+    Image.new("RGB", (16, 16), (200, 200, 200)).save(other_reference)
+
+    groups: dict[str, list[Path]] = {group: [] for group in EXPERIMENT_GROUPS}
+    manifests: list[Path] = []
+    references: list[Path] = []
+    for index, group in enumerate(EXPERIMENT_GROUPS):
+        final = tmp_path / f"final-{index}.png"
+        Image.new("RGB", (16, 16), (40 + index * 10,) * 3).save(final)
+        manifest = write_summary_manifest(
+            tmp_path / f"manifest-{index}.json",
+            run_id=f"reference-{index}",
+            source=source,
+            final=final,
+            group=group,
+        )
+        raw = json.loads(manifest.read_text(encoding="utf-8"))
+        raw["input_image"].update({"width": 16, "height": 16})
+        raw["final_image"].update({"width": 16, "height": 16})
+        manifest.write_text(json.dumps(raw), encoding="utf-8")
+        groups[group].append(manifest)
+        manifests.append(manifest)
+        # B-only is scored against a different reference than ScaleGuard.
+        references.append(other_reference if group == "B-only" else shared_reference)
+
+    monkeypatch.setattr(
+        metrics_module,
+        "validate_run_manifest",
+        lambda path, **_kwargs: json.loads(path.read_text(encoding="utf-8")),
+    )
+    metric_receipt = tmp_path / "metrics.json"
+    evaluate_metric_receipt(
+        manifests,
+        references,
+        metric_receipt,
+        metric_names=("psnr",),
+    )
+    suite_receipt, validated = _validated_suite(tmp_path, groups)
+    _accept_suite(monkeypatch, suite_receipt, validated)
+
+    payload = summarize_paired_manifests(
+        groups,
+        tmp_path / "paired.csv",
+        tmp_path / "paired.json",
+        suite_receipt=suite_receipt,
+        metric_receipts=[metric_receipt],
+    )
+
+    b_only_effect = next(
+        effect
+        for effect in payload["external_metric_effects"]
+        if effect["comparison"] == "ScaleGuard - B-only" and effect["metric"] == "psnr"
+    )
+    assert b_only_effect["counts"]["observed_pairs"] == 0
+    assert b_only_effect["counts"]["excluded_by_status"] == {"reference_mismatch": 1}
+
+    # AB-fixed shares ScaleGuard's reference and is still compared.
+    ab_effect = next(
+        effect
+        for effect in payload["external_metric_effects"]
+        if effect["comparison"] == "ScaleGuard - AB-fixed" and effect["metric"] == "psnr"
+    )
+    assert ab_effect["counts"]["observed_pairs"] == 1

@@ -21,7 +21,7 @@ class RestorationBackend(Protocol):
         bridge_factor: int,
         run_dir: Path,
     ) -> WorkerResult:
-        """Run 4KAgent's native-scale restoration and optional fidelity bridge."""
+        """Run native-scale restoration and an optional controlled 2x bridge."""
 
 
 class ScaleSession(Protocol):

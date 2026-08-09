@@ -18,8 +18,10 @@ from scaleguard.contracts import (
     QUALITY_IDENTITY_SCHEMA,
     CompletionLevel,
     Decision,
+    MetricRecord,
     RunStatus,
 )
+from scaleguard.decisions import decide_scale_step
 from scaleguard.errors import ArtifactError, ConfigurationError, ScaleGuardError
 from scaleguard.images import inspect_image
 from scaleguard.imaging.forward_models import build_forward_model
@@ -783,6 +785,7 @@ def validate_run_manifest(
         except ValueError as error:
             raise ManifestValidationError(str(error)) from error
         accepted = _boolean(step, "accepted", context)
+        reason = _text(step, "reason", context)
         if accepted:
             accepted_candidates += 1
             if candidate is None:
@@ -819,13 +822,49 @@ def validate_run_manifest(
             raise ManifestValidationError(
                 f"{context} rejected metrics contrary to its acceptance policy"
             )
-        reason = _text(step, "reason", context)
-        if (
-            acceptance_policy == "fixed"
-            and metrics is not None
-            and not reason.startswith("fixed ablation policy accepted")
+        if metrics is not None:
+            metric_record = MetricRecord(
+                quality_baseline=float(metrics["quality_baseline"]),
+                quality_candidate=float(metrics["quality_candidate"]),
+                quality_gain=float(metrics["quality_gain"]),
+                quality_backend=str(metrics["quality_backend"]),
+                quality_identity_sha256=str(metrics["quality_identity_sha256"]),
+                scale_nrmse=float(metrics["scale_nrmse"]),
+                scale_edge_mae=float(metrics["scale_edge_mae"]),
+                measurement_nrmse=(
+                    float(metrics["measurement_nrmse"])
+                    if metrics.get("measurement_nrmse") is not None
+                    else None
+                ),
+                measurement_model=(
+                    str(metrics["measurement_model"])
+                    if metrics.get("measurement_model") is not None
+                    else None
+                ),
+            )
+            expected_decision, expected_accepted, expected_reason = decide_scale_step(
+                metric_record,
+                parsed_config.metrics,
+                acceptance_policy=acceptance_policy,
+                step_index=position,
+                total_steps=expected_steps,
+            )
+            if (decision, accepted) != (expected_decision, expected_accepted):
+                raise ManifestValidationError(
+                    f"{context} decision or acceptance disagrees with the configured policy"
+                )
+            if reason != expected_reason:
+                raise ManifestValidationError(
+                    f"{context}.reason disagrees with the configured policy"
+                )
+        elif (
+            decision is not Decision.ROLLBACK
+            or accepted
+            or not reason.startswith(("scale_worker_failure: ", "scale_session_failure: "))
         ):
-            raise ManifestValidationError(f"{context} does not disclose fixed acceptance")
+            raise ManifestValidationError(
+                f"{context} metric-free failure must be an explicit rollback"
+            )
         if decision is not Decision.CONTINUE:
             terminated = True
         last_decision = decision

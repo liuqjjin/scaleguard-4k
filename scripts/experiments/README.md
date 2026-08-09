@@ -109,9 +109,9 @@ non-process-attributed. Insufficient eligible input clusters produce an
 unavailable interval rather than a fabricated number.
 
 Every metric sample is joined by resolved manifest path, manifest SHA-256, and
-run ID. Duplicate bindings, source drift, and definition conflicts fail the
-summary. Missing and unreplayable values remain explicit and are excluded from
-effects. A-only stays at native resolution: its 4× full-reference scores are
+run ID. Complementary metric sets for one manifest are merged; duplicate
+metric names, source drift, and definition conflicts fail the summary. Missing
+and unreplayable values remain explicit and are excluded from effects. A-only stays at native resolution: its 4× full-reference scores are
 `not_applicable`, never produced by resizing or imputation. Omit
 `--metric-receipt` to create a controller-only diagnostic summary with no
 external metric effects.

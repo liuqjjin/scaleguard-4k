@@ -22,8 +22,7 @@ next step.
 
 4KAgent remains the sole high-level controller for degradation perception,
 native-resolution restoration, reflection, and non-SR rollback. A thin overlay
-removes its generative SR tasks and permits at most one controlled 2× fidelity
-bridge.
+removes its generative SR tasks and permits at most one controlled 2× bridge.
 
 After 4KAgent produces a trusted native-scale image, ScaleGuard starts one
 terminal CoZ session. ScaleGuard, rather than the 4KAgent tool registry, owns

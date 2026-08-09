@@ -357,3 +357,79 @@ def test_torchvision_compatibility_exposes_only_rgb_to_grayscale(
 
     compatibility = sys.modules[module_name]
     assert compatibility.rgb_to_grayscale is rgb_to_grayscale  # type: ignore[attr-defined]
+
+
+def test_controlled_bridge_keeps_the_upstream_rollback_plan_invariant(
+    overlay: ModuleType,
+) -> None:
+    """Upstream ``reschedule`` asserts done+plan == work_mem["plan"]["initial"].
+
+    ``propose`` snapshots that baseline before the overlay appends the bridge, so
+    the bridge has to reach both the live plan and the recorded baseline.
+    """
+
+    agent = SimpleNamespace(
+        plan=["denoising"],
+        work_mem={"plan": {"initial": ["denoising"], "adjusted": []}},
+    )
+
+    assert overlay._append_controlled_bridge(agent, bridge_factor=2) is True
+    assert agent.plan == ["denoising", overlay.BRIDGE_SUBTASK]
+    assert agent.work_mem["plan"]["initial"] == ["denoising", overlay.BRIDGE_SUBTASK]
+
+    # Replay the upstream invariant after a failed subtask has been executed.
+    done_subtasks = ["denoising"]
+    agent.plan = [overlay.BRIDGE_SUBTASK]
+    assert set(done_subtasks + agent.plan) == set(agent.work_mem["plan"]["initial"])
+
+
+def test_controlled_bridge_is_appended_at_most_once(overlay: ModuleType) -> None:
+    agent = SimpleNamespace(
+        plan=["denoising"],
+        work_mem={"plan": {"initial": ["denoising"], "adjusted": []}},
+    )
+
+    assert overlay._append_controlled_bridge(agent, bridge_factor=2) is True
+    # A later reschedule must not duplicate a bridge that is still pending.
+    assert overlay._append_controlled_bridge(agent, bridge_factor=2) is False
+    # Nor may it re-add one that already ran.
+    agent.plan = []
+    agent._scaleguard_bridge_attempted = True
+    assert overlay._append_controlled_bridge(agent, bridge_factor=2) is False
+
+    assert agent.work_mem["plan"]["initial"].count(overlay.BRIDGE_SUBTASK) == 1
+
+
+def test_controlled_bridge_remains_terminal_after_upstream_rescheduling(
+    overlay: ModuleType,
+) -> None:
+    agent = SimpleNamespace(
+        plan=[overlay.BRIDGE_SUBTASK, "denoising"],
+        work_mem={"plan": {"initial": ["denoising", overlay.BRIDGE_SUBTASK]}},
+    )
+
+    assert overlay._append_controlled_bridge(agent, bridge_factor=2) is True
+    assert agent.plan == ["denoising", overlay.BRIDGE_SUBTASK]
+
+
+def test_controlled_bridge_rejects_a_duplicated_live_plan(overlay: ModuleType) -> None:
+    agent = SimpleNamespace(
+        plan=[overlay.BRIDGE_SUBTASK, "denoising", overlay.BRIDGE_SUBTASK],
+        work_mem={"plan": {"initial": ["denoising", overlay.BRIDGE_SUBTASK]}},
+    )
+
+    with pytest.raises(RuntimeError, match="more than once"):
+        overlay._append_controlled_bridge(agent, bridge_factor=2)
+
+
+def test_no_bridge_is_appended_when_the_scale_plan_does_not_request_one(
+    overlay: ModuleType,
+) -> None:
+    agent = SimpleNamespace(
+        plan=["denoising"],
+        work_mem={"plan": {"initial": ["denoising"], "adjusted": []}},
+    )
+
+    assert overlay._append_controlled_bridge(agent, bridge_factor=1) is False
+    assert agent.plan == ["denoising"]
+    assert agent.work_mem["plan"]["initial"] == ["denoising"]

@@ -26,7 +26,7 @@ Only a dependency-complete subset of upstream tools that runs in the locked
 
 - SwinIR, MPRNet, Restormer, DehazeFormer, and FBCNN restoration entries;
 - the three upstream classical brightening entries; and
-- at most one existing SwinIR 2× fidelity bridge when the scale policy asks
+- at most one existing controlled SwinIR 2× bridge when the scale policy asks
   for it.
 
 Generative 4×/16× SR, special-environment tools, face restoration, and

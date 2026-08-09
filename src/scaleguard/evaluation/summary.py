@@ -183,6 +183,7 @@ def _quality_calibration_evidence(
     verification_reasons: list[str] = []
     observed_size: int | None = None
     observed_sha256: str | None = None
+    calibration_input_sha256s: list[str] = []
     if receipt_path is not None:
         try:
             payload, observed_sha256 = load_regular_file_snapshot(
@@ -197,6 +198,27 @@ def _quality_calibration_evidence(
                     f"quality_calibration_receipt_invalid:{reason}"
                     for reason in verification_reasons
                 )
+            else:
+                inputs = document.get("inputs")
+                manifests = inputs.get("manifests") if isinstance(inputs, Mapping) else None
+                if not isinstance(manifests, list):
+                    raise EvaluationEvidenceError(
+                        "verified calibration receipt has no manifest input evidence"
+                    )
+                observed_inputs = [
+                    item.get("input_sha256") if isinstance(item, Mapping) else None
+                    for item in manifests
+                ]
+                if any(
+                    not isinstance(digest, str)
+                    or len(digest) != 64
+                    or any(character not in "0123456789abcdef" for character in digest)
+                    for digest in observed_inputs
+                ):
+                    raise EvaluationEvidenceError(
+                        "verified calibration receipt has invalid input identities"
+                    )
+                calibration_input_sha256s = sorted(set(cast(list[str], observed_inputs)))
         except (OSError, ValueError, ScaleGuardError) as error:
             verification_reasons = [f"unreadable:{type(error).__name__}"]
             issues.append("quality_calibration_receipt_unreadable")
@@ -211,6 +233,7 @@ def _quality_calibration_evidence(
             "path": str(receipt_path) if receipt_path is not None else recorded_path,
             "size_bytes": observed_size,
             "sha256": observed_sha256,
+            "input_sha256s": calibration_input_sha256s,
             "verification_reasons": verification_reasons,
         },
         issues,
@@ -731,6 +754,9 @@ def _run_record(
     if isinstance(calibration_path, str) and Path(calibration_path).is_absolute():
         protected_paths.append(str(Path(calibration_path).resolve()))
     issues.extend(calibration_issues)
+    calibration_inputs = calibration_evidence.get("input_sha256s")
+    if isinstance(calibration_inputs, list) and input_evidence["sha256"] in calibration_inputs:
+        issues.append("calibration_evaluation_input_overlap")
     pairing_fingerprint, pairing_issues = _pairing_fingerprint(
         manifest,
         context=str(path),
@@ -1010,7 +1036,7 @@ def _bind_metric_receipts(
     receipt_evidence: list[dict[str, Any]] = []
     definitions: dict[str, dict[str, Any]] = {}
     result_identities: dict[str, str] = {}
-    bound_manifests: set[str] = set()
+    bound_metrics_by_manifest: dict[str, set[str]] = {}
     protected_paths: set[Path] = set()
     for receipt_index, receipt_path in enumerate(receipt_paths):
         resolved_receipt = str(receipt_path.expanduser().resolve())
@@ -1035,6 +1061,7 @@ def _bind_metric_receipts(
         raw_definitions = verified["metric_definitions"]
         if not isinstance(raw_definitions, Mapping):
             raise AssertionError("verified metric definitions must be a mapping")
+        current_definition_names = set(raw_definitions)
         for name, raw_definition in raw_definitions.items():
             if name not in _EXTERNAL_METRIC_NAMES or not isinstance(raw_definition, dict):
                 raise EvaluationEvidenceError(
@@ -1067,17 +1094,30 @@ def _bind_metric_receipts(
                 raise EvaluationEvidenceError(
                     f"metric receipt sample identity drift for manifest: {manifest_path}"
                 )
-            if manifest_path in bound_manifests:
-                raise EvaluationEvidenceError(
-                    f"multiple metric receipt samples bind the same manifest: {manifest_path}"
-                )
-            bound_manifests.add(manifest_path)
             raw_metrics = sample.get("metrics")
             if not isinstance(raw_metrics, Mapping):
                 raise AssertionError("verified sample metrics must be a mapping")
-            observed_metrics: dict[str, dict[str, Any]] = {}
+            if set(raw_metrics) != current_definition_names:
+                raise EvaluationEvidenceError(
+                    f"metric receipt sample {sample_index} does not match its definitions"
+                )
+            already_bound = bound_metrics_by_manifest.setdefault(manifest_path, set())
+            overlap = already_bound.intersection(raw_metrics)
+            if overlap:
+                raise EvaluationEvidenceError(
+                    "multiple metric receipt samples bind the same metric for "
+                    f"{manifest_path}: {', '.join(sorted(overlap))}"
+                )
+            already_bound.update(raw_metrics)
+            observed_metrics = record.setdefault("external_metrics", {})
+            if not isinstance(observed_metrics, dict):
+                raise AssertionError("external metrics must be a dictionary")
+            references = record.setdefault("metric_reference_sha256_by_metric", {})
+            receipts = record.setdefault("metric_receipts_by_metric", {})
+            if not isinstance(references, dict) or not isinstance(receipts, dict):
+                raise AssertionError("metric evidence maps must be dictionaries")
             for name, raw_metric in raw_metrics.items():
-                if name not in definitions or not isinstance(raw_metric, Mapping):
+                if name not in current_definition_names or not isinstance(raw_metric, Mapping):
                     raise EvaluationEvidenceError(
                         f"metric receipt sample {sample_index} has invalid metric {name!r}"
                     )
@@ -1103,13 +1143,17 @@ def _bind_metric_receipts(
                         "reason": "native_resolution_output_not_comparable_to_4x_reference",
                     }
                 observed_metrics[name] = metric
-            record["external_metrics"] = observed_metrics
-            record["metric_receipt"] = {
-                "path": verified["path"],
-                "sha256": verified["sha256"],
-                "receipt_sha256": verified["receipt_sha256"],
-                "research_eligible": verified["research_eligible"],
-            }
+                references[name] = (
+                    sample.get("reference_sha256")
+                    if definitions[name]["reference_required"] is True
+                    else None
+                )
+                receipts[name] = {
+                    "path": verified["path"],
+                    "sha256": verified["sha256"],
+                    "receipt_sha256": verified["receipt_sha256"],
+                    "research_eligible": verified["research_eligible"],
+                }
 
     for name, identity in result_identities.items():
         definitions[name]["measured_identity_sha256"] = identity
@@ -1212,6 +1256,27 @@ def _external_metric_effects(
                     treatment_metric, Mapping
                 ):
                     raise AssertionError("measured external metrics must be mappings")
+                if definition["reference_required"] is True:
+                    baseline_references = baseline.get("metric_reference_sha256_by_metric")
+                    treatment_references = treatment.get("metric_reference_sha256_by_metric")
+                    baseline_reference = (
+                        baseline_references.get(metric_name)
+                        if isinstance(baseline_references, Mapping)
+                        else None
+                    )
+                    treatment_reference = (
+                        treatment_references.get(metric_name)
+                        if isinstance(treatment_references, Mapping)
+                        else None
+                    )
+                    if (
+                        not isinstance(baseline_reference, str)
+                        or baseline_reference != treatment_reference
+                    ):
+                        excluded_statuses["reference_mismatch"] = (
+                            excluded_statuses.get("reference_mismatch", 0) + 1
+                        )
+                        continue
                 baseline_value = baseline_metric.get("value")
                 treatment_value = treatment_metric.get("value")
                 if (
