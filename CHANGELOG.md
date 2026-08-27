@@ -9,6 +9,9 @@ and intends to use semantic versioning after its first public release.
 
 ### Added
 
+- A repository-wide Chinese showcase and evidence disclosure that separates
+  implemented contracts from GPU targets and defines the evidence required to
+  replace display values with measured results.
 - Deterministic Trusted Scale Controller with explicit continue, stop, and
   rollback decisions for one-step CoZ states.
 - Discrete 1×/2×/4×/8×/16× factor policy with at most one controlled 2×
