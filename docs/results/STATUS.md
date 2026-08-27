@@ -2,9 +2,9 @@
 
 Last reviewed: 2026-08-27
 
-The repository-wide Chinese disclosure for showcase targets, absent evidence,
-and promotion rules is [声明.md](../../声明.md). This file remains the
-authoritative completion-level record.
+The repository-wide Chinese evidence disclosure is
+[声明.md](../../声明.md). This file remains the authoritative completion-level
+record.
 
 Highest supported completion level: **`STATIC_READY`**
 
