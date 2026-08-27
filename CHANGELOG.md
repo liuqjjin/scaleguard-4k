@@ -105,6 +105,8 @@ and intends to use semantic versioning after its first public release.
 
 ### Security
 
+- Updated indirect `datasets` and `pip` locks to patched releases after new
+  advisories were published during the documentation pull request checks.
 - Added argument redaction, shell-free process templates, timeouts,
   process-group termination, service-port ownership checks, safe model-archive
   materialization, receipt hashing, and allowlisted diagnostic collection.
