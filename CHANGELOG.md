@@ -9,6 +9,9 @@ and intends to use semantic versioning after its first public release.
 
 ### Added
 
+- A repository-wide Chinese showcase and evidence disclosure that separates
+  implemented contracts from GPU targets and defines the evidence required to
+  replace display values with measured results.
 - Deterministic Trusted Scale Controller with explicit continue, stop, and
   rollback decisions for one-step CoZ states.
 - Discrete 1×/2×/4×/8×/16× factor policy with at most one controlled 2×
@@ -102,6 +105,8 @@ and intends to use semantic versioning after its first public release.
 
 ### Security
 
+- Updated indirect `datasets` and `pip` locks to patched releases after new
+  advisories were published during the documentation pull request checks.
 - Added argument redaction, shell-free process templates, timeouts,
   process-group termination, service-port ownership checks, safe model-archive
   materialization, receipt hashing, and allowlisted diagnostic collection.
