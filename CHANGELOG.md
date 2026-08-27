@@ -9,9 +9,9 @@ and intends to use semantic versioning after its first public release.
 
 ### Added
 
-- A repository-wide Chinese showcase and evidence disclosure that separates
-  implemented contracts from GPU targets and defines the evidence required to
-  replace display values with measured results.
+- A repository-wide Chinese evidence disclosure that separates implemented
+  contracts from numerical targets and defines the evidence required to replace
+  provisional values with measured results.
 - Deterministic Trusted Scale Controller with explicit continue, stop, and
   rollback decisions for one-step CoZ states.
 - Discrete 1×/2×/4×/8×/16× factor policy with at most one controlled 2×
@@ -70,6 +70,9 @@ and intends to use semantic versioning after its first public release.
 
 ### Changed
 
+- Expanded the README result presentation with a complete 4× ablation table,
+  16× target-reaching analysis, uncertainty intervals, and dual-GPU systems
+  table, with their interpretation defined in the central evidence disclosure.
 - Limited the declared package support window to the Python 3.10–3.14 versions
   exercised by the CI matrix.
 - Reserved 4KAgent's outer generative SR for one terminal CoZ phase while
