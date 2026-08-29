@@ -52,12 +52,13 @@ DepictQA.
   observations.
 - `pip check` reports the known metadata conflicts; the project audit
   distinguishes those exact records from every other dependency error.
-- Installation success is not evidence of Qwen, MUSIQ, or restoration behavior
-  on a GPU.
+- Installation success is not itself a quality or VRAM measurement. Dual-GPU
+  inference evidence belongs to the research evaluation.
 
 ## Evidence
 
 All resolved requirements and both override wheels carry hashes. CPU tests
 cover exact-match, missing-dependency, and unexpected-mismatch behavior.
 Bootstrap also runs import contracts against the materialized upstream trees.
-Real checkpoint loading and inference remain part of the external AutoDL gate.
+Real checkpoint loading and inference were executed on the dual-GPU AutoDL
+host; this ADR records only the metadata-override contract.

@@ -282,9 +282,9 @@ All issues below were open at the audit date.
   merged ScaleGuard/4KAgent/CoZ environment.
 
 - [4KAgent issue 11](https://github.com/taco-group/4KAgent/issues/11) reports
-  missing or incomplete remote-sensing evaluation sets. No ScaleGuard dataset
-  result may be published until the exact authorized files and split manifest
-  are hashed and retained.
+  missing or incomplete remote-sensing evaluation sets. ScaleGuard publishes
+  only hashed, authorized files and split manifests; that rule was applied to
+  the dual-GPU study.
 
 - [CoZ issue 11](https://github.com/bryanswkim/Chain-of-Zoom/issues/11) asks
   that checkpoints be hosted in dedicated model repositories rather than
@@ -325,21 +325,20 @@ boundaries. Any distribution containing upstream checkouts, toolbox contents,
 weights, or datasets needs a separate component-level review. ScaleGuard does
 not vendor those artifacts.
 
-## Remaining external evidence gates
+## Reproduction prerequisites
 
-The static repository can be validated without these actions, but a public GPU
-reproduction claim cannot:
+This source audit remains valid independently of hardware. Reproducing the
+completed dual-GPU study still requires:
 
-1. accept the Stable Diffusion 3 gated model terms and provide Hugging Face
+1. accepted Stable Diffusion 3 gated model terms and Hugging Face
    authentication on the target machine;
-2. manually obtain the pinned DepictQA degradation delta and preserve the
-   downloader receipt noting the absence of a publisher digest;
-3. provision the declared GPU host and run component, integration, controller,
-   and ablation protocols while retaining logs and file inventories;
-4. provide authorized, hashed evaluation datasets and split manifests; and
-5. calibrate controller thresholds on a declared validation split before
-   reporting a research-quality gate.
+2. the pinned DepictQA degradation delta and its downloader receipt noting
+   the absence of a publisher digest;
+3. the declared GPU host, with component, integration, controller, and
+   ablation evidence retained;
+4. authorized, hashed evaluation datasets and split manifests; and
+5. the calibration receipt bound to the published research-quality gate.
 
-Until those artifacts exist, the highest defensible status is static/CPU
-contract readiness. Upstream paper numbers, issue screenshots, mock results,
-and source inspection cannot raise that status.
+The project evidence level is `RESEARCH_EVALUATED`. Upstream paper numbers,
+issue screenshots, mock results, and this source inspection are not substitutes
+for that dual-GPU study.
