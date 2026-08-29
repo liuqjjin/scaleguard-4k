@@ -344,7 +344,8 @@ must still match the fixed marker.
 `execution.json.status == "passed"` means only that the command and wrapper
 artifact checks passed. Review the ScaleGuard run manifest to confirm real
 backends, exact weight revisions, terminal CoZ execution, per-scale decisions
-and rollback state before raising the project completion level.
+and rollback state before treating a new attempt as additional research
+evidence. The published dual-GPU study is already `RESEARCH_EVALUATED`.
 
 ## Evidence and diagnostics
 
