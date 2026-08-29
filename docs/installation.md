@@ -296,7 +296,9 @@ scripts/autodl/run_integration.sh \
 
 The wrappers reject stale outputs, rerun GPU/upstream/weight checks, preserve
 logs, sample both GPUs, and require a fresh non-mock manifest. Their success
-still requires evidence review before the project status is raised.
+still requires evidence review before a new attempt is treated as additional
+research evidence. The published dual-GPU study is already at
+`RESEARCH_EVALUATED`.
 
 Unset both credential variables after the attempt:
 

@@ -46,6 +46,6 @@ agent, VLM, restoration method, or SR method.
 ## Evidence
 
 The decision is based on static inspection of the commits in
-`upstream-lock.yaml`; see `docs/upstream-audit.md`. It is covered by CPU
-contracts and mock integration tests. It is not evidence that either upstream
-model has run on a GPU in this repository.
+`upstream-lock.yaml`; see `docs/upstream-audit.md`. CPU contracts and mock
+integration tests cover this ADR. Dual-GPU execution of both upstreams is
+recorded by the research evaluation, not by this decision.

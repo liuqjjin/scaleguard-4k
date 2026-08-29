@@ -47,5 +47,5 @@ environment and records the exact checks in its receipts.
 - A dependency upgrade that restores or changes any affected API must remove
   or deliberately revise the corresponding shim, tests, locks, and this ADR.
 - Passing import contracts establishes compatibility only. Checkpoint loading,
-  CUDA execution, numerical quality, and VRAM remain external AutoDL evidence
-  gates.
+  CUDA execution, numerical quality, and VRAM are recorded by the dual-GPU
+  study, not by this ADR.

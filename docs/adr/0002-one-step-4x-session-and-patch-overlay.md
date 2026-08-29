@@ -66,10 +66,12 @@ overlay, not by rewriting the upstream CLI.
   placement in the full-image path. ScaleGuard accepts only an explicit `fp32`
   label for this path and records requested precision plus actual component
   placement.
-- Peak memory, speed, determinism, seams, and image quality remain GPU
-  validation items. Static inspection does not establish any of them.
+- Peak memory, speed, determinism, seams, and image quality are GPU
+  measurements. Static inspection does not establish any of them; the
+  dual-GPU study records those measurements separately.
 
 ## Evidence
 
 The worker and patch are source-audited and exercised through CPU process
-contracts where possible. No GPU inference result is claimed.
+contracts where possible. This ADR does not itself publish inference
+numbers; those belong to the dual-GPU evaluation.

@@ -58,12 +58,12 @@ ScaleGuard still owns the sole final AdaIN color-alignment step.
   experiment is reproduced.
 - The remote scheduler remains an external service. A dated snapshot and
   request receipt reduce drift but cannot guarantee server-side determinism.
-- Model imports and GPU behavior still require the external two-GPU run.
+- Model imports and GPU behavior are validated on the dual-GPU host; this
+  ADR records the overlay contract, not those measurements.
 
 ## Evidence
 
 Contract tests inspect argument construction, path isolation, service
 lifecycle, clean-checkout enforcement, run-local BPE binding, explicit HPS
 checkpoint use, and the absence of remote pretraining fallback. The overlay
-compiles locally. No GPU restoration or quality result is inferred from those
-checks.
+compiles locally. Those checks do not replace the dual-GPU study.

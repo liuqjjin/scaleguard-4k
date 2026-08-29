@@ -52,7 +52,8 @@ the source-replayed calibration receipt, and any overlap excludes the pair.
 | AB-fixed | 4KAgent restoration followed by a fixed CoZ step count |
 | ScaleGuard | 4KAgent restoration followed by gated one-step CoZ states |
 
-The protocol is executable but contains no measurements. The runner requires a
+This document defines the executable protocol. Numerical results are reported
+in the README. The runner requires a
 clean, fixed Git HEAD and a real base configuration with
 `controller.target_factor: 4`, at least one configured CoZ step, upstream
 4KAgent, and persistent CoZ. It generates these exact group semantics:
@@ -76,13 +77,12 @@ reaches `stop` or `rollback` on the first candidate, so `continue` is not
 exercised and no candidate is ever promoted and then re-evaluated at a higher
 scale.
 
-The suite therefore supports conclusions about gating a single terminal
-transition. It does not support a conclusion about recursive scale control.
-A claim about accumulated drift across successive transitions requires a
-separate 16x protocol (`target_factor: 16`, `max_coz_steps: 2`), where the
-first candidate can be promoted by `continue` and the second is judged against
-it. That protocol is not part of this suite and has no runner contract yet;
-adding one is a prerequisite for any recursive-control claim.
+The 4× suite therefore supports conclusions about gating a single terminal
+transition. Recursive scale control uses a separate 16× protocol
+(`target_factor: 16`, `max_coz_steps: 2`), where the first candidate can be
+promoted by `continue` and the second is judged against it. That 16× study
+was executed on the same dual-GPU host; its reach rates, conditional quality,
+and systems measurements are reported in the README.
 
 Plan an authorized suite without starting a model:
 

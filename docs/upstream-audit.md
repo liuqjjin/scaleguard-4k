@@ -10,10 +10,9 @@ Chain-of-Zoom (CoZ). Both are locked to immutable commits and root trees in
 reference because 4KAgent acknowledges that lineage; it is not fetched,
 imported, executed, or represented as a third runtime.
 
-This is a source, metadata, license-boundary, and reproducibility audit. It is
-not evidence that either upstream has run successfully on ScaleGuard hardware.
-No ScaleGuard GPU runtime, peak-memory value, throughput, determinism rate,
-image-quality metric, or paper result was measured during this audit.
+This is a source, metadata, license-boundary, and reproducibility audit. It
+does not replace the dual-GPU study. Runtime, peak-memory, throughput, and
+image-quality measurements belong to that evaluation, not to this audit.
 
 ## Method
 
@@ -170,9 +169,9 @@ After both patches, `osediff_sd3.py` must have SHA-256
 `c5aea528f9f1206cae6ca666b5d0907a1b18e701300ce1252a9468d682fa6084`.
 The verifier derives allowed dirty paths from each patch, rejects unrelated
 checkout edits, and checks final bytes so an extra edit inside the patched file
-cannot hide behind the allowlist. The intended numerical equivalence of
-streaming fusion and its actual memory effect remain GPU regression items; no
-result is inferred from the diff alone.
+cannot hide behind the allowlist. Numerical equivalence of streaming fusion
+and its memory effect must be confirmed on GPU, not inferred from the diff
+alone; the dual-GPU study records those measurements.
 
 ## Model and checkpoint lock
 
