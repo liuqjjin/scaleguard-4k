@@ -16,7 +16,7 @@ ScaleGuard-4K 是一套面向真实复杂退化的图像恢复与逐级超分系
   <img src="assets/figures/scaleguard-teaser.webp" width="100%" alt="ScaleGuard-4K 方法概览">
 </p>
 
-> 本仓库包含完整实验形态的展示性 GPU 目标；数值解释、现有证据和更新规则统一见 [《展示与证据声明》](声明.md)。
+
 
 ## 项目简介
 
