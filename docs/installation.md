@@ -1,9 +1,9 @@
 # Installation
 
-ScaleGuard-4K currently supports a reproducible CPU/mock development
-environment. The real 4KAgent → CoZ path is prepared for a Linux dual-GPU host
-but has not yet been executed by this project; its status remains
-`STATIC_READY`.
+ScaleGuard-4K supports a reproducible CPU/mock development environment and a
+completed dual-GPU 4KAgent → CoZ research path on a Linux dual-RTX-4090 host.
+The project evidence level is `RESEARCH_EVALUATED`. CPU/mock runs remain
+`STATIC_READY` and `mock: true`.
 
 ## CPU and development environment
 
@@ -324,9 +324,10 @@ uv run --locked scaleguard doctor --config configs/runtime/autodl-2x4090.yaml
 ```
 
 `doctor` checks paths, service launchability, GPU inventory, and whether a
-calibration receipt is configured. It does not start the models or establish
-that thresholds are statistically valid. A warning about an absent calibration
-receipt is expected until the evaluation protocol has been completed.
+calibration receipt is configured. It does not start the models or by itself
+re-establish that thresholds are statistically valid. Research reproduction
+should point doctor at the same calibration receipt used by the published
+study.
 
 ## Common installation failures
 

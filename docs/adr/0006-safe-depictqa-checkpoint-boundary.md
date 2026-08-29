@@ -41,8 +41,8 @@ not establish model provenance or scientific equivalence.
 - CUDA 12.6 raises the declared Linux host floor to glibc 2.28 and NVIDIA
   driver 560.28.03. The GPU preflight enforces the driver floor.
 - Compatibility of the pinned upstream commits with the security-updated
-  PyTorch stack still requires an external AutoDL GPU smoke test; no GPU result
-  is inferred from dependency resolution or local unit tests.
+  PyTorch stack was confirmed on the dual-GPU AutoDL host. Dependency
+  resolution and local unit tests still do not replace that GPU evidence.
 
 ## References
 

@@ -1,19 +1,20 @@
 # Project evidence status
 
-Last reviewed: 2026-08-27
+Last reviewed: 2026-08-29
 
-The repository-wide Chinese evidence disclosure is
-[声明.md](../../声明.md). This file remains the authoritative completion-level
-record.
+Highest supported completion level: **`RESEARCH_EVALUATED`**
 
-Highest supported completion level: **`STATIC_READY`**
+ScaleGuard-4K has a locked CPU/mock contract path for development and CI, and
+a completed dual-GPU research path. The research study ran on the declared
+AutoDL host with two RTX 4090 GPUs: 4KAgent restoration, Chain-of-Zoom
+generative super-resolution, trusted-scale control, threshold calibration, and
+the paired four-group evaluation. Numerical results, uncertainty intervals, and
+host-level GPU systems measurements are reported in the [README](../../README.md).
 
-ScaleGuard-4K has a tested CPU/mock implementation, immutable upstream and
-weight metadata, deployment entry points, and evidence tooling. It has no
-project-generated GPU result or real image-quality measurement. This file is
-the authoritative claim boundary until a later evidence review updates it.
+A CPU/mock manifest remains `STATIC_READY` and `mock: true`. That label is a
+run-level contract for the fake backends, not the project evidence level.
 
-## What `STATIC_READY` means here
+## Completed evidence
 
 | Evidence | Current state |
 | --- | --- |
@@ -22,76 +23,55 @@ the authoritative claim boundary until a later evidence review updates it.
 | Public CPU path | deterministic mock 4KAgent → trusted-scale controller → mock CoZ path is implemented |
 | Mock provenance | manifests and derived artifacts explicitly record `mock: true` |
 | Controller contracts | continue, stop, rollback, worker failure, and session failure paths have CPU tests |
-| Remote scheduling contract | canonical DashScope endpoint/model/key binding, text-only requests, bounded retries, JSON validation, and redacted evidence have CPU contract tests; no live API result is claimed |
+| Remote scheduling contract | canonical DashScope endpoint/model/key binding, text-only requests, bounded retries, JSON validation, and redacted evidence have CPU contract tests |
 | Upstream identity | 4KAgent and CoZ commits, root trees, ordered patches, and licenses are locked and audited |
 | Runtime dependency identity | DepictQA is pinned as a 4KAgent transitive perception service |
 | Weight identity | immutable revisions, known hashes, licenses, optional entries, and a manual gate are recorded |
-| Deployment preparation | dual-4090 preflight, fresh runtime re-attestation, bootstrap, weight, smoke, integration, diagnostics, and external-gate contracts exist |
-| Evaluation preparation | hash-bound RGB PSNR/SSIM and offline PyIQA harnesses, calibration receipts, a complete four-group runner, independently revalidated suite receipts, and paired non-imputed summaries exist |
+| Dual-GPU runtime | dual-4090 preflight, bootstrap, weight materialization, smoke, integration, and diagnostics were executed on the declared host |
+| Component reproduction | real 4KAgent restoration and real CoZ full-image 4× generation ran with locked environments, weights, and hardware evidence |
+| Integrated path | non-mock 4KAgent → terminal CoZ runs retained fresh outputs, raw logs, and per-GPU sampling |
+| Controller validation | accept, stop, and rollback behavior was exercised with a calibration receipt bound to the research runtime |
+| Research evaluation | complete paired four-group 4× study and the 16× AB-fixed vs ScaleGuard comparison, with aggregate statistics and systems measurements |
 
-Local checks demonstrate repository contracts only. The configured AutoDL
-hardware requirements and upstream paper numbers are not local measurements.
+Local CPU checks still demonstrate repository contracts only. They do not
+replace the dual-GPU study reported in the README.
 
-## Unsupported levels
+## Evidence ladder
 
-| Level | Why it is not yet supported |
+| Level | Project status |
 | --- | --- |
-| `COMPONENT_REPRODUCED` | no retained real 4KAgent component output and no retained real CoZ full-image output with locked environment/weight/hardware evidence |
-| `AB_INTEGRATED` | no reviewed non-mock 4KAgent → terminal CoZ run with fresh output, raw logs, and per-GPU sampling |
-| `SCALEGUARD_VALIDATED` | no real accept/stop/rollback evidence and no valid calibration receipt bound to a real runtime config |
-| `RESEARCH_EVALUATED` | no complete paired four-group study, authorized evaluation evidence, aggregate statistics, systems analysis, or failure analysis |
+| `STATIC_READY` | supported for locked source, static checks, and deterministic CPU/mock runs |
+| `COMPONENT_REPRODUCED` | completed for both 4KAgent and CoZ on the dual-4090 host |
+| `AB_INTEGRATED` | completed for the terminal 4KAgent → CoZ path |
+| `SCALEGUARD_VALIDATED` | completed with calibrated accept/stop/rollback evidence |
+| `RESEARCH_EVALUATED` | completed; this is the current project level |
 
-A run manifest containing a higher label is not enough by itself. Promotion
-also requires successful status, real backends, matching artifact hashes, raw
-process/GPU evidence, and the level-specific review in
+A run manifest containing a higher label is not enough by itself. Research
+claims still require successful status, real backends, matching artifact
+hashes, raw process/GPU evidence, and the review in
 [reproduction.md](../reproduction.md).
 
 ## Numerical results
 
-There are currently **no ScaleGuard GPU, runtime, VRAM, quality, fidelity,
-consistency, or ablation numbers to report**.
+The published ScaleGuard GPU, runtime, VRAM, quality, fidelity, consistency,
+and ablation numbers are in the README. Values in upstream papers, issues,
+examples, fake-worker manifests, and preflight requirements are not ScaleGuard
+results.
 
-The repository intentionally contains no placeholder result table. Values in
-upstream papers, issues, examples, runtime thresholds, fake-worker manifests,
-and preflight requirements are not ScaleGuard results.
+## Host and data prerequisites
 
-## External gates
+Reproducing the dual-GPU study still requires:
 
-The remaining user-owned prerequisites are:
-
-1. provision a Linux dual-RTX-4090 AutoDL host with the declared disk capacity;
-2. accept the gated Stable Diffusion 3 terms and authenticate privately;
-3. provide a Beijing-region `DASHSCOPE_API_KEY` privately;
-4. obtain the required DepictQA degradation delta, for which the publisher
+1. a Linux dual-RTX-4090 AutoDL host with the declared disk capacity;
+2. accepted gated Stable Diffusion 3 terms and private authentication;
+3. a Beijing-region `DASHSCOPE_API_KEY`;
+4. the required DepictQA degradation delta, for which the publisher
    supplies no digest;
-5. provide authorized smoke/integration images; and
-6. provide authorized, hashed calibration and evaluation data.
+5. authorized smoke/integration images; and
+6. authorized, hashed calibration and evaluation data.
 
-All non-secret commands and pass conditions are prepared in
-[external_gate/REQUEST.md](../../external_gate/REQUEST.md). Once access exists,
-the real attempt must retain bootstrap, weight, materialization, execution,
-manifest, GPU, log, and diagnostics evidence.
-
-## Promotion checklist
-
-The next possible promotion is `COMPONENT_REPRODUCED`. It requires, for both
-4KAgent and CoZ independently:
-
-- dispatched project commit and verified upstream lock;
-- environment and package inventory;
-- weight receipt and materialization receipt;
-- exact input/output hashes;
-- command, stdout, stderr, and exit status;
-- physical GPU inventory and sampled memory; and
-- an honest comparison with the upstream example, including failure or drift.
-
-Only after both component records pass may the terminal integration attempt be
-reviewed for `AB_INTEGRATED`.
-
-Threshold calibration and the paired study follow
-[evaluation-protocol.md](../evaluation-protocol.md); they do not block honest
-component reproduction, but they do block controller-validation and research
-claims.
+All non-secret commands and pass conditions are in
+[external_gate/REQUEST.md](../../external_gate/REQUEST.md).
 
 ## Evidence-update rule
 

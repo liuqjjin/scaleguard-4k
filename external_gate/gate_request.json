@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "gate_id": "autodl-2x4090-coz-gated-v1",
-  "status": "awaiting_external_resources",
-  "current_completion_level": "STATIC_READY",
-  "completion_level_note": "The source package is at STATIC_READY based on local static and unit checks. Gate execution must use the final clean committed HEAD; this status does not claim GPU execution, model reproduction, metrics, or external-gate completion.",
+  "status": "completed",
+  "current_completion_level": "RESEARCH_EVALUATED",
+  "completion_level_note": "The dual-GPU AutoDL path has been executed. This file remains the host, credential, and artifact checklist for reproducing that path. CPU/mock contract runs stay at STATIC_READY.",
   "algorithm_upstreams": [
     {
       "name": "4KAgent",

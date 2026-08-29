@@ -1,9 +1,9 @@
 # Release checklist
 
-ScaleGuard-4K is currently a `0.1.0.dev0` pre-release with an evidence level of
-`STATIC_READY`. This checklist makes the source package and its public claims
-reproducible; it does not promote GPU or research evidence. The authoritative
-claim boundary is [results/STATUS.md](results/STATUS.md).
+ScaleGuard-4K is currently a `0.1.0.dev0` release candidate with an evidence
+level of `RESEARCH_EVALUATED`. This checklist makes the source package and its
+public claims reproducible. The authoritative claim boundary is
+[results/STATUS.md](results/STATUS.md).
 
 ## 1. Freeze the release candidate
 
@@ -141,7 +141,7 @@ release inputs after recording them.
 - Keep mock output visibly labelled and exclude it from quality, latency, VRAM,
   or research-result tables.
 - Do not copy upstream paper numbers into ScaleGuard result fields.
-- Keep unsupported evidence levels and external gates explicit.
+- Keep remaining scientific limitations and host prerequisites explicit.
 - Review licensing and redistribution terms for code, weights, data, metrics,
   example inputs, and any media included in release notes.
 

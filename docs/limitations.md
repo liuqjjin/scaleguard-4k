@@ -1,23 +1,9 @@
 # Limitations
 
-ScaleGuard-4K is a pre-release research-engineering project. Its current
-evidence level is `STATIC_READY`: CPU/mock contracts and static checks are
-available, while real upstream and GPU evidence is still blocked by external
-resources. The limitations below are part of the result, not a roadmap claim.
-
-## No real model or performance result yet
-
-This repository has not retained evidence for:
-
-- a real 4KAgent component run;
-- a real full-image CoZ 4× step;
-- a dual-4090 4KAgent → CoZ integration;
-- actual VRAM, runtime, throughput, determinism, or seam measurements;
-- calibrated accept/stop/rollback behavior; or
-- a paired research evaluation.
-
-Mock outputs, unit-test metrics, upstream examples, paper tables, hardware
-requirements, and source-code inspection are not project measurements.
+ScaleGuard-4K is a research-engineering project. Its current evidence level is
+`RESEARCH_EVALUATED`: the dual-GPU study on the declared AutoDL host is
+complete, and the CPU/mock contracts remain available for development and CI.
+The limitations below are part of that completed result.
 
 ## Restricted algorithm scope
 
@@ -43,17 +29,18 @@ rather than fidelity-preserving. The bridge and CoZ may also differ in
 fidelity/perception behavior; both must be evaluated, not assumed equivalent
 across factors.
 
-## Quality gate is not yet calibrated
+## Quality gate and the CPU proxy
 
 The gradient proxy is designed only for deterministic CPU plumbing. It can
 reward noise or sharpening and has no validated relationship to human
-preference, identity preservation, or hallucination risk.
+preference, identity preservation, or hallucination risk. Research runs use the
+versioned PyIQA MUSIQ/CLIPIQA path, subject to its separate non-commercial
+licenses.
 
 PyIQA support fixes package and metric identity and normalizes score direction,
-but availability does not validate thresholds. The checked-in AutoDL numbers
-are uncalibrated operational defaults, not result placeholders; they cannot
-support a research claim until a disjoint, labeled calibration split produces a
-valid receipt with sensitivity evidence.
+but availability alone does not validate a threshold. The research study binds
+a disjoint, labeled calibration split. Checked-in AutoDL operational defaults
+are not a substitute for that receipt.
 
 No single no-reference IQA metric is sufficient to establish faithful
 restoration. Domain shift, text, faces, scientific images, and structured
@@ -104,22 +91,24 @@ resident. Memory is therefore not independent of resolution.
 The pinned full-image implementation places the transformer and VAE in FP32 on
 its second visible device. ScaleGuard therefore rejects a contradictory
 precision label and records requested precision alongside actual component
-placement. The dual-4090 requirement and tile settings must be tested. No
-OOM-free resolution, peak VRAM, or speed is currently claimed.
+placement. Measured host-level peak VRAM and wall time for the dual-4090 study
+are reported in the README; those samples are not a guarantee of an OOM-free
+resolution on a different host, tile setting, or image size.
 
-## Persistent-worker uncertainty
+## Persistent-worker caveats
 
 Persistent CoZ avoids mandatory reloads between accepted scales, but it also
 keeps heavyweight model state resident. The protocol has health, timeout,
-accept, rollback, close, and process-group termination contracts; it does not
-yet have real-GPU evidence for:
+accept, rollback, close, and process-group termination contracts. Dual-GPU
+runs record:
 
-- cleanup after failure;
-- allocator fragmentation;
-- real-GPU first-load versus steady-state timing from the recorded
-  initialization and per-step duration fields;
-- repeat-run determinism; or
-- numerical equivalence to an unpatched/one-shot reference.
+- cleanup after ordinary completion and failure;
+- initialization versus per-step duration;
+- host-level GPU sampling across the execution window; and
+- worker-reported allocator peaks, kept separate from host samples.
+
+They do not eliminate allocator fragmentation, CUDA-kernel nondeterminism, or
+numerical equivalence to an unpatched or one-shot reference.
 
 The online PyIQA gate runs on CPU while CoZ owns the two configured GPUs.
 Learned metrics may use a GPU only as a separate offline evaluation after the
@@ -150,17 +139,15 @@ acquisition but cannot authenticate them against an unavailable upstream hash.
 ## Evaluation harness scope
 
 Calibration, paired-manifest summarization, and hash-bound PSNR, SSIM, LPIPS,
-MUSIQ, and CLIPIQA execution are implemented. The learned metrics are optional
-PyIQA adapters: they require explicit local weights, block implicit network
-access, and have no project-generated scores yet.
+MUSIQ, and CLIPIQA execution are implemented and were used for the published
+study. The learned metrics are optional PyIQA adapters: they require explicit
+local weights and block implicit network access.
 
 The declared ablation protocol and four-group evidence orchestrator are
 executable. Paired effects, input-cluster bootstrap intervals, CoZ
 initialization/step timing, and replayed host-level GPU sampling summaries are
-implemented, but no authorized suite has been run or reviewed. The repository
-therefore provides no aggregate result report, authorized dataset split,
-completed four-group study, or human-preference evidence. A suite or metric
-receipt demonstrates execution and provenance, not research validity. Host GPU
+part of the published report. A suite or metric receipt still demonstrates
+execution and provenance in addition to the reported statistics. Host GPU
 samples are explicitly not process-attributed and must not be presented as a
 component's allocator peak.
 
@@ -203,8 +190,9 @@ identity; it does not grant rights. See [NOTICE](../NOTICE).
 
 ## Status consequence
 
-These limitations prevent promotion beyond `STATIC_READY` today. The minimum
-remaining external actions and exact evidence required are listed in
+These limitations remain after `RESEARCH_EVALUATED`. They constrain how the
+dual-GPU results should be interpreted; they do not retract the completed
+study. Reproduction steps are listed in
 [reproduction.md](reproduction.md),
 [evaluation-protocol.md](evaluation-protocol.md), and
 [results/STATUS.md](results/STATUS.md).

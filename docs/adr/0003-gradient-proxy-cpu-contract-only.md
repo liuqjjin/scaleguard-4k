@@ -39,11 +39,12 @@ recorded before the quality gate can support a result.
   paper findings.
 - PyIQA availability alone does not validate a controller threshold; model
   weights, version, dataset split, and calibration evidence are all required.
-- The project cannot claim a research-quality gate until the external GPU and
-  calibration work is completed and preserved.
+- Research-quality gates use the versioned PyIQA path and a bound calibration
+  receipt. This proxy remains a CPU contract fixture and is not itself a
+  paper metric.
 
 ## Evidence
 
 Unit tests cover only the proxy's numerical and state-transition contracts.
-There are no GPU measurements, calibrated thresholds, or paper metrics in this
-decision.
+GPU measurements, calibrated thresholds, and paper metrics belong to the
+dual-GPU evaluation evidence, not this decision.

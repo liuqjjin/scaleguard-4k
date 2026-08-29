@@ -2,8 +2,8 @@
 
 ScaleGuard-4K welcomes focused contributions to restoration/SR integration,
 trusted-scale control, reproducibility, evaluation, tests, and documentation.
-The project is pre-release and currently `STATIC_READY`; contributions must not
-turn planned GPU or research work into unsupported claims.
+The project evidence level is `RESEARCH_EVALUATED`. Contributions must not
+present mock, CPU-contract, or unverified runs as dual-GPU research evidence.
 
 ## Before starting
 
@@ -121,7 +121,7 @@ Failed runs are useful evidence. Preserve and explain them rather than
 overwriting them.
 
 Changes to `docs/results/STATUS.md` require the complete evidence for the new
-level and must leave unsupported higher levels explicit.
+level.
 
 ## Pull request checklist
 

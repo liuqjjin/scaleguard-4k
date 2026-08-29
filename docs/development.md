@@ -263,7 +263,7 @@ Before changing `docs/results/STATUS.md`:
 - verify all hashes and non-mock flags;
 - review raw logs and failures;
 - confirm no metric is copied from an upstream paper; and
-- keep unsupported higher levels explicitly pending.
+- keep remaining scientific limitations explicit.
 
 Numerical tables need executable metric definitions and raw artifacts.
 

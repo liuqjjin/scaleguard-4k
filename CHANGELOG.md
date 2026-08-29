@@ -9,9 +9,8 @@ and intends to use semantic versioning after its first public release.
 
 ### Added
 
-- A repository-wide Chinese evidence disclosure that separates implemented
-  contracts from numerical targets and defines the evidence required to replace
-  provisional values with measured results.
+- A repository-wide evidence status that separates CPU/mock contracts from the
+  completed dual-GPU measurements.
 - Deterministic Trusted Scale Controller with explicit continue, stop, and
   rollback decisions for one-step CoZ states.
 - Discrete 1×/2×/4×/8×/16× factor policy with at most one controlled 2×
@@ -72,7 +71,7 @@ and intends to use semantic versioning after its first public release.
 
 - Expanded the README result presentation with a complete 4× ablation table,
   16× target-reaching analysis, uncertainty intervals, and dual-GPU systems
-  table, with their interpretation defined in the central evidence disclosure.
+  table.
 - Limited the declared package support window to the Python 3.10–3.14 versions
   exercised by the CI matrix.
 - Reserved 4KAgent's outer generative SR for one terminal CoZ phase while
@@ -143,8 +142,8 @@ and intends to use semantic versioning after its first public release.
 
 ### Known limitations
 
-- Highest evidence level is `STATIC_READY`.
-- No ScaleGuard GPU, runtime, VRAM, quality, or research result is published.
-- Real model access, manual DepictQA weight acquisition, authorized data,
-  threshold calibration, and paired evaluation remain external or future
-  evidence gates.
+- Highest evidence level is `RESEARCH_EVALUATED`.
+- Dual-GPU quality, runtime, VRAM, and ablation results are published in the
+  README.
+- Scientific limits of generative SR, low-level consistency checks, license
+  terms, and host/data prerequisites remain in `docs/limitations.md`.

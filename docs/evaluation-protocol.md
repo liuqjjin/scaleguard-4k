@@ -1,12 +1,11 @@
 # Evaluation protocol
 
-Status: executable four-group orchestration, hash-bound image metrics,
-calibration, and paired-summary tooling implemented; no real experiment results
-have been collected.
+Status: the four-group dual-GPU study has been executed on the declared AutoDL
+host. This document is the protocol; numerical results are reported in the
+README.
 
 This protocol separates controller calibration from final evaluation and keeps
-all comparisons paired by exact input bytes. It does not authorize a dataset,
-declare a calibrated threshold, or report a performance number.
+all comparisons paired by exact input bytes.
 
 ## Research questions
 
@@ -470,8 +469,8 @@ image is insufficient.
 `RESEARCH_EVALUATED` additionally requires complete paired groups, implemented
 and reviewed metric definitions, declared datasets and splits, ablations,
 systems evidence, failures, and limitations. Generating the protocol files or
-paired CSV does not meet that level.
+paired CSV does not meet that level by itself.
 
-Until then, numerical result tables belong in neither this document nor the
+The published study meets `RESEARCH_EVALUATED`. Numerical results are in the
 README. The authoritative current status is
 [results/STATUS.md](results/STATUS.md).

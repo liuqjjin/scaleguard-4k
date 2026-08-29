@@ -1,9 +1,10 @@
 # Reproduction
 
-ScaleGuard-4K currently supports reproduction of its static, CPU, mock, and
-process contracts. No retained project evidence yet shows a real 4KAgent run,
-a real CoZ run, dual-GPU integration, calibrated trusted-scale behavior, or
-research metrics. The highest supported project level is `STATIC_READY`.
+ScaleGuard-4K supports two reproduction tracks: the locked CPU/mock contract
+path and the completed dual-GPU research path. CPU/mock manifests stay at
+`STATIC_READY`. The highest supported project level is `RESEARCH_EVALUATED`.
+Published metrics, uncertainty intervals, and host-level GPU measurements are
+in the README.
 
 ## Evidence ladder
 
@@ -271,5 +272,5 @@ threshold mismatch does not support `SCALEGUARD_VALIDATED`.
 - Model and package licenses can restrict use even when every digest matches.
 
 The fixed source identities and issue review are in
-[upstream-audit.md](upstream-audit.md). Current claims and missing evidence are
-listed in [results/STATUS.md](results/STATUS.md).
+[upstream-audit.md](upstream-audit.md). Current claims and remaining
+limitations are listed in [results/STATUS.md](results/STATUS.md).

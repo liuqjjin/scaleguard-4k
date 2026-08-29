@@ -14,9 +14,8 @@ DepictQA is a transitive perception service already required by the selected
 source identity and lifetime are explicit; it is not a third core project.
 AgenticIR remains citation and lineage context only.
 
-The current public evidence level is `STATIC_READY`. This document describes
-implemented contracts and intended real-runtime boundaries, not a completed GPU
-reproduction.
+The current public evidence level is `RESEARCH_EVALUATED`. This document
+describes the implemented contracts and the completed dual-GPU runtime.
 
 ## Control and data flow
 
@@ -109,9 +108,8 @@ quality_gain = Q(candidate) - Q(bicubic(previous_trusted))
 ```
 
 The evaluator normalizes metric direction so larger is better. The bundled
-gradient score is a CPU contract proxy only. A PyIQA backend is available for
-real experiments, but its thresholds are not trusted until a matching
-calibration receipt exists.
+gradient score is a CPU contract proxy only. Research runs use the PyIQA
+backend and bind a matching calibration receipt.
 
 Cross-scale checks low-pass and resize the candidate back to the previous
 trusted dimensions, then record:
@@ -155,9 +153,9 @@ records `initialization_duration_seconds` from immediately before session
 construction until the models are ready. The adapter validates that value as a
 finite non-negative duration and binds it only into the first persistent scale
 step's worker metadata. Each step keeps its separate worker-reported
-`duration_seconds`, so later GPU evaluation can distinguish initialization from
-step execution without counting the load time again. These are instrumentation
-fields, not measured performance claims.
+`duration_seconds`, so evaluation can distinguish initialization from
+step execution without counting the load time again. These instrumentation
+fields are the source of the dual-GPU timing reported in the README.
 
 Each external leader owns a fresh POSIX session. A short post-leader grace
 permits ordinary shutdown; any remaining group members are terminated with
@@ -182,8 +180,9 @@ Production `upstream` mode requires a managed DepictQA launch command. A
 pre-existing TCP endpoint cannot prove ownership or shutdown, so it is not
 accepted for the two-GPU path.
 
-Actual device placement, peak VRAM, and cleanup effectiveness remain GPU
-measurements. Static phase events are not substitutes for those measurements.
+Actual device placement, peak VRAM, and cleanup effectiveness are GPU
+measurements recorded with the dual-GPU study. Static phase events are not
+substitutes for those measurements.
 
 ## Artifacts and evidence
 

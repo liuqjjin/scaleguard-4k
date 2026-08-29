@@ -34,6 +34,6 @@ preserved, never imputed.
   project or duplicating upstream implementations.
 - A legitimate ScaleGuard gate rollback remains an observation, including a
   rejected CoZ candidate or a final post-color gate rollback.
-- The harness and its receipts establish experiment integrity only. No GPU
-  metric or ablation conclusion is claimed until authorized data, model access,
-  and real attempt artifacts exist.
+- The harness and its receipts establish experiment integrity. The dual-GPU
+  ablation conclusions are reported in the README and depend on authorized
+  data, model access, and retained attempt artifacts.
