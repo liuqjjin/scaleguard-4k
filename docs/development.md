@@ -272,7 +272,7 @@ Numerical tables need executable metric definitions and raw artifacts.
 - Use relative repository links and portable commands.
 - Do not commit private absolute paths, hostnames, usernames, tokens, signed
   URLs, or account identifiers.
-- Distinguish implemented, tested, externally blocked, and planned behavior.
+- Distinguish run-level CPU/mock contracts from dual-GPU research evidence.
 - Update [CHANGELOG](../CHANGELOG.md) for user-visible changes.
 - Update [limitations](limitations.md) when a new risk is discovered.
 - Follow [SECURITY](../SECURITY.md) for sensitive reports.
